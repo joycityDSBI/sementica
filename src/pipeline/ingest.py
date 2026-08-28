@@ -260,7 +260,7 @@ def store_vector(page: dict) -> bool:
     try:
         result = _embed_model.models.embed_content(
             model=EMBED_MODEL_NAME,
-            contents=[body[:2000]],
+            contents=[body[:5000]],
         )
         vec = result.embeddings[0].values  # list[float]
         doc_id = str(uuid.uuid5(uuid.NAMESPACE_URL, meta.get("notion_url") or page["file"]))
@@ -268,7 +268,7 @@ def store_vector(page: dict) -> bool:
             "title":      meta.get("title", ""),
             "source_url": meta.get("notion_url", ""),
             "page_id":    meta.get("page_id", ""),
-            "text":       body[:1000],   # 검색 결과 미리보기용
+            "text":       body[:5000],   # 검색 결과 컨텍스트용 (5000자)
             "file":       page["file"],
         }
         # collection_name은 create_collection 시 이미 설정됨 — 중복 전달 금지

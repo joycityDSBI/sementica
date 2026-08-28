@@ -145,7 +145,7 @@ def semantic_search(embed_client, qdrant, query: str, limit: int = 5) -> list:
         p = h.payload or {}
         out.append({
             "title":   p.get("title", ""),
-            "text":    p.get("text", "")[:500],
+            "text":    p.get("text", "")[:2000],
             "score":   round(h.score, 4),
             "url":     p.get("source_url", ""),
         })
@@ -249,7 +249,7 @@ def generate_response(context: str, question: str, claude) -> str:
     prompt = f"""아래 컨텍스트를 바탕으로 질문에 답하세요. 컨텍스트에 없는 내용은 답하지 마세요.
 
 컨텍스트:
-{context[:2000]}
+{context[:5000]}
 
 질문: {question}
 
