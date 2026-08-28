@@ -271,11 +271,11 @@ def store_vector(page: dict) -> bool:
             "text":       body[:1000],   # 검색 결과 미리보기용
             "file":       page["file"],
         }
+        # collection_name은 create_collection 시 이미 설정됨 — 중복 전달 금지
         _qdrant_store.insert_vectors(
             vectors=[vec],
             ids=[doc_id],
             payloads=[payload],
-            collection_name=COLLECTION_NAME,
         )
         return True
     except Exception as e:
@@ -320,7 +320,8 @@ def store_graph(triplets: list, source_url: str) -> dict:
         nodes_created += 2 - list(node_cache.values()).count(subj_id) - list(node_cache.values()).count(obj_id)
 
         pred = t["predicate"]
-        rel_props = {"source_url": source_url}
+        # FalkorDB rel_type은 ASCII만 허용 → "REL" 고정, 한국어 이름은 속성으로 저장
+        rel_props = {"rel_name": pred["name"], "source_url": source_url}
         for k in ("condition", "order", "duration"):
             if k in pred:
                 rel_props[k] = pred[k]
@@ -329,7 +330,7 @@ def store_graph(triplets: list, source_url: str) -> dict:
             _falkordb.create_relationship(
                 start_node_id=subj_id,
                 end_node_id=obj_id,
-                rel_type=pred["name"],
+                rel_type="REL",
                 properties=rel_props,
             )
             edges_created += 1
