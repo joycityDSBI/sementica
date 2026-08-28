@@ -1,0 +1,479 @@
+"""
+Semantica 인제스천 파이프라인 — Week 2
+Notion 샘플 페이지 → Qdrant(벡터) + FalkorDB(그래프) 저장
+
+파이프라인:
+  .md 파일 → 텍스트 파싱
+    → 임베딩 (paraphrase-multilingual-mpnet-base-v2) → Qdrant 저장
+    → 타입 트리플 추출 (Claude Sonnet 4.6 on Vertex AI) → FalkorDB 저장
+
+사전 조건:
+  - Docker Desktop 실행 중
+  - docker-compose up -d (C:\\sementica\\docker-compose.yml)
+  - .env 파일 설정 완료
+
+사용법:
+  python src\\pipeline\\ingest.py              # 전체 샘플 인제스천
+  python src\\pipeline\\ingest.py --dry-run    # 연결 확인만 (저장 안 함)
+  python src\\pipeline\\ingest.py --reset      # 기존 데이터 삭제 후 재인제스천
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+import uuid
+from pathlib import Path
+
+# ─── .env 로드 ────────────────────────────────────────────────────────────────
+_env_path = Path(__file__).parent.parent.parent / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
+
+# ─── 경로 설정 ────────────────────────────────────────────────────────────────
+ROOT_DIR     = Path(__file__).parent.parent.parent
+SAMPLES_DIR  = ROOT_DIR / "data" / "notion_samples"
+LOGS_DIR     = ROOT_DIR / "data" / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ─── Qdrant / FalkorDB 설정 ───────────────────────────────────────────────────
+QDRANT_URL       = "http://localhost:6333"
+FALKORDB_HOST    = "localhost"
+FALKORDB_PORT    = 6379
+COLLECTION_NAME  = "joycity_pages"
+GRAPH_NAME       = "joycity_kg"
+EMBED_MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2"
+EMBED_DIM        = 768
+
+# ─── Vertex AI 설정 ───────────────────────────────────────────────────────────
+GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+LOCATION    = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
+MODEL       = os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@default")
+
+# ─── 트리플 추출 프롬프트 (week1_verify.py 와 동일) ─────────────────────────
+EXTRACT_PROMPT = """\
+다음 텍스트에서 엔티티-관계-엔티티 트리플을 추출하세요.
+담당자, 팀, 업무, 정책, 프로젝트, 시스템 간의 명시적 관계를 추출합니다.
+
+각 트리플은 아래 형식으로 추출하세요:
+- subject / object: name(이름)과 type(엔티티 종류)을 포함
+- predicate: name(관계 동사), 그리고 알 수 있다면 condition(조건), order(순서, 정수), duration(소요시간)
+
+엔티티 type 예시: Person(사람), Team(팀), Process(프로세스/업무), System(시스템), Policy(정책/규정), Document(문서), Role(역할)
+관계 name 예시: 담당, 소속, 승인, 운영, 참여, 협업, 보고, 관리, 포함, 사용
+
+텍스트:
+{text}
+
+JSON 배열로만 응답하세요 (설명 없이):
+[
+  {{
+    "subject":   {{"name": "엔티티A", "type": "Team"}},
+    "predicate": {{"name": "담당", "condition": "점검일 한정", "order": 1}},
+    "object":    {{"name": "엔티티B", "type": "Process", "duration": "30분"}}
+  }}
+]
+
+조건/순서/소요시간이 없으면 해당 키를 생략하세요.
+트리플이 없으면 빈 배열 [] 반환."""
+
+
+# ─── 클라이언트 초기화 ────────────────────────────────────────────────────────
+_llm_client    = None
+_embed_model   = None
+_qdrant_store  = None
+_falkordb      = None
+
+
+def init_llm():
+    global _llm_client
+    if _llm_client:
+        return True
+    try:
+        from anthropic import AnthropicVertex
+        _llm_client = AnthropicVertex(project_id=GCP_PROJECT, region=LOCATION)
+        print(f"  ✅ Claude on Vertex AI — {MODEL}")
+        return True
+    except Exception as e:
+        print(f"  ❌ Claude 초기화 실패: {e}")
+        return False
+
+
+def init_embed():
+    global _embed_model
+    if _embed_model:
+        return True
+    try:
+        from sentence_transformers import SentenceTransformer
+        print(f"  ⏳ 임베딩 모델 로드 중: {EMBED_MODEL_NAME}")
+        _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
+        print(f"  ✅ 임베딩 모델 로드 완료 (dim={EMBED_DIM})")
+        return True
+    except Exception as e:
+        print(f"  ❌ 임베딩 모델 로드 실패: {e}")
+        return False
+
+
+def init_qdrant(reset: bool = False):
+    global _qdrant_store
+    try:
+        from semantica.vector_store.qdrant_store import QdrantStore
+        store = QdrantStore(url=QDRANT_URL)
+        store.connect()
+
+        if reset:
+            try:
+                # 기존 컬렉션 삭제 (reset 모드)
+                from qdrant_client import QdrantClient
+                qc = QdrantClient(url=QDRANT_URL)
+                if COLLECTION_NAME in [c.name for c in qc.get_collections().collections]:
+                    qc.delete_collection(COLLECTION_NAME)
+                    print(f"  🗑️  Qdrant 컬렉션 삭제: {COLLECTION_NAME}")
+            except Exception:
+                pass
+
+        store.create_collection(COLLECTION_NAME, vector_size=EMBED_DIM, distance="Cosine")
+        _qdrant_store = store
+        print(f"  ✅ Qdrant 연결 완료 — 컬렉션: {COLLECTION_NAME}")
+        return True
+    except Exception as e:
+        print(f"  ❌ Qdrant 연결 실패: {e}")
+        print(f"     → Docker Desktop 실행 후 'docker-compose up -d' 확인")
+        return False
+
+
+def init_falkordb(reset: bool = False):
+    global _falkordb
+    try:
+        from semantica.graph_store.falkordb_store import FalkorDBStore
+        store = FalkorDBStore(
+            host=FALKORDB_HOST,
+            port=FALKORDB_PORT,
+            graph_name=GRAPH_NAME,
+        )
+        store.connect()
+
+        if reset:
+            try:
+                store.delete_graph(GRAPH_NAME)
+                print(f"  🗑️  FalkorDB 그래프 삭제: {GRAPH_NAME}")
+                store.connect()
+            except Exception:
+                pass
+
+        store.select_graph(GRAPH_NAME)
+        _falkordb = store
+        print(f"  ✅ FalkorDB 연결 완료 — 그래프: {GRAPH_NAME}")
+        return True
+    except Exception as e:
+        print(f"  ❌ FalkorDB 연결 실패: {e}")
+        print(f"     → Docker Desktop 실행 후 'docker-compose up -d' 확인")
+        return False
+
+
+# ─── 파싱 유틸 ───────────────────────────────────────────────────────────────
+def parse_md(path: Path) -> dict:
+    """마크다운 파일에서 frontmatter + body 파싱"""
+    content = path.read_text(encoding="utf-8")
+    meta = {"title": path.stem, "notion_url": "", "page_id": ""}
+    body = content
+    if content.startswith("---"):
+        end = content.find("---", 3)
+        if end > 0:
+            for line in content[3:end].splitlines():
+                if ":" in line:
+                    k, _, v = line.partition(":")
+                    meta[k.strip()] = v.strip()
+            body = content[end + 3:].strip()
+    return {"meta": meta, "body": body, "file": str(path)}
+
+
+# ─── 트리플 추출 ─────────────────────────────────────────────────────────────
+def _norm_node(val) -> dict:
+    if isinstance(val, dict):
+        return {"name": str(val.get("name", "")), "type": str(val.get("type", "Unknown"))}
+    return {"name": str(val), "type": "Unknown"}
+
+
+def _norm_pred(val) -> dict:
+    if isinstance(val, dict):
+        pred = {"name": str(val.get("name", ""))}
+        for k in ("condition", "duration"):
+            if k in val:
+                pred[k] = str(val[k])
+        if "order" in val:
+            try:
+                pred["order"] = int(val["order"])
+            except (ValueError, TypeError):
+                pass
+        return pred
+    return {"name": str(val)}
+
+
+def extract_triplets(text: str) -> list:
+    """Claude Sonnet 4.6로 타입 있는 트리플 추출"""
+    if not _llm_client:
+        return []
+    raw = ""
+    try:
+        resp = _llm_client.messages.create(
+            model=MODEL,
+            max_tokens=2048,
+            messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=text[:3000])}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list):
+            return []
+        result = []
+        for t in parsed:
+            if isinstance(t, dict):
+                result.append({
+                    "subject":   _norm_node(t.get("subject", "")),
+                    "predicate": _norm_pred(t.get("predicate", "")),
+                    "object":    _norm_node(t.get("object", "")),
+                })
+        return result
+    except Exception:
+        return []
+
+
+# ─── 벡터 저장 ───────────────────────────────────────────────────────────────
+def store_vector(page: dict) -> bool:
+    """페이지 임베딩 → Qdrant 저장"""
+    body = page["body"]
+    if not body.strip():
+        return False
+    meta = page["meta"]
+    try:
+        vec = _embed_model.encode(body[:2000], normalize_embeddings=True).tolist()
+        doc_id = str(uuid.uuid5(uuid.NAMESPACE_URL, meta.get("notion_url") or page["file"]))
+        payload = {
+            "title":      meta.get("title", ""),
+            "source_url": meta.get("notion_url", ""),
+            "page_id":    meta.get("page_id", ""),
+            "text":       body[:1000],   # 검색 결과 미리보기용
+            "file":       page["file"],
+        }
+        _qdrant_store.insert_vectors(
+            vectors=[vec],
+            ids=[doc_id],
+            payloads=[payload],
+            collection_name=COLLECTION_NAME,
+        )
+        return True
+    except Exception as e:
+        print(f"     ⚠️  벡터 저장 실패: {e}")
+        return False
+
+
+# ─── 그래프 저장 ─────────────────────────────────────────────────────────────
+def store_graph(triplets: list, source_url: str) -> dict:
+    """타입 트리플 → FalkorDB 노드/엣지 저장"""
+    nodes_created = 0
+    edges_created = 0
+
+    # 노드 캐시 (같은 이름+타입 → 같은 node_id)
+    node_cache = {}
+
+    def get_or_create_node(entity: dict) -> int:
+        key = (entity["name"], entity["type"])
+        if key in node_cache:
+            return node_cache[key]
+        try:
+            result = _falkordb.create_node(
+                labels=[entity["type"]],
+                properties={
+                    "name":       entity["name"],
+                    "source_url": source_url,
+                },
+            )
+            node_id = result.get("id") or result.get("node_id") or 0
+            node_cache[key] = node_id
+            return node_id
+        except Exception as e:
+            print(f"       노드 생성 실패 ({entity['name']}): {e}")
+            return -1
+
+    for t in triplets:
+        subj_id = get_or_create_node(t["subject"])
+        obj_id  = get_or_create_node(t["object"])
+        if subj_id < 0 or obj_id < 0:
+            continue
+
+        nodes_created += 2 - list(node_cache.values()).count(subj_id) - list(node_cache.values()).count(obj_id)
+
+        pred = t["predicate"]
+        rel_props = {"source_url": source_url}
+        for k in ("condition", "order", "duration"):
+            if k in pred:
+                rel_props[k] = pred[k]
+
+        try:
+            _falkordb.create_relationship(
+                start_node_id=subj_id,
+                end_node_id=obj_id,
+                rel_type=pred["name"],
+                properties=rel_props,
+            )
+            edges_created += 1
+        except Exception as e:
+            print(f"       엣지 생성 실패 ({pred['name']}): {e}")
+
+    return {"nodes": len(node_cache), "edges": edges_created}
+
+
+# ─── 페이지 인제스천 ─────────────────────────────────────────────────────────
+def ingest_page(path: Path, dry_run: bool = False) -> dict:
+    page = parse_md(path)
+    meta = page["meta"]
+    body = page["body"]
+    word_count = len(body.split())
+
+    print(f"\n  📄 {path.name}  ({word_count} 단어)")
+    print(f"     URL: {meta.get('notion_url', '-')}")
+
+    if word_count < 50:
+        print(f"     ⚠️  텍스트 부족 — 건너뜀")
+        return {"file": str(path), "skipped": True, "reason": "텍스트 부족"}
+
+    result = {
+        "file":       str(path),
+        "title":      meta.get("title", ""),
+        "source_url": meta.get("notion_url", ""),
+        "word_count": word_count,
+        "skipped":    False,
+    }
+
+    if not dry_run:
+        # 1. 벡터 저장
+        ok = store_vector(page)
+        result["vector_stored"] = ok
+        print(f"     벡터: {'✅ 저장' if ok else '❌ 실패'}")
+
+        # 2. 트리플 추출
+        triplets = extract_triplets(body)
+        result["triplet_count"] = len(triplets)
+        print(f"     트리플: {len(triplets)}개 추출")
+
+        # 3. 그래프 저장
+        if triplets:
+            stats = store_graph(triplets, meta.get("notion_url", ""))
+            result["graph"] = stats
+            print(f"     그래프: 노드 {stats['nodes']}개, 엣지 {stats['edges']}개 저장")
+        else:
+            result["graph"] = {"nodes": 0, "edges": 0}
+            print(f"     그래프: 트리플 없음 — 건너뜀")
+
+        # API 레이트 리밋 준수
+        time.sleep(0.5)
+    else:
+        print(f"     [DRY-RUN] 저장 없이 확인만")
+
+    return result
+
+
+# ─── 메인 ─────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description="Semantica 인제스천 파이프라인")
+    parser.add_argument("--dry-run", action="store_true", help="연결 확인만 (저장 안 함)")
+    parser.add_argument("--reset",   action="store_true", help="기존 데이터 삭제 후 재인제스천")
+    args = parser.parse_args()
+
+    print("\n" + "=" * 60)
+    print("🚀 Semantica 인제스천 파이프라인")
+    print("=" * 60)
+
+    # ── 클라이언트 초기화 ───────────────────────────────────────────────────
+    print("\n[1/4] 클라이언트 초기화")
+    ok_llm    = init_llm()
+    ok_embed  = init_embed()
+    ok_qdrant = init_qdrant(reset=args.reset) if not args.dry_run else True
+    ok_falkor = init_falkordb(reset=args.reset) if not args.dry_run else True
+
+    if args.dry_run:
+        print("\n  [DRY-RUN 모드] Docker 연결 테스트만 수행합니다.")
+        # 간단히 연결만 시도
+        try:
+            from qdrant_client import QdrantClient
+            qc = QdrantClient(url=QDRANT_URL, timeout=3)
+            qc.get_collections()
+            print("  ✅ Qdrant 연결 확인")
+        except Exception as e:
+            print(f"  ❌ Qdrant 미연결: {e}")
+
+        try:
+            import redis
+            r = redis.Redis(host=FALKORDB_HOST, port=FALKORDB_PORT, socket_timeout=3)
+            r.ping()
+            print("  ✅ FalkorDB 연결 확인")
+        except Exception as e:
+            print(f"  ❌ FalkorDB 미연결: {e}")
+
+        print("\n  ✅ 인프라 준비 확인 완료. --dry-run 없이 실행하면 인제스천이 시작됩니다.")
+        return
+
+    if not (ok_llm and ok_embed and ok_qdrant and ok_falkor):
+        print("\n❌ 초기화 실패 — 위 오류를 확인하고 다시 실행하세요.")
+        sys.exit(1)
+
+    # ── 파일 목록 수집 ──────────────────────────────────────────────────────
+    md_files = [f for f in SAMPLES_DIR.glob("*.md")
+                if f.name not in ("README.md", "golden_set.md")]
+    md_files.sort()
+
+    print(f"\n[2/4] 인제스천 대상: {len(md_files)}개 파일")
+    print(f"       {SAMPLES_DIR}")
+
+    # ── 인제스천 실행 ────────────────────────────────────────────────────────
+    print(f"\n[3/4] 페이지 인제스천 시작")
+    results = []
+    for f in md_files:
+        r = ingest_page(f, dry_run=args.dry_run)
+        results.append(r)
+
+    # ── 결과 요약 ────────────────────────────────────────────────────────────
+    print(f"\n[4/4] 결과 요약")
+    print("=" * 60)
+    stored    = [r for r in results if not r.get("skipped") and r.get("vector_stored")]
+    skipped   = [r for r in results if r.get("skipped")]
+    total_tri = sum(r.get("triplet_count", 0) for r in results)
+    total_nod = sum(r.get("graph", {}).get("nodes", 0) for r in results)
+    total_edg = sum(r.get("graph", {}).get("edges", 0) for r in results)
+
+    print(f"  페이지:  {len(stored)}/{len(md_files)} 벡터 저장 완료")
+    print(f"  건너뜀:  {len(skipped)}개 (텍스트 부족)")
+    print(f"  트리플:  {total_tri}개 추출")
+    print(f"  그래프:  노드 {total_nod}개 / 엣지 {total_edg}개 저장")
+
+    # ── 로그 저장 ────────────────────────────────────────────────────────────
+    log = {
+        "summary": {
+            "total": len(md_files),
+            "stored": len(stored),
+            "skipped": len(skipped),
+            "triplets": total_tri,
+            "nodes": total_nod,
+            "edges": total_edg,
+        },
+        "results": results,
+    }
+    log_path = LOGS_DIR / "ingest_results.json"
+    log_path.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n  결과 저장: {log_path}")
+    print(f"\n  {'✅ 인제스천 완료' if stored else '❌ 저장된 페이지 없음'}")
+
+
+if __name__ == "__main__":
+    main()
