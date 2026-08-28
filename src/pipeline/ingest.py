@@ -4,7 +4,7 @@ Notion 샘플 페이지 → Qdrant(벡터) + FalkorDB(그래프) 저장
 
 파이프라인:
   .md 파일 → 텍스트 파싱
-    → 임베딩 (paraphrase-multilingual-mpnet-base-v2) → Qdrant 저장
+    → 임베딩 (Vertex AI text-multilingual-embedding-002) → Qdrant 저장
     → 타입 트리플 추출 (Claude Sonnet 4.6 on Vertex AI) → FalkorDB 저장
 
 사전 조건:
@@ -47,7 +47,8 @@ FALKORDB_HOST    = "localhost"
 FALKORDB_PORT    = 6379
 COLLECTION_NAME  = "joycity_pages"
 GRAPH_NAME       = "joycity_kg"
-EMBED_MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2"
+# Vertex AI 다국어 임베딩 (한국어 지원, 768차원)
+EMBED_MODEL_NAME = "text-multilingual-embedding-002"
 EMBED_DIM        = 768
 
 # ─── Vertex AI 설정 ───────────────────────────────────────────────────────────
@@ -109,13 +110,14 @@ def init_embed():
     if _embed_model:
         return True
     try:
-        from sentence_transformers import SentenceTransformer
-        print(f"  ⏳ 임베딩 모델 로드 중: {EMBED_MODEL_NAME}")
-        _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
-        print(f"  ✅ 임베딩 모델 로드 완료 (dim={EMBED_DIM})")
+        from vertexai.language_models import TextEmbeddingModel
+        import vertexai
+        vertexai.init(project=GCP_PROJECT, location=LOCATION)
+        _embed_model = TextEmbeddingModel.from_pretrained(EMBED_MODEL_NAME)
+        print(f"  ✅ Vertex AI 임베딩 초기화 — {EMBED_MODEL_NAME} (dim={EMBED_DIM})")
         return True
     except Exception as e:
-        print(f"  ❌ 임베딩 모델 로드 실패: {e}")
+        print(f"  ❌ Vertex AI 임베딩 초기화 실패: {e}")
         return False
 
 
@@ -257,7 +259,8 @@ def store_vector(page: dict) -> bool:
         return False
     meta = page["meta"]
     try:
-        vec = _embed_model.encode(body[:2000], normalize_embeddings=True).tolist()
+        embeddings = _embed_model.get_embeddings([body[:2000]])
+        vec = embeddings[0].values  # list[float]
         doc_id = str(uuid.uuid5(uuid.NAMESPACE_URL, meta.get("notion_url") or page["file"]))
         payload = {
             "title":      meta.get("title", ""),
@@ -420,6 +423,16 @@ def main():
             print("  ✅ FalkorDB 연결 확인")
         except Exception as e:
             print(f"  ❌ FalkorDB 미연결: {e}")
+
+        try:
+            from vertexai.language_models import TextEmbeddingModel
+            import vertexai
+            vertexai.init(project=GCP_PROJECT, location=LOCATION)
+            m = TextEmbeddingModel.from_pretrained(EMBED_MODEL_NAME)
+            test = m.get_embeddings(["테스트"])
+            print(f"  ✅ Vertex AI 임베딩 확인 (dim={len(test[0].values)})")
+        except Exception as e:
+            print(f"  ❌ Vertex AI 임베딩 미연결: {e}")
 
         print("\n  ✅ 인프라 준비 확인 완료. --dry-run 없이 실행하면 인제스천이 시작됩니다.")
         return
