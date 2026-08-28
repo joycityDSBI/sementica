@@ -18,6 +18,17 @@ services:
       - falkordb_data:/data
     restart: unless-stopped
 
+  falkordb-browser:
+    image: falkordb/falkordb-browser:latest
+    container_name: sementica-falkordb-browser
+    ports:
+      - "3000:3000"   # 웹 UI
+    environment:
+      - FALKORDB_URL=redis://falkordb:6379
+    depends_on:
+      - falkordb
+    restart: unless-stopped
+
 volumes:
   qdrant_data:
   falkordb_data:
