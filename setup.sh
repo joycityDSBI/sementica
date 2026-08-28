@@ -18,12 +18,24 @@ PYTHON=$(command -v python3 || command -v python)
 PY_VER=$($PYTHON --version 2>&1)
 echo "  Python: $PY_VER  ($PYTHON)"
 
-# ── 2. pip 의존성 설치 ────────────────────────────────────────────────────────
+# ── 2. 가상환경 생성 + pip 의존성 설치 ───────────────────────────────────────
 echo ""
-echo "[2/5] Python 패키지 설치"
-$PYTHON -m pip install --upgrade pip --quiet
-$PYTHON -m pip install -r "$PROJECT_DIR/requirements.txt"
+echo "[2/5] Python 패키지 설치 (venv)"
+VENV_DIR="$PROJECT_DIR/.venv"
+
+if [ ! -d "$VENV_DIR" ]; then
+    echo "  가상환경 생성: $VENV_DIR"
+    $PYTHON -m venv "$VENV_DIR"
+fi
+
+# venv 내 pip/python 사용
+PIP="$VENV_DIR/bin/pip"
+PYTHON="$VENV_DIR/bin/python"
+
+"$PIP" install --upgrade pip --quiet
+"$PIP" install -r "$PROJECT_DIR/requirements.txt"
 echo "  ✅ 패키지 설치 완료"
+echo "  ℹ️  이후 실행 시: source .venv/bin/activate"
 
 # ── 3. .env 파일 확인 ─────────────────────────────────────────────────────────
 echo ""
@@ -78,6 +90,9 @@ fi
 cd "$PROJECT_DIR"
 $COMPOSE_CMD up -d
 
+# venv 재설정 (docker 확인 블록에서 사용)
+PYTHON="$VENV_DIR/bin/python"
+
 echo ""
 echo "  ⏳ 컨테이너 준비 대기 (5초)..."
 sleep 5
@@ -107,12 +122,14 @@ echo "✅ 셋업 완료"
 echo ""
 echo "다음 명령으로 인제스천을 실행하세요:"
 echo ""
+echo "  source .venv/bin/activate"
+echo ""
 echo "  # 연결 확인만"
-echo "  python3 src/pipeline/ingest.py --dry-run"
+echo "  python src/pipeline/ingest.py --dry-run"
 echo ""
 echo "  # 실제 인제스천"
-echo "  python3 src/pipeline/ingest.py"
+echo "  python src/pipeline/ingest.py"
 echo ""
 echo "  # 기존 데이터 초기화 후 재인제스천"
-echo "  python3 src/pipeline/ingest.py --reset"
+echo "  python src/pipeline/ingest.py --reset"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
