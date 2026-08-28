@@ -110,14 +110,14 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     """
     vec = _embed(query)
     qc = _get_qdrant()
-    hits = qc.search(
+    result = qc.query_points(
         collection_name=COLLECTION_NAME,
-        query_vector=vec,
+        query=vec,
         limit=limit,
         with_payload=True,
     )
     results = []
-    for h in hits:
+    for h in result.points:
         p = h.payload or {}
         results.append({
             "title":        p.get("title", ""),
