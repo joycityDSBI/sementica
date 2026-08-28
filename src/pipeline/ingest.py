@@ -110,10 +110,9 @@ def init_embed():
     if _embed_model:
         return True
     try:
-        from vertexai.language_models import TextEmbeddingModel
-        import vertexai
-        vertexai.init(project=GCP_PROJECT, location=LOCATION)
-        _embed_model = TextEmbeddingModel.from_pretrained(EMBED_MODEL_NAME)
+        from google import genai
+        client = genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
+        _embed_model = client
         print(f"  ✅ Vertex AI 임베딩 초기화 — {EMBED_MODEL_NAME} (dim={EMBED_DIM})")
         return True
     except Exception as e:
@@ -259,8 +258,11 @@ def store_vector(page: dict) -> bool:
         return False
     meta = page["meta"]
     try:
-        embeddings = _embed_model.get_embeddings([body[:2000]])
-        vec = embeddings[0].values  # list[float]
+        result = _embed_model.models.embed_content(
+            model=EMBED_MODEL_NAME,
+            contents=[body[:2000]],
+        )
+        vec = result.embeddings[0].values  # list[float]
         doc_id = str(uuid.uuid5(uuid.NAMESPACE_URL, meta.get("notion_url") or page["file"]))
         payload = {
             "title":      meta.get("title", ""),
@@ -425,12 +427,10 @@ def main():
             print(f"  ❌ FalkorDB 미연결: {e}")
 
         try:
-            from vertexai.language_models import TextEmbeddingModel
-            import vertexai
-            vertexai.init(project=GCP_PROJECT, location=LOCATION)
-            m = TextEmbeddingModel.from_pretrained(EMBED_MODEL_NAME)
-            test = m.get_embeddings(["테스트"])
-            print(f"  ✅ Vertex AI 임베딩 확인 (dim={len(test[0].values)})")
+            from google import genai
+            client = genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
+            test = client.models.embed_content(model=EMBED_MODEL_NAME, contents=["테스트"])
+            print(f"  ✅ Vertex AI 임베딩 확인 (dim={len(test.embeddings[0].values)})")
         except Exception as e:
             print(f"  ❌ Vertex AI 임베딩 미연결: {e}")
 
