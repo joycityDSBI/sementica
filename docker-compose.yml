@@ -24,7 +24,7 @@ services:
     ports:
       - "3000:3000"   # 웹 UI
     environment:
-      - FALKORDB_URL=redis://falkordb:6379
+      - FALKORDB_URL=falkor://falkordb:6379
     depends_on:
       - falkordb
     restart: unless-stopped
