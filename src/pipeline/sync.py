@@ -325,12 +325,57 @@ def save_sync_state(state_path: Path, state: dict):
 
 # ─── Notion 수정 페이지 조회 ──────────────────────────────────────────────────
 def fetch_modified_pages(client, token: str, since_iso: str) -> list:
-    """last_edited_time > since_iso 인 페이지만 반환 (최신순 정렬)"""
+    """last_edited_time > since_iso 인 전체 페이지 반환 (최신순 정렬)"""
     modified = []
     cursor   = None
     batch    = 1
     while True:
         body = {
+            "filter": {"value": "page", "property": "object"},
+            "sort":   {"direction": "descending", "timestamp": "last_edited_time"},
+            "page_size": 100,
+        }
+        if cursor:
+            body["start_cursor"] = cursor
+        resp = client.post(
+            "https://api.notion.com/v1/search",
+            headers=notion_headers(token),
+            json=body,
+        )
+        resp.raise_for_status()
+        time.sleep(RATE_LIMIT_DELAY)
+        data    = resp.json()
+        results = data.get("results", [])
+
+        stop = False
+        added_this_batch = 0
+        for page in results:
+            last_edited = page.get("last_edited_time", "")
+            if last_edited <= since_iso:
+                stop = True
+                break
+            modified.append(page)
+            added_this_batch += 1
+
+        print(f"    배치 {batch:02d}: {len(results)}개 조회 → {added_this_batch}개 수정됨 (누적 {len(modified)}개)"
+              + (" ← 기준 시각 도달, 중단" if stop else ""))
+        batch += 1
+
+        if stop or not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+
+    return modified
+
+
+def fetch_modified_pages_by_keyword(client, token: str, since_iso: str, keyword: str) -> list:
+    """Notion 검색 API로 keyword 포함 페이지만 조회 후 since_iso 이후 수정된 것만 반환"""
+    modified = []
+    cursor   = None
+    batch    = 1
+    while True:
+        body = {
+            "query":  keyword,
             "filter": {"value": "page", "property": "object"},
             "sort":   {"direction": "descending", "timestamp": "last_edited_time"},
             "page_size": 100,
@@ -418,17 +463,14 @@ def main():
     keyword = args.search.strip()
     print(f"\n[2/4] Notion에서 수정 페이지 조회 중...")
     if keyword:
-        print(f"   제목 필터: '{keyword}'")
+        print(f"   검색 키워드: '{keyword}' (Notion 검색 API 사용)")
     with httpx.Client(timeout=60) as notion_client:
-        modified_pages = fetch_modified_pages(notion_client, token, since_iso)
-        total_found = len(modified_pages)
-
-        # 제목 키워드 필터 적용
         if keyword:
-            modified_pages = [p for p in modified_pages if keyword in page_title(p)]
-            print(f"  📋 수정 페이지 {total_found}개 발견 → 제목 필터 후 {len(modified_pages)}개")
+            # 키워드로 먼저 좁힌 뒤 시간 필터 적용 (전체 조회 불필요)
+            modified_pages = fetch_modified_pages_by_keyword(notion_client, token, since_iso, keyword)
         else:
-            print(f"  📋 {len(modified_pages)}개 수정 페이지 발견")
+            modified_pages = fetch_modified_pages(notion_client, token, since_iso)
+        print(f"  📋 {len(modified_pages)}개 수정 페이지 발견")
 
         if not modified_pages:
             print("\n  ✅ 새로 수정된 페이지 없음 — 동기화 완료")
