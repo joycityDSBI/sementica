@@ -16,6 +16,12 @@ services:
       - "6379:6379"   # Redis 호환 포트
     volumes:
       - falkordb_data:/data
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --save 3600 1
+      --save 300 100
     restart: unless-stopped
 
   falkordb-browser:
