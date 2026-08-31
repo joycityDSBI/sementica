@@ -61,15 +61,26 @@ def fetch_page_meta(client: httpx.Client, token: str, page_id: str) -> dict:
     return resp.json()
 
 
-def fetch_all_pages(client: httpx.Client, token: str) -> list:
-    """API 권한이 있는 모든 페이지를 페이지네이션으로 수집"""
+def fetch_all_pages(client: httpx.Client, token: str, limit: int = 0) -> list:
+    """API 권한이 있는 모든 페이지를 페이지네이션으로 수집
+    limit > 0 이면 해당 수에 도달하면 API 호출 즉시 중단
+    """
     pages = []
     cursor = None
     page_num = 1
     while True:
+        # 남은 수집 필요량 계산
+        if limit > 0:
+            remaining = limit - len(pages)
+            if remaining <= 0:
+                break
+            page_size = min(100, remaining)
+        else:
+            page_size = 100
+
         body = {
             "filter": {"value": "page", "property": "object"},
-            "page_size": 100,
+            "page_size": page_size,
         }
         if cursor:
             body["start_cursor"] = cursor
@@ -85,9 +96,13 @@ def fetch_all_pages(client: httpx.Client, token: str) -> list:
 
         results = data.get("results", [])
         pages.extend(results)
-        print(f"  페이지 {page_num}: {len(results)}개 수집 (누적 {len(pages)}개)")
+        print(f"  페이지 {page_num}: {len(results)}개 수집 (누적 {len(pages)}개)"
+              + (f" / 목표 {limit}개" if limit else ""))
 
         if not data.get("has_more"):
+            break
+        if limit > 0 and len(pages) >= limit:
+            print(f"  ✅ 목표 {limit}개 도달 — 수집 완료")
             break
         cursor = data.get("next_cursor")
         page_num += 1
@@ -295,12 +310,14 @@ def main():
                 print()
 
         else:
-            # 전체 수집
-            print("\n🌐 API 권한 내 모든 페이지 수집 중...")
-            pages = fetch_all_pages(client, token)
-            print(f"\n   총 {len(pages)}개 페이지 발견\n")
-            limit = args.limit or len(pages)
-            for i, page in enumerate(pages[:limit], 1):
+            # 전체 수집 (limit 있으면 API 호출 단계에서 중단)
+            if args.limit:
+                print(f"\n🌐 최대 {args.limit}개 페이지 수집 중...")
+            else:
+                print("\n🌐 API 권한 내 모든 페이지 수집 중...")
+            pages = fetch_all_pages(client, token, limit=args.limit)
+            print(f"\n   총 {len(pages)}개 페이지 수집 완료\n")
+            for i, page in enumerate(pages, 1):
                 results.append(save_page(client, token, page, i, output_dir))
                 print()
 
