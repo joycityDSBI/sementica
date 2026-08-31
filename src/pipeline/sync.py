@@ -50,7 +50,7 @@ from notion_fetch import (
     notion_headers, fetch_blocks_recursive, page_title,
     RATE_LIMIT_DELAY,
 )
-from semantica_helper import merge_node, extract_with_fallback
+from semantica_helper import merge_node, extract_with_fallback, is_decision_triplet, record_decision_node
 
 # DB 로거 (POSTGRES_URL 없으면 no-op)
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
@@ -312,6 +312,10 @@ def sync_page(
                 rel_type="REL", properties=props,
             )
             edges_created += 1
+
+            # 의사결정 트리플이면 :Decision 노드로도 기록
+            if is_decision_triplet(t):
+                record_decision_node(graph, t, source_url)
         except Exception:
             pass
 

@@ -27,7 +27,7 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from semantica_helper import merge_node, extract_with_fallback
+from semantica_helper import merge_node, extract_with_fallback, is_decision_triplet, record_decision_node
 
 # ─── .env 로드 ────────────────────────────────────────────────────────────────
 _env_path = Path(__file__).parent.parent.parent / ".env"
@@ -360,6 +360,10 @@ def store_graph(triplets: list, source_url: str) -> dict:
                 properties=rel_props,
             )
             edges_created += 1
+
+            # 의사결정 트리플이면 :Decision 노드로도 기록
+            if is_decision_triplet(t):
+                record_decision_node(_falkordb, t, source_url)
         except Exception as e:
             print(f"       엣지 생성 실패 ({pred['name']}): {e}")
 

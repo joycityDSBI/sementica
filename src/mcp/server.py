@@ -113,8 +113,10 @@ except Exception:
 sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
 try:
     from semantica_helper import find_shortest_path as _find_path
+    from semantica_helper import trace_decision_chain as _trace_decision
 except Exception:
     _find_path = None
+    _trace_decision = None
 
 # ─── FastMCP 서버 ─────────────────────────────────────────────────────────────
 from fastmcp import FastMCP
@@ -125,7 +127,9 @@ mcp = FastMCP(
         "JoyCity Notion 지식 그래프 검색 서버입니다. "
         "담당자, 팀, 프로세스, 정책 등 업무 관련 정보를 검색할 수 있습니다. "
         "semantic_search로 의미 기반 검색, graph_search로 관계 탐색, "
-        "hybrid_search로 두 가지를 결합한 검색을 수행하세요."
+        "hybrid_search로 두 가지를 결합한 검색을 수행하세요. "
+        "path_search로 두 엔티티 간 최단 경로를, "
+        "decision_trace로 의사결정 인과 체인을 탐색할 수 있습니다."
     ),
 )
 
@@ -376,6 +380,51 @@ def path_search(start_entity: str, end_entity: str, max_hops: int = 6) -> dict[s
             dept=DEPT_NAME, tool="path_search",
             query=f"{start_entity} → {end_entity}",
             result_count=1 if (_result and _result.get("found")) else 0,
+            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+        )
+
+
+@mcp.tool()
+def decision_trace(entity: str, max_depth: int = 4) -> dict[str, Any]:
+    """
+    특정 엔티티(사람, 팀, 프로세스 등)와 관련된 의사결정 체인을 추적합니다.
+    "A 프로세스 승인 경위는?", "운영팀이 내린 결정들은?" 같은 질문에 사용하세요.
+
+    의사결정 체인 탐색 원리:
+      - 인제스천/동기화 시점에 '승인', '결정', '채택' 등 결정 키워드가 포함된 트리플은
+        :Decision 노드로 별도 기록됩니다.
+      - 이전 결정의 결과(outcome)가 다음 결정의 주체(subject)와 같으면
+        LED_TO 엣지로 인과 관계가 자동 연결됩니다.
+
+    Args:
+        entity:    탐색할 엔티티 이름 (예: "운영팀", "점검 프로세스", "김도형")
+        max_depth: LED_TO 인과 체인 탐색 최대 깊이 (기본값: 4)
+
+    Returns:
+        {
+          entity, found,
+          decisions: [{decision_id, subject, action, outcome, source_url, ts,
+                       leads_to: [...], led_by: [...]}],
+          chain_summary: ["주체 → 행위 → 결과", ...]
+        }
+    """
+    _t0 = time.time()
+    _err = None
+    _result = None
+    try:
+        if _trace_decision is None:
+            return {"entity": entity, "found": False,
+                    "error": "decision_trace 모듈을 로드할 수 없습니다"}
+        graph = _get_falkordb()
+        _result = _trace_decision(graph, entity, max_depth)
+        return _result
+    except Exception as e:
+        _err = str(e)
+        raise
+    finally:
+        log_mcp_request(
+            dept=DEPT_NAME, tool="decision_trace", query=entity,
+            result_count=len(_result.get("decisions", [])) if _result else 0,
             duration_ms=int((time.time() - _t0) * 1000), error=_err,
         )
 

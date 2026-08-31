@@ -220,6 +220,8 @@ claude mcp add --transport http strategic-ontology http://34.42.7.50:8765/mcp
 | `semantic_search` | Qdrant 벡터 검색 | 문서 내용, 정책 검색 |
 | `graph_search` | FalkorDB Cypher 탐색 | 담당자, 팀, 관계 질의 |
 | `hybrid_search` | 벡터 + 그래프 결합 | 복합 질문 |
+| `path_search` | 두 엔티티 간 최단 경로 | "A와 B는 어떤 관계?" |
+| `decision_trace` | 의사결정 인과 체인 탐색 | "A 승인 경위는?", "팀이 내린 결정들은?" |
 
 - **Transport**: Streamable HTTP (`/mcp` 엔드포인트)
 - **프로세스 관리**: systemd (`sementica-mcp.service`) — 서버 재부팅 시 자동 시작

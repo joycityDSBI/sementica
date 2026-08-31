@@ -1,15 +1,21 @@
 """
 Semantica 프레임워크 통합 헬퍼
 
-세 가지 기능을 제공합니다:
+다섯 가지 기능을 제공합니다:
 
-1. merge_node()         — FalkorDB MERGE 기반 엔티티 중복 제거
-                          같은 이름+타입의 노드가 이미 존재하면 생성하지 않고 기존 노드 ID 반환
+1. merge_node()            — FalkorDB MERGE 기반 엔티티 중복 제거
+                             같은 이름+타입의 노드가 이미 존재하면 생성하지 않고 기존 노드 ID 반환
 
 2. extract_with_fallback() — LLM 추출 실패 시 Semantica NER/RE 로 fallback
-                              Semantica 미설치 또는 한국어 미지원 시 빈 리스트 반환
+                             Semantica 미설치 또는 한국어 미지원 시 빈 리스트 반환
 
-3. find_shortest_path() — FalkorDB shortestPath Cypher 로 두 엔티티 간 최단 경로 탐색
+3. find_shortest_path()    — FalkorDB shortestPath Cypher 로 두 엔티티 간 최단 경로 탐색
+
+4. is_decision_triplet()   — 트리플이 의사결정에 해당하는지 판단 (한국어 결정 키워드 기반)
+
+5. record_decision_node()  — FalkorDB에 :Decision 노드 기록 + 인과 연결 (LED_TO 엣지)
+
+6. trace_decision_chain()  — 엔티티 이름으로 관련 의사결정 체인 탐색
 
 의존성:
   pip install semantica[graph-falkordb]   # NER/RE fallback 사용 시
@@ -17,6 +23,8 @@ Semantica 프레임워크 통합 헬퍼
 
 import re
 import sys
+import uuid
+from datetime import datetime, timezone
 
 # ─── Semantica 가용 여부 자동 감지 ──────────────────────────────────────────────
 _SEM_AVAILABLE   = False   # Semantica 패키지 설치 여부
@@ -247,3 +255,232 @@ def find_shortest_path(graph, start_name: str, end_name: str, max_hops: int = 6)
 
     except Exception as e:
         return {"found": False, "start": start_name, "end": end_name, "error": str(e)}
+
+
+# ─── 4‑6. 의사결정 추적 (trace_decision_chain) ───────────────────────────────
+
+# 의사결정을 나타내는 한국어 술어 키워드
+DECISION_KEYWORDS: frozenset = frozenset([
+    "승인", "결정", "채택", "선택", "완료", "확정", "검토",
+    "허가", "처리", "배정", "지정", "선정", "의결", "보고",
+    "승낙", "거부", "반려", "취소", "변경", "수정", "합의",
+    "위임", "지시", "요청", "승계", "이관",
+])
+
+
+def is_decision_triplet(triplet: dict) -> bool:
+    """
+    트리플의 술어(predicate)가 의사결정에 해당하는지 확인.
+
+    Args:
+        triplet: {"subject": ..., "predicate": {"name": "승인"}, "object": ...}
+
+    Returns:
+        True if predicate.name contains any DECISION_KEYWORDS
+    """
+    pred_name = ""
+    pred = triplet.get("predicate")
+    if isinstance(pred, dict):
+        pred_name = pred.get("name", "")
+    elif isinstance(pred, str):
+        pred_name = pred
+    return any(kw in pred_name for kw in DECISION_KEYWORDS)
+
+
+def record_decision_node(graph, triplet: dict, source_url: str) -> int:
+    """
+    의사결정 트리플을 FalkorDB의 :Decision 노드로 기록하고,
+    인과 관계(LED_TO 엣지)를 자동 생성.
+
+    :Decision 노드 속성:
+        decision_id  — uuid5 기반 안정적 식별자 (중복 방지)
+        subject      — 결정 주체 (누가)
+        action       — 결정 행위 (승인, 지시 등)
+        outcome      — 결정 결과/대상 (무엇을)
+        source_url   — 출처 Notion 페이지 URL
+        ts           — 기록 시각 (ISO 8601)
+
+    인과 연결 (LED_TO):
+        기존 Decision에서 outcome == 이 노드의 subject  → (기존)─[LED_TO]→(이 노드)
+        기존 Decision에서 subject == 이 노드의 outcome  → (이 노드)─[LED_TO]→(기존)
+
+    Returns:
+        FalkorDB node id (실패 시 -1)
+    """
+    subj  = triplet.get("subject",   {})
+    pred  = triplet.get("predicate", {})
+    obj   = triplet.get("object",    {})
+
+    subj_name = subj.get("name", "") if isinstance(subj, dict) else str(subj)
+    pred_name = pred.get("name", "") if isinstance(pred, dict) else str(pred)
+    obj_name  = obj.get("name",  "") if isinstance(obj,  dict) else str(obj)
+
+    if not subj_name or not pred_name or not obj_name:
+        return -1
+
+    # 안정적 ID: 출처 + 트리플 내용 기반 uuid5
+    did = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"{source_url}|{subj_name}|{pred_name}|{obj_name}",
+    ))
+    ts = datetime.now(timezone.utc).isoformat()
+
+    try:
+        r = graph.query(
+            "MERGE (d:Decision {decision_id: $did}) "
+            "ON CREATE SET d.subject = $subject, d.action = $action, "
+            "              d.outcome = $outcome, d.source_url = $url, d.ts = $ts "
+            "RETURN id(d) AS nid",
+            {"did": did, "subject": subj_name, "action": pred_name,
+             "outcome": obj_name, "url": source_url, "ts": ts},
+        )
+        if not r.result_set:
+            return -1
+        node_id = r.result_set[0][0]
+    except Exception as e:
+        print(f"    ⚠️  Decision 노드 기록 실패 ({subj_name}/{pred_name}): {e}")
+        return -1
+
+    # ── 인과 연결: 이전 결정의 outcome이 이 결정의 subject와 같으면 LED_TO 생성
+    try:
+        graph.query(
+            "MATCH (prev:Decision) WHERE prev.outcome = $subject "
+            "  AND prev.decision_id <> $did "
+            "MATCH (d:Decision {decision_id: $did}) "
+            "MERGE (prev)-[:LED_TO]->(d)",
+            {"subject": subj_name, "did": did},
+        )
+    except Exception:
+        pass  # LED_TO 생성 실패는 치명적이지 않음
+
+    # ── 인과 연결: 이 결정의 outcome이 이후 결정의 subject와 같으면 LED_TO 생성
+    try:
+        graph.query(
+            "MATCH (next:Decision) WHERE next.subject = $outcome "
+            "  AND next.decision_id <> $did "
+            "MATCH (d:Decision {decision_id: $did}) "
+            "MERGE (d)-[:LED_TO]->(next)",
+            {"outcome": obj_name, "did": did},
+        )
+    except Exception:
+        pass
+
+    return node_id
+
+
+def trace_decision_chain(graph, entity_name: str, max_depth: int = 4) -> dict:
+    """
+    엔티티 이름으로 관련 의사결정 체인을 탐색.
+
+    1. entity_name이 subject 또는 outcome에 포함된 :Decision 노드를 조회
+    2. 각 Decision에서 LED_TO 엣지를 따라 상하류 인과 체인을 구성
+    3. 시계열 순서(ts)로 정렬해 반환
+
+    Args:
+        graph:       FalkorDB graph 객체
+        entity_name: 탐색할 엔티티 이름 (부분 일치)
+        max_depth:   LED_TO 탐색 최대 깊이 (기본 4)
+
+    Returns:
+        {
+          "entity":   str,
+          "found":    bool,
+          "decisions": [
+            {
+              "decision_id": str,
+              "subject":     str,
+              "action":      str,
+              "outcome":     str,
+              "source_url":  str,
+              "ts":          str,
+              "leads_to":    [{"subject", "action", "outcome", "ts"}, ...],  # 하류 결정
+              "led_by":      [{"subject", "action", "outcome", "ts"}, ...],  # 상류 결정
+            },
+            ...
+          ],
+          "chain_summary": [str, ...],   # "주체 → 행위 → 결과" 텍스트 목록 (시계열)
+        }
+    """
+    try:
+        # 1. 관련 Decision 노드 조회
+        r = graph.query(
+            "MATCH (d:Decision) "
+            "WHERE d.subject CONTAINS $name OR d.outcome CONTAINS $name "
+            "RETURN d.decision_id AS did, d.subject AS subject, "
+            "       d.action AS action, d.outcome AS outcome, "
+            "       d.source_url AS url, d.ts AS ts "
+            "ORDER BY d.ts ASC LIMIT 30",
+            {"name": entity_name},
+        )
+
+        if not r.result_set:
+            return {
+                "entity":       entity_name,
+                "found":        False,
+                "decisions":    [],
+                "chain_summary": [],
+            }
+
+        # 2. 각 Decision의 상·하류 연결 조회
+        decisions = []
+        for row in r.result_set:
+            did, subj, action, outcome, url, ts = row[0], row[1], row[2], row[3], row[4], row[5]
+
+            # 하류: 이 결정이 이어지는 결정들 (LED_TO 순방향)
+            down_r = graph.query(
+                f"MATCH (d:Decision {{decision_id: $did}})"
+                f"-[:LED_TO*1..{max_depth}]->(next:Decision) "
+                "RETURN next.subject, next.action, next.outcome, next.ts "
+                "ORDER BY next.ts ASC LIMIT 10",
+                {"did": did},
+            )
+            leads_to = [
+                {"subject": dr[0], "action": dr[1], "outcome": dr[2], "ts": dr[3]}
+                for dr in (down_r.result_set or [])
+            ]
+
+            # 상류: 이 결정을 유발한 결정들 (LED_TO 역방향)
+            up_r = graph.query(
+                f"MATCH (prev:Decision)-[:LED_TO*1..{max_depth}]->"
+                f"(d:Decision {{decision_id: $did}}) "
+                "RETURN prev.subject, prev.action, prev.outcome, prev.ts "
+                "ORDER BY prev.ts ASC LIMIT 10",
+                {"did": did},
+            )
+            led_by = [
+                {"subject": ur[0], "action": ur[1], "outcome": ur[2], "ts": ur[3]}
+                for ur in (up_r.result_set or [])
+            ]
+
+            decisions.append({
+                "decision_id": did,
+                "subject":     subj,
+                "action":      action,
+                "outcome":     outcome,
+                "source_url":  url or "",
+                "ts":          ts or "",
+                "leads_to":    leads_to,
+                "led_by":      led_by,
+            })
+
+        # 3. 체인 요약 (시계열 순)
+        chain_summary = [
+            f"{d['subject']} → {d['action']} → {d['outcome']}"
+            for d in decisions
+        ]
+
+        return {
+            "entity":        entity_name,
+            "found":         True,
+            "decisions":     decisions,
+            "chain_summary": chain_summary,
+        }
+
+    except Exception as e:
+        return {
+            "entity":        entity_name,
+            "found":         False,
+            "decisions":     [],
+            "chain_summary": [],
+            "error":         str(e),
+        }
