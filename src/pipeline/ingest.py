@@ -26,6 +26,9 @@ import time
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from semantica_helper import merge_node, extract_with_fallback
+
 # ─── .env 로드 ────────────────────────────────────────────────────────────────
 _env_path = Path(__file__).parent.parent.parent / ".env"
 if _env_path.exists():
@@ -321,27 +324,18 @@ def store_graph(triplets: list, source_url: str) -> dict:
     nodes_created = 0
     edges_created = 0
 
-    # 노드 캐시 (같은 이름+타입 → 같은 node_id)
+    # 노드 캐시 (세션 내 중복 호출 방지)
     node_cache = {}
 
     def get_or_create_node(entity: dict) -> int:
         key = (entity["name"], entity["type"])
         if key in node_cache:
             return node_cache[key]
-        try:
-            result = _falkordb.create_node(
-                labels=[entity["type"]],
-                properties={
-                    "name":       entity["name"],
-                    "source_url": source_url,
-                },
-            )
-            node_id = result.get("id") or result.get("node_id") or 0
+        # merge_node: 그래프 전체에서 MERGE → 크로스-문서 중복 제거
+        node_id = merge_node(_falkordb, entity["name"], entity["type"], source_url)
+        if node_id >= 0:
             node_cache[key] = node_id
-            return node_id
-        except Exception as e:
-            print(f"       노드 생성 실패 ({entity['name']}): {e}")
-            return -1
+        return node_id
 
     for t in triplets:
         subj_id = get_or_create_node(t["subject"])
@@ -401,10 +395,10 @@ def ingest_page(path: Path, dry_run: bool = False) -> dict:
         result["chunk_count"]   = chunk_count
         print(f"     벡터: {'✅' if chunk_count > 0 else '❌'} {chunk_count}개 청크 저장")
 
-        # 2. 트리플 추출
-        triplets = extract_triplets(body)
+        # 2. 트리플 추출 (LLM 우선 → 실패 시 Semantica fallback)
+        triplets, src = extract_with_fallback(extract_triplets, body)
         result["triplet_count"] = len(triplets)
-        print(f"     트리플: {len(triplets)}개 추출")
+        print(f"     트리플: {len(triplets)}개 추출 [{src}]")
 
         # 3. 그래프 저장
         if triplets:

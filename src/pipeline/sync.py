@@ -50,6 +50,7 @@ from notion_fetch import (
     notion_headers, fetch_blocks_recursive, page_title,
     RATE_LIMIT_DELAY,
 )
+from semantica_helper import merge_node, extract_with_fallback
 
 # DB 로거 (POSTGRES_URL 없으면 no-op)
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
@@ -277,24 +278,22 @@ def sync_page(
     result["new_chunks"] = new_chunks
     print(f"     벡터 저장: {new_chunks}개 청크")
 
-    # 5. 트리플 추출 + FalkorDB 저장
-    triplets = extract_triplets(llm_client, body)
+    # 5. 트리플 추출 + FalkorDB 저장 (LLM 우선 → Semantica fallback)
+    triplets, triplet_src = extract_with_fallback(
+        lambda t: extract_triplets(llm_client, t), body
+    )
+    print(f"     트리플: {len(triplets)}개 추출 [{triplet_src}]")
     node_cache = {}
 
     def get_or_create_node(entity: dict) -> int:
         key = (entity["name"], entity["type"])
         if key in node_cache:
             return node_cache[key]
-        try:
-            r = graph.create_node(
-                labels=[entity["type"]],
-                properties={"name": entity["name"], "source_url": source_url},
-            )
-            nid = r.get("id") or r.get("node_id") or 0
+        # merge_node: 그래프 전체에서 MERGE → 크로스-문서 중복 제거
+        nid = merge_node(graph, entity["name"], entity["type"], source_url)
+        if nid >= 0:
             node_cache[key] = nid
-            return nid
-        except Exception:
-            return -1
+        return nid
 
     edges_created = 0
     for t in triplets:

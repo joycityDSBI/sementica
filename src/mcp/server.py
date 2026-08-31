@@ -109,6 +109,13 @@ try:
 except Exception:
     def log_mcp_request(*a, **kw): pass   # DB 없을 때 no-op
 
+# ─── Semantica 헬퍼 (경로 탐색) ───────────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
+try:
+    from semantica_helper import find_shortest_path as _find_path
+except Exception:
+    _find_path = None
+
 # ─── FastMCP 서버 ─────────────────────────────────────────────────────────────
 from fastmcp import FastMCP
 
@@ -334,6 +341,41 @@ def hybrid_search(query: str, limit: int = 5) -> dict[str, Any]:
         log_mcp_request(
             dept=DEPT_NAME, tool="hybrid_search", query=query,
             result_count=len(_result.get("semantic_results", [])) if _result else 0,
+            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+        )
+
+
+@mcp.tool()
+def path_search(start_entity: str, end_entity: str, max_hops: int = 6) -> dict[str, Any]:
+    """
+    두 엔티티(사람, 팀, 프로세스 등) 사이의 최단 연결 경로를 탐색합니다.
+    "A와 B는 어떤 관계인가?", "A에서 B까지 이어지는 경로는?" 같은 질문에 사용하세요.
+
+    Args:
+        start_entity: 시작 엔티티 이름 (예: "운영팀")
+        end_entity:   도착 엔티티 이름 (예: "점검 완료")
+        max_hops:     최대 탐색 깊이 (기본값: 6)
+
+    Returns:
+        {found, start, end, path_nodes, path_relations, hops}
+    """
+    _t0 = time.time()
+    _err = None
+    _result = None
+    try:
+        if _find_path is None:
+            return {"found": False, "error": "경로 탐색 모듈을 로드할 수 없습니다"}
+        graph = _get_falkordb()
+        _result = _find_path(graph, start_entity, end_entity, max_hops)
+        return _result
+    except Exception as e:
+        _err = str(e)
+        raise
+    finally:
+        log_mcp_request(
+            dept=DEPT_NAME, tool="path_search",
+            query=f"{start_entity} → {end_entity}",
+            result_count=1 if (_result and _result.get("found")) else 0,
             duration_ms=int((time.time() - _t0) * 1000), error=_err,
         )
 

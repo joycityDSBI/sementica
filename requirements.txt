@@ -17,6 +17,10 @@ redis>=5.0.0
 # ── MCP 서버 ──────────────────────────────────────────────────────────────────
 fastmcp>=2.0.0
 
+# ── Semantica 프레임워크 (엔티티 중복 제거 / NER·RE fallback) ─────────────────
+# graph-falkordb 번들: FalkorDB 백엔드 + NER/RE 포함
+semantica[graph-falkordb]
+
 # ── 운영 로그 (PostgreSQL) ────────────────────────────────────────────────────
 psycopg2-binary>=2.9.0
 
