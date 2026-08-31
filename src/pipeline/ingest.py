@@ -250,37 +250,67 @@ def extract_triplets(text: str) -> list:
         return []
 
 
-# ─── 벡터 저장 ───────────────────────────────────────────────────────────────
-def store_vector(page: dict) -> bool:
-    """페이지 임베딩 → Qdrant 저장"""
+# ─── 청킹 유틸 ───────────────────────────────────────────────────────────────
+CHUNK_SIZE    = 800   # 청크 크기 (자)
+CHUNK_OVERLAP = 200   # 청크 간 겹침 (자)
+
+
+def _make_chunks(text: str) -> list[str]:
+    """텍스트를 CHUNK_SIZE 크기로 CHUNK_OVERLAP 겹침을 두고 분할"""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + CHUNK_SIZE
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(text):
+            break
+        start = end - CHUNK_OVERLAP
+    return chunks
+
+
+# ─── 벡터 저장 (청킹) ────────────────────────────────────────────────────────
+def store_vector(page: dict) -> int:
+    """페이지를 청크로 분할 → 각 청크 임베딩 → Qdrant 저장
+    Returns: 저장된 청크 수 (0이면 실패)
+    """
     body = page["body"]
     if not body.strip():
-        return False
+        return 0
     meta = page["meta"]
-    try:
-        result = _embed_model.models.embed_content(
-            model=EMBED_MODEL_NAME,
-            contents=[body[:5000]],
-        )
-        vec = result.embeddings[0].values  # list[float]
-        doc_id = str(uuid.uuid5(uuid.NAMESPACE_URL, meta.get("notion_url") or page["file"]))
-        payload = {
-            "title":      meta.get("title", ""),
-            "source_url": meta.get("notion_url", ""),
-            "page_id":    meta.get("page_id", ""),
-            "text":       body[:5000],   # 검색 결과 컨텍스트용 (5000자)
-            "file":       page["file"],
-        }
-        # collection_name은 create_collection 시 이미 설정됨 — 중복 전달 금지
-        _qdrant_store.insert_vectors(
-            vectors=[vec],
-            ids=[doc_id],
-            payloads=[payload],
-        )
-        return True
-    except Exception as e:
-        print(f"     ⚠️  벡터 저장 실패: {e}")
-        return False
+    base_url = meta.get("notion_url") or page["file"]
+
+    chunks = _make_chunks(body)
+    stored = 0
+    for i, chunk in enumerate(chunks):
+        try:
+            result = _embed_model.models.embed_content(
+                model=EMBED_MODEL_NAME,
+                contents=[chunk],
+            )
+            vec = result.embeddings[0].values
+            # 청크별 고유 ID: 페이지 UUID + 청크 인덱스
+            chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{base_url}#chunk{i}"))
+            payload = {
+                "title":      meta.get("title", ""),
+                "source_url": meta.get("notion_url", ""),
+                "page_id":    meta.get("page_id", ""),
+                "text":       chunk,
+                "chunk_index": i,
+                "chunk_total": len(chunks),
+                "file":       page["file"],
+            }
+            _qdrant_store.insert_vectors(
+                vectors=[vec],
+                ids=[chunk_id],
+                payloads=[payload],
+            )
+            stored += 1
+        except Exception as e:
+            print(f"     ⚠️  청크 {i} 저장 실패: {e}")
+        time.sleep(0.1)   # Vertex AI API rate limit
+    return stored
 
 
 # ─── 그래프 저장 ─────────────────────────────────────────────────────────────
@@ -363,10 +393,11 @@ def ingest_page(path: Path, dry_run: bool = False) -> dict:
     }
 
     if not dry_run:
-        # 1. 벡터 저장
-        ok = store_vector(page)
-        result["vector_stored"] = ok
-        print(f"     벡터: {'✅ 저장' if ok else '❌ 실패'}")
+        # 1. 벡터 저장 (청킹)
+        chunk_count = store_vector(page)
+        result["vector_stored"] = chunk_count > 0
+        result["chunk_count"]   = chunk_count
+        print(f"     벡터: {'✅' if chunk_count > 0 else '❌'} {chunk_count}개 청크 저장")
 
         # 2. 트리플 추출
         triplets = extract_triplets(body)
@@ -460,13 +491,15 @@ def main():
     # ── 결과 요약 ────────────────────────────────────────────────────────────
     print(f"\n[4/4] 결과 요약")
     print("=" * 60)
-    stored    = [r for r in results if not r.get("skipped") and r.get("vector_stored")]
-    skipped   = [r for r in results if r.get("skipped")]
-    total_tri = sum(r.get("triplet_count", 0) for r in results)
-    total_nod = sum(r.get("graph", {}).get("nodes", 0) for r in results)
-    total_edg = sum(r.get("graph", {}).get("edges", 0) for r in results)
+    stored      = [r for r in results if not r.get("skipped") and r.get("vector_stored")]
+    skipped     = [r for r in results if r.get("skipped")]
+    total_chunks= sum(r.get("chunk_count", 0) for r in results)
+    total_tri   = sum(r.get("triplet_count", 0) for r in results)
+    total_nod   = sum(r.get("graph", {}).get("nodes", 0) for r in results)
+    total_edg   = sum(r.get("graph", {}).get("edges", 0) for r in results)
 
-    print(f"  페이지:  {len(stored)}/{len(md_files)} 벡터 저장 완료")
+    print(f"  페이지:  {len(stored)}/{len(md_files)} 저장 완료")
+    print(f"  청크:    {total_chunks}개 벡터 저장 (800자 단위, 200자 겹침)")
     print(f"  건너뜀:  {len(skipped)}개 (텍스트 부족)")
     print(f"  트리플:  {total_tri}개 추출")
     print(f"  그래프:  노드 {total_nod}개 / 엣지 {total_edg}개 저장")
