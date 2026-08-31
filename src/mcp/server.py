@@ -38,10 +38,29 @@ GCP_PROJECT     = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 LOCATION        = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
 EMBED_MODEL     = "text-multilingual-embedding-002"
 QDRANT_URL      = os.environ.get("QDRANT_URL", "http://localhost:6333")
-COLLECTION_NAME = "joycity_pages"
 FALKORDB_HOST   = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT   = int(os.environ.get("FALKORDB_PORT", "6379"))
+
+# 기본값 (--dept 없을 때 / legacy)
+COLLECTION_NAME = "joycity_pages"
 GRAPH_NAME      = "joycity_kg"
+DEPT_NAME       = "JoyCity"
+
+
+def _load_dept_config(dept: str):
+    """본부 설정 로드 후 전역 변수 덮어쓰기"""
+    global COLLECTION_NAME, GRAPH_NAME, DEPT_NAME
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
+        from dept_config import load_dept
+        cfg = load_dept(dept)
+        COLLECTION_NAME = cfg["qdrant_collection"]
+        GRAPH_NAME      = cfg["falkordb_graph"]
+        DEPT_NAME       = cfg["name"]
+        print(f"  본부: {DEPT_NAME} ({dept})")
+        print(f"  컬렉션: {COLLECTION_NAME}  그래프: {GRAPH_NAME}")
+    except Exception as e:
+        print(f"  ⚠️  본부 설정 로드 실패: {e} → legacy 모드 사용")
 
 # ─── 클라이언트 (지연 초기화) ─────────────────────────────────────────────────
 _embed_client  = None
@@ -273,16 +292,33 @@ def hybrid_search(query: str, limit: int = 5) -> dict[str, Any]:
 # ─── 실행 ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="JoyCity Ontology MCP 서버")
+    parser.add_argument("--dept",      default="",
+                        help="본부 이름 (config/departments.yaml의 key). 미지정 시 legacy 모드")
     parser.add_argument("--transport", default="sse", choices=["stdio", "sse"],
                         help="전송 방식 (기본: sse)")
-    parser.add_argument("--host", default="0.0.0.0", help="SSE 호스트 (기본: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8765, help="SSE 포트 (기본: 8765)")
+    parser.add_argument("--host",      default="0.0.0.0", help="SSE 호스트 (기본: 0.0.0.0)")
+    parser.add_argument("--port",      type=int, default=8765, help="SSE 포트 (기본: 8765)")
     args = parser.parse_args()
 
+    # 본부 설정 로드 (포트도 departments.yaml 에서 가져올 수 있음)
+    if args.dept:
+        _load_dept_config(args.dept)
+        # departments.yaml 포트 사용 (--port 명시 시 명시값 우선)
+        if args.port == 8765:   # 기본값이면 yaml 포트 사용
+            try:
+                import yaml
+                cfg_path = Path(__file__).parent.parent.parent / "config" / "departments.yaml"
+                with cfg_path.open(encoding="utf-8") as f:
+                    yaml_cfg = yaml.safe_load(f)
+                yaml_port = yaml_cfg["departments"][args.dept].get("mcp_port", 8765)
+                args.port = yaml_port
+            except Exception:
+                pass
+
     if args.transport == "sse":
-        print(f"🚀 JoyCity Ontology MCP 서버 시작 (SSE)")
+        print(f"🚀 {DEPT_NAME} Ontology MCP 서버 시작 (SSE)")
         print(f"   주소: http://{args.host}:{args.port}/sse")
-        print(f"   Claude Code 등록: claude mcp add --transport sse joycity-ontology http://<서버IP>:{args.port}/sse")
+        print(f"   Claude Code 등록: claude mcp add --transport sse {args.dept or 'joycity'}-ontology http://<서버IP>:{args.port}/sse")
         mcp.run(transport="sse", host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")

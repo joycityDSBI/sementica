@@ -1,10 +1,19 @@
 """
-Notion 페이지 수집기 — Week 1 샘플 수집용
-Notion API Integration Token이 필요합니다.
+Notion 페이지 전체 수집기 — 멀티 본부 지원
+API 권한이 있는 모든 페이지를 수집해 data/{dept}/notion_pages/ 에 저장합니다.
 
 사용법:
-  python notion_fetch.py --token <NOTION_TOKEN> --page-id <PAGE_ID>
-  python notion_fetch.py --token <NOTION_TOKEN> --search "온보딩"
+  # 전략사업본부 전체 페이지 수집
+  python src/pipeline/notion_fetch.py --dept strategic
+
+  # 특정 페이지만 수집
+  python src/pipeline/notion_fetch.py --dept strategic --page-id <PAGE_ID>
+
+  # 검색어로 수집 (기존 방식)
+  python src/pipeline/notion_fetch.py --dept strategic --search "점검"
+
+  # 사용 가능한 본부 목록 확인
+  python src/pipeline/notion_fetch.py --list-depts
 """
 
 import os
@@ -12,6 +21,7 @@ import json
 import time
 import argparse
 import re
+import sys
 from pathlib import Path
 
 # .env 로드
@@ -28,10 +38,11 @@ try:
 except ImportError:
     raise SystemExit("httpx가 필요합니다: pip install httpx")
 
-NOTION_VERSION = "2022-06-28"
-RATE_LIMIT_DELAY = 0.34  # 3 req/s 준수 (1/3 = 0.333s)
-OUTPUT_DIR = Path(__file__).parent.parent.parent / "data" / "notion_samples"
+NOTION_VERSION   = "2022-06-28"
+RATE_LIMIT_DELAY = 0.34   # 3 req/s 준수
 
+
+# ─── Notion API 헬퍼 ─────────────────────────────────────────────────────────
 def notion_headers(token: str) -> dict:
     return {
         "Authorization": f"Bearer {token}",
@@ -39,8 +50,8 @@ def notion_headers(token: str) -> dict:
         "Content-Type": "application/json",
     }
 
-def fetch_page(client: httpx.Client, token: str, page_id: str) -> dict:
-    """단일 페이지 메타데이터 조회"""
+
+def fetch_page_meta(client: httpx.Client, token: str, page_id: str) -> dict:
     resp = client.get(
         f"https://api.notion.com/v1/pages/{page_id}",
         headers=notion_headers(token),
@@ -49,8 +60,59 @@ def fetch_page(client: httpx.Client, token: str, page_id: str) -> dict:
     time.sleep(RATE_LIMIT_DELAY)
     return resp.json()
 
+
+def fetch_all_pages(client: httpx.Client, token: str) -> list:
+    """API 권한이 있는 모든 페이지를 페이지네이션으로 수집"""
+    pages = []
+    cursor = None
+    page_num = 1
+    while True:
+        body = {
+            "filter": {"value": "page", "property": "object"},
+            "page_size": 100,
+        }
+        if cursor:
+            body["start_cursor"] = cursor
+
+        resp = client.post(
+            "https://api.notion.com/v1/search",
+            headers=notion_headers(token),
+            json=body,
+        )
+        resp.raise_for_status()
+        time.sleep(RATE_LIMIT_DELAY)
+        data = resp.json()
+
+        results = data.get("results", [])
+        pages.extend(results)
+        print(f"  페이지 {page_num}: {len(results)}개 수집 (누적 {len(pages)}개)")
+
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+        page_num += 1
+
+    return pages
+
+
+def search_pages(client: httpx.Client, token: str, query: str) -> list:
+    """검색어로 페이지 탐색"""
+    resp = client.post(
+        "https://api.notion.com/v1/search",
+        headers=notion_headers(token),
+        json={
+            "query": query,
+            "filter": {"value": "page", "property": "object"},
+            "page_size": 50,
+        },
+    )
+    resp.raise_for_status()
+    time.sleep(RATE_LIMIT_DELAY)
+    return resp.json().get("results", [])
+
+
 def fetch_blocks(client: httpx.Client, token: str, block_id: str) -> list:
-    """페이지 블록(본문) 재귀 조회"""
+    """블록 목록 페이지네이션 수집"""
     blocks = []
     cursor = None
     while True:
@@ -71,18 +133,20 @@ def fetch_blocks(client: httpx.Client, token: str, block_id: str) -> list:
         cursor = data.get("next_cursor")
     return blocks
 
+
 def blocks_to_text(blocks: list, depth: int = 0) -> str:
-    """블록 리스트를 마크다운 텍스트로 변환"""
+    """블록 → 마크다운 텍스트"""
     lines = []
     for block in blocks:
-        btype = block.get("type", "")
+        btype   = block.get("type", "")
         content = block.get(btype, {})
-        rich_text = content.get("rich_text", [])
-        text = "".join(t.get("plain_text", "") for t in rich_text)
-        indent = "  " * depth
+        rich    = content.get("rich_text", [])
+        text    = "".join(t.get("plain_text", "") for t in rich)
+        indent  = "  " * depth
 
         if btype == "paragraph":
-            lines.append(f"{indent}{text}")
+            if text:
+                lines.append(f"{indent}{text}")
         elif btype.startswith("heading_"):
             level = int(btype[-1])
             lines.append(f"{'#' * level} {text}")
@@ -95,129 +159,177 @@ def blocks_to_text(blocks: list, depth: int = 0) -> str:
             lines.append(f"{indent}- [{'x' if checked else ' '}] {text}")
         elif btype == "toggle":
             lines.append(f"{indent}▸ {text}")
-        elif btype == "callout":
-            lines.append(f"{indent}> {text}")
-        elif btype == "quote":
+        elif btype in ("callout", "quote"):
             lines.append(f"{indent}> {text}")
         elif btype == "divider":
             lines.append("---")
+        elif btype == "code":
+            lang = content.get("language", "")
+            lines.append(f"```{lang}\n{text}\n```")
+        elif btype == "table_row":
+            cells = content.get("cells", [])
+            cell_texts = [" ".join(t.get("plain_text", "") for t in cell) for cell in cells]
+            lines.append("| " + " | ".join(cell_texts) + " |")
         elif text:
             lines.append(f"{indent}{text}")
 
-    return "\n".join(lines)
+    return "\n".join(line for line in lines if line.strip() or not lines)
 
 
-def fetch_blocks_recursive(client: httpx.Client, token: str, block_id: str, depth: int = 0, max_depth: int = 3) -> str:
-    """블록을 재귀적으로 가져와 텍스트로 변환 (최대 3단계)"""
+def fetch_blocks_recursive(client, token, block_id, depth=0, max_depth=4) -> str:
+    """블록을 재귀적으로 가져와 텍스트로 변환"""
     if depth > max_depth:
         return ""
     blocks = fetch_blocks(client, token, block_id)
-    text = blocks_to_text(blocks, depth)
-    # 자식 블록이 있는 블록들을 재귀 조회
-    child_texts = []
+    text   = blocks_to_text(blocks, depth)
+
+    child_parts = []
     for block in blocks:
         if block.get("has_children"):
-            child_text = fetch_blocks_recursive(client, token, block["id"], depth + 1, max_depth)
-            if child_text.strip():
-                child_texts.append(child_text)
-    if child_texts:
-        text = text + "\n" + "\n".join(child_texts)
+            child = fetch_blocks_recursive(client, token, block["id"], depth + 1, max_depth)
+            if child.strip():
+                child_parts.append(child)
+
+    if child_parts:
+        text = text + "\n" + "\n".join(child_parts)
     return text
 
+
 def page_title(page: dict) -> str:
-    """페이지 제목 추출"""
     props = page.get("properties", {})
-    for key in ("title", "Name", "이름"):
+    for key in ("title", "Name", "이름", "제목"):
         if key in props:
             rt = props[key].get("title", [])
-            return "".join(t.get("plain_text", "") for t in rt)
+            t  = "".join(t.get("plain_text", "") for t in rt).strip()
+            if t:
+                return t
     return page.get("id", "untitled")
 
-def search_pages(client: httpx.Client, token: str, query: str) -> list:
-    """Notion 워크스페이스 검색"""
-    resp = client.post(
-        "https://api.notion.com/v1/search",
-        headers=notion_headers(token),
-        json={"query": query, "filter": {"value": "page", "property": "object"}, "page_size": 20},
-    )
-    resp.raise_for_status()
-    time.sleep(RATE_LIMIT_DELAY)
-    return resp.json().get("results", [])
 
 def safe_filename(title: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", title)[:80]
 
-def save_page(client: httpx.Client, token: str, page: dict, idx: int) -> dict:
-    """한 페이지 수집 후 저장. 검증 결과 반환."""
-    page_id = page["id"].replace("-", "")
-    title = page_title(page)
-    url = page.get("url", "")
 
-    print(f"  [{idx}] {title}")
-    print(f"       URL: {url}")
+# ─── 페이지 저장 ──────────────────────────────────────────────────────────────
+def save_page(client, token, page, idx, output_dir: Path) -> dict:
+    page_id = page["id"].replace("-", "")
+    title   = page_title(page)
+    url     = page.get("url", "")
+
+    print(f"  [{idx:03d}] {title[:60]}")
+    print(f"        {url}")
 
     try:
-        text = fetch_blocks_recursive(client, token, page_id)
+        text       = fetch_blocks_recursive(client, token, page_id)
         word_count = len(text.split())
 
-        fname = f"{idx:02d}_{safe_filename(title)}.md"
-        out_path = OUTPUT_DIR / fname
+        fname    = f"{idx:03d}_{safe_filename(title)}.md"
+        out_path = output_dir / fname
         out_path.write_text(
             f"---\ntitle: {title}\nnotion_url: {url}\npage_id: {page_id}\n---\n\n{text}",
             encoding="utf-8",
         )
 
-        has_meaningful_text = word_count >= 50
-        print(f"       저장: {fname} ({word_count} 단어) {'✓' if has_meaningful_text else '✗ 텍스트 부족'}")
-
-        return {
-            "idx": idx,
-            "title": title,
-            "url": url,
-            "page_id": page_id,
-            "word_count": word_count,
-            "file": str(out_path),
-            "meaningful": has_meaningful_text,
-        }
+        ok = word_count >= 50
+        print(f"        저장: {fname} ({word_count} 단어) {'✅' if ok else '⚠️ 텍스트 부족'}")
+        return {"idx": idx, "title": title, "url": url, "page_id": page_id,
+                "word_count": word_count, "file": str(out_path), "meaningful": ok}
     except Exception as e:
-        print(f"       오류: {e}")
+        print(f"        ❌ 오류: {e}")
         return {"idx": idx, "title": title, "url": url, "meaningful": False, "error": str(e)}
 
+
+# ─── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Notion 페이지 샘플 수집기")
-    parser.add_argument("--token", default=os.environ.get("NOTION_TOKEN", ""), help="Notion Integration Token (.env의 NOTION_TOKEN으로 대체 가능)")
-    parser.add_argument("--search", default="온보딩", help="검색 키워드 (기본: 온보딩)")
-    parser.add_argument("--page-id", help="특정 페이지 ID 직접 지정")
+    parser = argparse.ArgumentParser(description="Notion 페이지 전체 수집기 (멀티 본부 지원)")
+    parser.add_argument("--dept",       default="strategic",
+                        help="본부 이름 (config/departments.yaml 의 key, 기본: strategic)")
+    parser.add_argument("--search",     default="",
+                        help="검색어 지정 시 해당 키워드 페이지만 수집 (미지정 시 전체 수집)")
+    parser.add_argument("--page-id",    help="특정 페이지 ID 직접 지정")
+    parser.add_argument("--list-depts", action="store_true",
+                        help="사용 가능한 본부 목록 출력 후 종료")
+    parser.add_argument("--limit",      type=int, default=0,
+                        help="수집 최대 페이지 수 (0=무제한, 기본: 0)")
     args = parser.parse_args()
 
-    if not args.token:
-        parser.error("NOTION_TOKEN 환경변수 또는 --token 인수가 필요합니다.")
+    # 본부 목록 출력
+    if args.list_depts:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from dept_config import list_depts
+        depts = list_depts()
+        print("사용 가능한 본부:")
+        for d in depts:
+            print(f"  - {d}")
+        return
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # 본부 설정 로드
+    sys.path.insert(0, str(Path(__file__).parent))
+    from dept_config import load_dept
+    dept_cfg = load_dept(args.dept)
+
+    token      = dept_cfg["notion_token"]
+    output_dir = dept_cfg["data_dir"] / "notion_pages"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print(f"📥 Notion 수집 — {dept_cfg['name']} ({args.dept})")
+    print(f"   저장 경로: {output_dir}")
+    print("=" * 60)
 
     results = []
-    with httpx.Client(timeout=30) as client:
+    with httpx.Client(timeout=60) as client:
         if args.page_id:
-            page = fetch_page(client, args.token, args.page_id)
-            results.append(save_page(client, args.token, page, 1))
-        else:
-            print(f"🔍 Notion 검색: '{args.search}'")
-            pages = search_pages(client, args.token, args.search)
-            print(f"   {len(pages)}개 페이지 발견\n")
-            for i, page in enumerate(pages[:10], 1):
-                results.append(save_page(client, args.token, page, i))
+            # 특정 페이지
+            page = fetch_page_meta(client, token, args.page_id)
+            results.append(save_page(client, token, page, 1, output_dir))
+
+        elif args.search:
+            # 검색어 수집
+            print(f"\n🔍 검색: '{args.search}'")
+            pages = search_pages(client, token, args.search)
+            print(f"   {len(pages)}개 발견\n")
+            limit = args.limit or len(pages)
+            for i, page in enumerate(pages[:limit], 1):
+                results.append(save_page(client, token, page, i, output_dir))
                 print()
 
-    # 합격 기준 평가
-    meaningful = [r for r in results if r.get("meaningful")]
-    print("\n" + "="*50)
-    print(f"📊 Premise 1 합격 기준: {len(meaningful)}/10 페이지 텍스트 충분")
-    print(f"   {'✅ 합격' if len(meaningful) >= 6 else '❌ 불합격 — 구조화된 DB 페이지 우선 수집으로 전환'}")
+        else:
+            # 전체 수집
+            print("\n🌐 API 권한 내 모든 페이지 수집 중...")
+            pages = fetch_all_pages(client, token)
+            print(f"\n   총 {len(pages)}개 페이지 발견\n")
+            limit = args.limit or len(pages)
+            for i, page in enumerate(pages[:limit], 1):
+                results.append(save_page(client, token, page, i, output_dir))
+                print()
 
-    # 결과 JSON 저장
-    summary_path = OUTPUT_DIR / "collection_summary.json"
-    summary_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\n결과 저장: {summary_path}")
+    # 결과 요약
+    meaningful = [r for r in results if r.get("meaningful")]
+    skipped    = [r for r in results if not r.get("meaningful")]
+
+    print("\n" + "=" * 60)
+    print(f"📊 수집 완료 — {dept_cfg['name']}")
+    print(f"   전체: {len(results)}개 / 유효: {len(meaningful)}개 / 건너뜀: {len(skipped)}개")
+    print(f"   저장: {output_dir}")
+    print("=" * 60)
+
+    # 요약 저장
+    summary_path = output_dir / "fetch_summary.json"
+    summary_path.write_text(
+        json.dumps({
+            "dept": args.dept,
+            "name": dept_cfg["name"],
+            "total": len(results),
+            "meaningful": len(meaningful),
+            "results": results,
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"\n결과: {summary_path}")
+    print(f"\n다음 단계:")
+    print(f"  python src/pipeline/ingest.py --dept {args.dept} --reset")
+
 
 if __name__ == "__main__":
     main()

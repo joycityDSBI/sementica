@@ -1,0 +1,32 @@
+# JoyCity Semantica — 본부별 설정
+# 새 본부 추가 시 departments 아래에 항목 추가
+# notion_token_env: .env 파일의 환경변수 이름 (실제 값은 .env에 보관)
+
+departments:
+  strategic:
+    name: "전략사업본부"
+    notion_token_env: "NOTION_TOKEN"        # .env의 NOTION_TOKEN 사용
+    qdrant_collection: "strategic_pages"
+    falkordb_graph: "strategic_kg"
+    mcp_port: 8765
+    data_dir: "data/strategic"
+    description: "전략사업본부 업무 문서 온톨로지 검색"
+
+  # ── 향후 본부 추가 예시 ──────────────────────────────────────────────────────
+  # dev:
+  #   name: "개발본부"
+  #   notion_token_env: "NOTION_TOKEN_DEV"  # .env에 NOTION_TOKEN_DEV 추가 필요
+  #   qdrant_collection: "dev_pages"
+  #   falkordb_graph: "dev_kg"
+  #   mcp_port: 8766
+  #   data_dir: "data/dev"
+  #   description: "개발본부 업무 문서 온톨로지 검색"
+  #
+  # platform:
+  #   name: "플랫폼실"
+  #   notion_token_env: "NOTION_TOKEN_PLATFORM"
+  #   qdrant_collection: "platform_pages"
+  #   falkordb_graph: "platform_kg"
+  #   mcp_port: 8767
+  #   data_dir: "data/platform"
+  #   description: "플랫폼실 업무 문서 온톨로지 검색"

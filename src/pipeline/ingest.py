@@ -36,17 +36,19 @@ if _env_path.exists():
             os.environ.setdefault(_k.strip(), _v.strip())
 
 # ─── 경로 설정 ────────────────────────────────────────────────────────────────
-ROOT_DIR     = Path(__file__).parent.parent.parent
-SAMPLES_DIR  = ROOT_DIR / "data" / "notion_samples"
-LOGS_DIR     = ROOT_DIR / "data" / "logs"
+ROOT_DIR  = Path(__file__).parent.parent.parent
+LOGS_DIR  = ROOT_DIR / "data" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ─── Qdrant / FalkorDB 설정 ───────────────────────────────────────────────────
-QDRANT_URL       = "http://localhost:6333"
-FALKORDB_HOST    = "localhost"
-FALKORDB_PORT    = 6379
-COLLECTION_NAME  = "joycity_pages"
-GRAPH_NAME       = "joycity_kg"
+# 하위 호환: --dept 없을 때 기존 notion_samples 사용
+_LEGACY_SAMPLES_DIR = ROOT_DIR / "data" / "notion_samples"
+
+# ─── Qdrant / FalkorDB 설정 (--dept 로 덮어씀) ───────────────────────────────
+QDRANT_URL       = os.environ.get("QDRANT_URL", "http://localhost:6333")
+FALKORDB_HOST    = os.environ.get("FALKORDB_HOST", "localhost")
+FALKORDB_PORT    = int(os.environ.get("FALKORDB_PORT", "6379"))
+COLLECTION_NAME  = "joycity_pages"   # --dept 없을 때 기본값
+GRAPH_NAME       = "joycity_kg"      # --dept 없을 때 기본값
 # Vertex AI 다국어 임베딩 (한국어 지원, 768차원)
 EMBED_MODEL_NAME = "text-multilingual-embedding-002"
 EMBED_DIM        = 768
@@ -424,9 +426,29 @@ def ingest_page(path: Path, dry_run: bool = False) -> dict:
 # ─── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Semantica 인제스천 파이프라인")
+    parser.add_argument("--dept",    default="",
+                        help="본부 이름 (config/departments.yaml의 key). 미지정 시 legacy 모드(data/notion_samples)")
     parser.add_argument("--dry-run", action="store_true", help="연결 확인만 (저장 안 함)")
     parser.add_argument("--reset",   action="store_true", help="기존 데이터 삭제 후 재인제스천")
     args = parser.parse_args()
+
+    # ── 본부 설정 로드 ──────────────────────────────────────────────────────
+    global COLLECTION_NAME, GRAPH_NAME
+    samples_dir = _LEGACY_SAMPLES_DIR
+
+    if args.dept:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from dept_config import load_dept
+        dept_cfg = load_dept(args.dept)
+        COLLECTION_NAME = dept_cfg["qdrant_collection"]
+        GRAPH_NAME      = dept_cfg["falkordb_graph"]
+        samples_dir     = dept_cfg["data_dir"] / "notion_pages"
+        print(f"\n  본부: {dept_cfg['name']} ({args.dept})")
+        print(f"  컬렉션: {COLLECTION_NAME}  그래프: {GRAPH_NAME}")
+        print(f"  데이터: {samples_dir}")
+    else:
+        print(f"\n  ⚠️  --dept 없음 → legacy 모드 (data/notion_samples, joycity_pages)")
+
 
     print("\n" + "=" * 60)
     print("🚀 Semantica 인제스천 파이프라인")
@@ -474,12 +496,12 @@ def main():
         sys.exit(1)
 
     # ── 파일 목록 수집 ──────────────────────────────────────────────────────
-    md_files = [f for f in SAMPLES_DIR.glob("*.md")
-                if f.name not in ("README.md", "golden_set.md")]
+    md_files = [f for f in samples_dir.glob("*.md")
+                if f.name not in ("README.md", "golden_set.md", "fetch_summary.json")]
     md_files.sort()
 
     print(f"\n[2/4] 인제스천 대상: {len(md_files)}개 파일")
-    print(f"       {SAMPLES_DIR}")
+    print(f"       {samples_dir}")
 
     # ── 인제스천 실행 ────────────────────────────────────────────────────────
     print(f"\n[3/4] 페이지 인제스천 시작")
