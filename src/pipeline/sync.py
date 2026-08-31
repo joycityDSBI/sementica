@@ -365,6 +365,7 @@ def fetch_modified_pages(client, token: str, since_iso: str) -> list:
 def main():
     parser = argparse.ArgumentParser(description="Semantica 증분 동기화")
     parser.add_argument("--dept",    required=True, help="본부 이름 (config/departments.yaml)")
+    parser.add_argument("--search",  default="",   help="수집 대상 키워드 필터 (예: '프로세스'). 미지정 시 전체 페이지")
     parser.add_argument("--full",    action="store_true", help="전체 재동기화 (last_sync_time 무시)")
     parser.add_argument("--dry-run", action="store_true", help="변경 내용 확인만 (저장 안 함)")
     args = parser.parse_args()
@@ -407,10 +408,20 @@ def main():
     print("  ✅ 완료")
 
     # ── 수정 페이지 조회 ───────────────────────────────────────────────────
+    keyword = args.search.strip()
     print(f"\n[2/4] Notion에서 수정 페이지 조회 중...")
+    if keyword:
+        print(f"   제목 필터: '{keyword}'")
     with httpx.Client(timeout=60) as notion_client:
         modified_pages = fetch_modified_pages(notion_client, token, since_iso)
-        print(f"  📋 {len(modified_pages)}개 수정 페이지 발견")
+        total_found = len(modified_pages)
+
+        # 제목 키워드 필터 적용
+        if keyword:
+            modified_pages = [p for p in modified_pages if keyword in page_title(p)]
+            print(f"  📋 수정 페이지 {total_found}개 발견 → 제목 필터 후 {len(modified_pages)}개")
+        else:
+            print(f"  📋 {len(modified_pages)}개 수정 페이지 발견")
 
         if not modified_pages:
             print("\n  ✅ 새로 수정된 페이지 없음 — 동기화 완료")
