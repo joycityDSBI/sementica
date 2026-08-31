@@ -51,6 +51,13 @@ from notion_fetch import (
     RATE_LIMIT_DELAY,
 )
 
+# DB 로거 (POSTGRES_URL 없으면 no-op)
+sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
+try:
+    from db_logger import log_sync_result
+except Exception:
+    def log_sync_result(*a, **kw): pass
+
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
 GCP_PROJECT      = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 LOCATION         = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
@@ -437,9 +444,10 @@ def main():
     log_dir         = ROOT / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    now_iso   = datetime.now(timezone.utc).isoformat()
-    state     = load_sync_state(state_path)
-    since_iso = "1970-01-01T00:00:00.000Z" if args.full else state["last_sync_time"]
+    start_time = time.time()
+    now_iso    = datetime.now(timezone.utc).isoformat()
+    state      = load_sync_state(state_path)
+    since_iso  = "1970-01-01T00:00:00.000Z" if args.full else state["last_sync_time"]
 
     print("=" * 60)
     print(f"🔄 증분 동기화 — {dept_cfg['name']} ({args.dept})")
@@ -530,6 +538,34 @@ def main():
     log_path = log_dir / f"sync_{args.dept}_{now_iso[:10].replace('-', '')}.json"
     log_path.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"  📄 로그: {log_path}")
+
+    # ── DB 로그 저장 ──────────────────────────────────────────────────────
+    duration_sec = int(time.time() - start_time)
+    if errors and len(success) == 0:
+        db_status = "failed"
+    elif errors:
+        db_status = "partial"
+    elif args.dry_run:
+        db_status = "dry_run"
+    else:
+        db_status = "success"
+
+    error_sample = errors[0].get("error") if errors else None
+    log_sync_result(
+        dept=args.dept,
+        search_keyword=keyword or None,
+        since_time=since_iso,
+        modified_found=len(modified_pages),
+        processed=len(success),
+        skipped=len(skipped),
+        errors=len(errors),
+        new_chunks=total_v,
+        new_triplets=total_e,
+        duration_sec=duration_sec,
+        status=db_status,
+        error_detail=error_sample,
+    )
+
     print(f"\n  {'✅ 동기화 완료' if not errors else f'⚠️  {len(errors)}개 오류 발생'}")
 
 

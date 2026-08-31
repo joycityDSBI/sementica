@@ -21,6 +21,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -101,6 +102,13 @@ def _embed(text: str) -> list[float]:
     return result.embeddings[0].values
 
 
+# ─── DB 로거 ──────────────────────────────────────────────────────────────────
+sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
+try:
+    from db_logger import log_mcp_request
+except Exception:
+    def log_mcp_request(*a, **kw): pass   # DB 없을 때 no-op
+
 # ─── FastMCP 서버 ─────────────────────────────────────────────────────────────
 from fastmcp import FastMCP
 
@@ -128,28 +136,40 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     Returns:
         관련 페이지 목록 (title, source_url, text_preview, score)
     """
-    vec = _embed(query)
-    qc = _get_qdrant()
-    result = qc.query_points(
-        collection_name=COLLECTION_NAME,
-        query=vec,
-        limit=limit,
-        with_payload=True,
-    )
-    results = []
-    for h in result.points:
-        p = h.payload or {}
-        results.append({
-            "title":        p.get("title", ""),
-            "source_url":   p.get("source_url", ""),
-            "text_preview": p.get("text", "")[:300],
-            "score":        round(h.score, 4),
-        })
-    return results
+    _t0 = time.time()
+    _err = None
+    try:
+        vec = _embed(query)
+        qc = _get_qdrant()
+        result = qc.query_points(
+            collection_name=COLLECTION_NAME,
+            query=vec,
+            limit=limit,
+            with_payload=True,
+        )
+        results = []
+        for h in result.points:
+            p = h.payload or {}
+            results.append({
+                "title":        p.get("title", ""),
+                "source_url":   p.get("source_url", ""),
+                "text_preview": p.get("text", "")[:300],
+                "score":        round(h.score, 4),
+            })
+        return results
+    except Exception as e:
+        _err = str(e)
+        raise
+    finally:
+        log_mcp_request(
+            dept=DEPT_NAME, tool="semantic_search", query=query,
+            result_count=len(results) if _err is None else 0,
+            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+        )
 
 
 @mcp.tool()
-def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
+def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:  # noqa: C901
     """
     엔티티(사람, 팀, 프로세스 등)를 중심으로 관련 관계를 그래프에서 탐색합니다.
     "김도형이 소속된 팀", "운영팀이 담당하는 업무" 같은 관계 질문에 사용하세요.
@@ -161,78 +181,93 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
     Returns:
         {entity, type, relations: [{relation, target_name, target_type, condition, source_url}]}
     """
-    graph = _get_falkordb()
+    _t0 = time.time()
+    _err = None
+    _result = None
+    try:
+        graph = _get_falkordb()
 
-    # 노드 검색 (이름 부분 일치)
-    node_query = (
-        "MATCH (n) WHERE n.name CONTAINS $name "
-        "RETURN n.name AS name, labels(n)[0] AS type LIMIT 5"
-    )
-    node_result = graph.query(node_query, {"name": entity})
-
-    if not node_result.result_set:
-        return {"entity": entity, "found": False, "relations": []}
-
-    # 첫 번째 매칭 노드 기준으로 관계 탐색
-    matched_name = node_result.result_set[0][0]
-    matched_type = node_result.result_set[0][1]
-
-    if depth == 1:
-        rel_query = (
-            "MATCH (n {name: $name})-[r:REL]->(m) "
-            "RETURN r.rel_name AS relation, m.name AS target, labels(m)[0] AS target_type, "
-            "r.condition AS condition, r.order AS order, r.source_url AS source_url "
-            "LIMIT 20"
+        # 노드 검색 (이름 부분 일치)
+        node_query = (
+            "MATCH (n) WHERE n.name CONTAINS $name "
+            "RETURN n.name AS name, labels(n)[0] AS type LIMIT 5"
         )
-    else:
-        rel_query = (
-            "MATCH (n {name: $name})-[r:REL*1..2]->(m) "
-            "RETURN [rel in r | rel.rel_name] AS relations, m.name AS target, "
-            "labels(m)[0] AS target_type, r[-1].source_url AS source_url "
-            "LIMIT 30"
+        node_result = graph.query(node_query, {"name": entity})
+
+        if not node_result.result_set:
+            _result = {"entity": entity, "found": False, "relations": []}
+            return _result
+
+        # 첫 번째 매칭 노드 기준으로 관계 탐색
+        matched_name = node_result.result_set[0][0]
+        matched_type = node_result.result_set[0][1]
+
+        if depth == 1:
+            rel_query = (
+                "MATCH (n {name: $name})-[r:REL]->(m) "
+                "RETURN r.rel_name AS relation, m.name AS target, labels(m)[0] AS target_type, "
+                "r.condition AS condition, r.order AS order, r.source_url AS source_url "
+                "LIMIT 20"
+            )
+        else:
+            rel_query = (
+                "MATCH (n {name: $name})-[r:REL*1..2]->(m) "
+                "RETURN [rel in r | rel.rel_name] AS relations, m.name AS target, "
+                "labels(m)[0] AS target_type, r[-1].source_url AS source_url "
+                "LIMIT 30"
+            )
+
+        rel_result = graph.query(rel_query, {"name": matched_name})
+
+        relations = []
+        for row in rel_result.result_set:
+            rel = {
+                "relation":    row[0],
+                "target_name": row[1],
+                "target_type": row[2],
+            }
+            if len(row) > 3 and row[3]:
+                rel["condition"] = row[3]
+            if len(row) > 4 and row[4]:
+                rel["order"] = row[4]
+            if len(row) > 5 and row[5]:
+                rel["source_url"] = row[5]
+            relations.append(rel)
+
+        # 역방향 관계도 탐색 (누가 이 엔티티와 관계를 맺는지)
+        rev_query = (
+            "MATCH (m)-[r:REL]->(n {name: $name}) "
+            "RETURN r.rel_name AS relation, m.name AS source, labels(m)[0] AS source_type, "
+            "r.source_url AS source_url "
+            "LIMIT 10"
         )
+        rev_result = graph.query(rev_query, {"name": matched_name})
+        incoming = []
+        for row in rev_result.result_set:
+            incoming.append({
+                "relation":    row[0],
+                "source_name": row[1],
+                "source_type": row[2],
+                "source_url":  row[3] if len(row) > 3 else "",
+            })
 
-    rel_result = graph.query(rel_query, {"name": matched_name})
-
-    relations = []
-    for row in rel_result.result_set:
-        rel = {
-            "relation":    row[0],
-            "target_name": row[1],
-            "target_type": row[2],
+        _result = {
+            "entity":      matched_name,
+            "type":        matched_type,
+            "found":       True,
+            "outgoing":    relations,
+            "incoming":    incoming,
         }
-        if len(row) > 3 and row[3]:
-            rel["condition"] = row[3]
-        if len(row) > 4 and row[4]:
-            rel["order"] = row[4]
-        if len(row) > 5 and row[5]:
-            rel["source_url"] = row[5]
-        relations.append(rel)
-
-    # 역방향 관계도 탐색 (누가 이 엔티티와 관계를 맺는지)
-    rev_query = (
-        "MATCH (m)-[r:REL]->(n {name: $name}) "
-        "RETURN r.rel_name AS relation, m.name AS source, labels(m)[0] AS source_type, "
-        "r.source_url AS source_url "
-        "LIMIT 10"
-    )
-    rev_result = graph.query(rev_query, {"name": matched_name})
-    incoming = []
-    for row in rev_result.result_set:
-        incoming.append({
-            "relation":    row[0],
-            "source_name": row[1],
-            "source_type": row[2],
-            "source_url":  row[3] if len(row) > 3 else "",
-        })
-
-    return {
-        "entity":      matched_name,
-        "type":        matched_type,
-        "found":       True,
-        "outgoing":    relations,
-        "incoming":    incoming,
-    }
+        return _result
+    except Exception as e:
+        _err = str(e)
+        raise
+    finally:
+        log_mcp_request(
+            dept=DEPT_NAME, tool="graph_search", query=entity,
+            result_count=len(_result.get("outgoing", [])) if _result else 0,
+            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+        )
 
 
 @mcp.tool()
@@ -249,45 +284,58 @@ def hybrid_search(query: str, limit: int = 5) -> dict[str, Any]:
     Returns:
         {semantic_results, graph_results, entity_summary}
     """
-    # 1. 벡터 검색
-    semantic = semantic_search(query, limit=limit)
+    _t0 = time.time()
+    _err = None
+    _result = None
+    try:
+        # 1. 벡터 검색
+        semantic = semantic_search(query, limit=limit)
 
-    # 2. 쿼리에서 핵심 명사를 추출해 그래프 탐색
-    #    (간단히: 쿼리의 2글자 이상 단어 중 명사 후보를 탐색)
-    graph = _get_falkordb()
-    words = [w for w in query.split() if len(w) >= 2]
+        # 2. 쿼리에서 핵심 명사를 추출해 그래프 탐색
+        graph = _get_falkordb()
+        words = [w for w in query.split() if len(w) >= 2]
 
-    graph_hits = []
-    seen_entities = set()
-    for word in words[:3]:   # 최대 3개 단어로 그래프 탐색
-        node_q = (
-            "MATCH (n) WHERE n.name CONTAINS $name "
-            "RETURN n.name AS name, labels(n)[0] AS type LIMIT 3"
+        graph_hits = []
+        seen_entities = set()
+        for word in words[:3]:
+            node_q = (
+                "MATCH (n) WHERE n.name CONTAINS $name "
+                "RETURN n.name AS name, labels(n)[0] AS type LIMIT 3"
+            )
+            nodes = graph.query(node_q, {"name": word})
+            for row in nodes.result_set:
+                entity_name = row[0]
+                if entity_name in seen_entities:
+                    continue
+                seen_entities.add(entity_name)
+                g = graph_search(entity_name, depth=1)
+                if g.get("found"):
+                    graph_hits.append(g)
+
+        # 3. 결합 요약
+        entity_summary = []
+        for g in graph_hits:
+            if g.get("outgoing"):
+                for rel in g["outgoing"][:3]:
+                    entity_summary.append(
+                        f"{g['entity']} → {rel['relation']} → {rel['target_name']}"
+                    )
+
+        _result = {
+            "semantic_results": semantic,
+            "graph_results":    graph_hits,
+            "entity_summary":   entity_summary,
+        }
+        return _result
+    except Exception as e:
+        _err = str(e)
+        raise
+    finally:
+        log_mcp_request(
+            dept=DEPT_NAME, tool="hybrid_search", query=query,
+            result_count=len(_result.get("semantic_results", [])) if _result else 0,
+            duration_ms=int((time.time() - _t0) * 1000), error=_err,
         )
-        nodes = graph.query(node_q, {"name": word})
-        for row in nodes.result_set:
-            entity_name = row[0]
-            if entity_name in seen_entities:
-                continue
-            seen_entities.add(entity_name)
-            g = graph_search(entity_name, depth=1)
-            if g.get("found"):
-                graph_hits.append(g)
-
-    # 3. 결합 요약
-    entity_summary = []
-    for g in graph_hits:
-        if g.get("outgoing"):
-            for rel in g["outgoing"][:3]:
-                entity_summary.append(
-                    f"{g['entity']} → {rel['relation']} → {rel['target_name']}"
-                )
-
-    return {
-        "semantic_results": semantic,
-        "graph_results":    graph_hits,
-        "entity_summary":   entity_summary,
-    }
 
 
 # ─── 실행 ─────────────────────────────────────────────────────────────────────
