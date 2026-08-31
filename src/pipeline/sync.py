@@ -439,6 +439,8 @@ def main():
     parser.add_argument("--dept",    required=True, help="본부 이름 (config/departments.yaml)")
     parser.add_argument("--search",  default="",   help="수집 대상 키워드 필터 (예: '프로세스'). 미지정 시 전체 페이지")
     parser.add_argument("--full",    action="store_true", help="전체 재동기화 (last_sync_time 무시)")
+    parser.add_argument("--limit",   type=int, default=0,
+                        help="처리할 최대 페이지 수 (기본: 0 = 무제한). 예: --limit 50")
     parser.add_argument("--dry-run", action="store_true", help="변경 내용 확인만 (저장 안 함)")
     args = parser.parse_args()
 
@@ -464,6 +466,8 @@ def main():
     print(f"   시작:   {now_iso[:19]}")
     if args.dry_run:
         print("   [DRY-RUN 모드]")
+    if args.limit:
+        print(f"   [LIMIT {args.limit}페이지]")
     print("=" * 60)
 
     # ── 클라이언트 초기화 ──────────────────────────────────────────────────
@@ -492,6 +496,11 @@ def main():
         else:
             modified_pages = fetch_modified_pages(notion_client, token, since_iso)
         print(f"  📋 {len(modified_pages)}개 수정 페이지 발견")
+
+        # --limit 적용
+        if args.limit and len(modified_pages) > args.limit:
+            print(f"  ✂️  --limit {args.limit} 적용 → {args.limit}개만 처리 (나머지 {len(modified_pages) - args.limit}개 제외)")
+            modified_pages = modified_pages[:args.limit]
 
         if not modified_pages:
             print("\n  ✅ 새로 수정된 페이지 없음 — 동기화 완료")
