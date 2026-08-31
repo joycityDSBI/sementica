@@ -39,6 +39,7 @@ fi
 QDRANT_URL="${QDRANT_URL:-http://localhost:6333}"
 FALKORDB_HOST="${FALKORDB_HOST:-localhost}"
 FALKORDB_PORT="${FALKORDB_PORT:-6379}"
+FALKORDB_CONTAINER="${FALKORDB_CONTAINER:-sementica-falkordb}"   # docker-compose container_name
 POSTGRES_URL="${POSTGRES_URL:-}"
 GCS_BUCKET="${GCS_BUCKET:-}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
@@ -121,60 +122,62 @@ backup_qdrant() {
 
 # ── FalkorDB 백업 ─────────────────────────────────────────────────────────────
 backup_falkordb() {
-    log "FalkorDB 백업 시작..."
+    log "FalkorDB 백업 시작 (컨테이너: $FALKORDB_CONTAINER)..."
     local falkor_dir="$BACKUP_DIR/falkordb"
     mkdir -p "$falkor_dir"
 
-    # BGSAVE 트리거 (비동기 스냅샷)
+    # BGSAVE 트리거: 컨테이너 내부 redis-cli 사용 (호스트에 redis-cli 불필요)
     log "  BGSAVE 트리거..."
-    redis-cli -h "$FALKORDB_HOST" -p "$FALKORDB_PORT" BGSAVE >/dev/null 2>&1 || {
-        # Docker 컨테이너 내부에서 실행 시도
-        docker exec falkordb redis-cli BGSAVE >/dev/null 2>&1 || {
-            warn "  BGSAVE 실패 — redis-cli 또는 docker 접근 불가"
-        }
-    }
+    if docker exec "$FALKORDB_CONTAINER" redis-cli BGSAVE 2>/dev/null | grep -q "Background"; then
+        log "  BGSAVE 시작됨 — 완료 대기..."
+    else
+        warn "  BGSAVE 응답 없음 — 계속 진행 (마지막 RDB 복사 시도)"
+    fi
 
-    # BGSAVE 완료 대기 (최대 60초)
-    local wait=0
-    while [[ $wait -lt 60 ]]; do
-        local status
-        status=$(redis-cli -h "$FALKORDB_HOST" -p "$FALKORDB_PORT" LASTSAVE 2>/dev/null || \
-                 docker exec falkordb redis-cli LASTSAVE 2>/dev/null || echo "0")
-        sleep 2
-        local status2
-        status2=$(redis-cli -h "$FALKORDB_HOST" -p "$FALKORDB_PORT" LASTSAVE 2>/dev/null || \
-                  docker exec falkordb redis-cli LASTSAVE 2>/dev/null || echo "0")
-        if [[ "$status2" != "$status" ]] || [[ $wait -gt 10 ]]; then
-            break
-        fi
-        wait=$((wait + 2))
+    # BGSAVE 완료 대기 (최대 30초)
+    local waited=0
+    local before after
+    before=$(docker exec "$FALKORDB_CONTAINER" redis-cli LASTSAVE 2>/dev/null || echo "0")
+    while [[ $waited -lt 30 ]]; do
+        sleep 2; waited=$((waited + 2))
+        after=$(docker exec "$FALKORDB_CONTAINER" redis-cli LASTSAVE 2>/dev/null || echo "0")
+        [[ "$after" != "$before" ]] && break
     done
 
-    # dump.rdb 복사 (Docker 볼륨 or 직접 경로)
+    # dump.rdb 복사
     local rdb_src=""
-    # 1) Docker 컨테이너에서 직접 복사 시도
-    if docker cp falkordb:/data/dump.rdb "$falkor_dir/dump_${TIMESTAMP}.rdb" 2>/dev/null; then
-        rdb_src="docker"
-    # 2) 볼륨 마운트 경로에서 복사 시도 (docker-compose 볼륨 기본 경로)
+    local rdb_dest="$falkor_dir/dump_${TIMESTAMP}.rdb"
+
+    # 1) docker cp (가장 확실한 방법)
+    if docker cp "${FALKORDB_CONTAINER}:/data/dump.rdb" "$rdb_dest" 2>/dev/null; then
+        rdb_src="docker cp"
+    # 2) Docker 볼륨 직접 접근 (sudo 없이 가능한 경우)
     elif [[ -f "/var/lib/docker/volumes/sementica_falkordb_data/_data/dump.rdb" ]]; then
-        cp "/var/lib/docker/volumes/sementica_falkordb_data/_data/dump.rdb" \
-           "$falkor_dir/dump_${TIMESTAMP}.rdb"
+        cp "/var/lib/docker/volumes/sementica_falkordb_data/_data/dump.rdb" "$rdb_dest"
         rdb_src="volume"
     fi
 
-    if [[ -f "$falkor_dir/dump_${TIMESTAMP}.rdb" ]]; then
+    if [[ -f "$rdb_dest" ]]; then
         local size
-        size=$(du -sh "$falkor_dir/dump_${TIMESTAMP}.rdb" | cut -f1)
-        ok "FalkorDB dump.rdb 백업 완료 ($size) [소스: ${rdb_src:-unknown}]"
+        size=$(du -sh "$rdb_dest" | cut -f1)
+        ok "FalkorDB dump.rdb 백업 완료 ($size) [방법: ${rdb_src}]"
     else
-        warn "FalkorDB RDB 파일 접근 실패 — AOF 활성화 여부 확인 필요"
-        log "  → 수동 복사: docker cp falkordb:/data/dump.rdb $falkor_dir/"
+        err "FalkorDB RDB 파일 접근 실패"
+        log "  컨테이너 이름 확인: docker ps --format '{{.Names}}'"
+        log "  현재 설정: FALKORDB_CONTAINER=$FALKORDB_CONTAINER"
+        log "  .env에 FALKORDB_CONTAINER=<실제이름> 을 추가하세요"
+        return 1
     fi
 
-    # AOF 파일도 백업 (있다면)
-    docker cp falkordb:/data/appendonly.aof \
-        "$falkor_dir/appendonly_${TIMESTAMP}.aof" 2>/dev/null && \
-        ok "FalkorDB AOF 백업 완료" || true
+    # AOF 파일도 백업 (AOF 활성화된 경우)
+    if docker cp "${FALKORDB_CONTAINER}:/data/appendonly.aof" \
+        "$falkor_dir/appendonly_${TIMESTAMP}.aof" 2>/dev/null; then
+        local aof_size
+        aof_size=$(du -sh "$falkor_dir/appendonly_${TIMESTAMP}.aof" | cut -f1)
+        ok "FalkorDB AOF 백업 완료 ($aof_size)"
+    else
+        log "  AOF 파일 없음 (docker-compose.yml에 --appendonly yes 설정 필요)"
+    fi
 }
 
 # ── PostgreSQL 백업 ───────────────────────────────────────────────────────────
@@ -189,13 +192,35 @@ backup_postgres() {
     mkdir -p "$pg_dir"
 
     local out_file="$pg_dir/ops_log_${TIMESTAMP}.sql.gz"
-    if pg_dump "$POSTGRES_URL" --no-owner --no-acl \
-        -t mcp_request_log -t sync_log 2>/dev/null | gzip > "$out_file"; then
+    local pg_err_file="$pg_dir/pg_dump_error.log"
+
+    # pg_dump 명령 확인
+    if ! command -v pg_dump &>/dev/null; then
+        warn "pg_dump 없음 — postgresql-client 설치 필요"
+        log "  Ubuntu: sudo apt-get install -y postgresql-client"
+        log "  현재는 백업 건너뜀 (운영 로그 외 핵심 데이터는 Qdrant/FalkorDB에 있음)"
+        return 0   # 치명적 오류 아님 — 경고만
+    fi
+
+    # pg_dump 실행 (오류 메시지 기록)
+    local dump_exit=0
+    pg_dump "$POSTGRES_URL" \
+        --no-owner --no-acl \
+        -t mcp_request_log -t sync_log \
+        2>"$pg_err_file" | gzip > "$out_file" || dump_exit=$?
+
+    if [[ $dump_exit -eq 0 ]] && [[ -s "$out_file" ]]; then
         local size
         size=$(du -sh "$out_file" | cut -f1)
+        rm -f "$pg_err_file"
         ok "PostgreSQL 백업 완료 → $out_file ($size)"
     else
-        err "PostgreSQL pg_dump 실패"
+        err "PostgreSQL pg_dump 실패 (exit=$dump_exit)"
+        if [[ -s "$pg_err_file" ]]; then
+            log "  오류 내용: $(head -3 "$pg_err_file")"
+        fi
+        log "  POSTGRES_URL 확인: ${POSTGRES_URL//:*@/://<hidden>@}"
+        rm -f "$out_file"   # 빈 파일 제거
         return 1
     fi
 }
