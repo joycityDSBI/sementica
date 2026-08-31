@@ -1,9 +1,10 @@
 """
-Week 4: 골든셋 평가 스크립트
+골든셋 평가 스크립트
 20개 질문으로 Semantica 검색 품질을 자동 평가합니다.
 
 실행:
-    python src/eval/evaluate.py
+    python src/eval/evaluate.py                    # legacy (joycity_pages)
+    python src/eval/evaluate.py --dept strategic   # 본부별 컬렉션 사용
 
 결과:
     data/eval/eval_result_YYYYMMDD_HHMMSS.json
@@ -31,15 +32,33 @@ if _env.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
+import argparse as _argparse
+
 GCP_PROJECT     = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 LOCATION        = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
 EMBED_MODEL     = "text-multilingual-embedding-002"
 QDRANT_URL      = os.environ.get("QDRANT_URL", "http://localhost:6333")
-COLLECTION_NAME = "joycity_pages"
 FALKORDB_HOST   = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT   = int(os.environ.get("FALKORDB_PORT", "6379"))
-GRAPH_NAME      = "joycity_kg"
 CLAUDE_MODEL    = "claude-sonnet-4-6@default"
+
+# 기본값 (--dept 없을 때)
+COLLECTION_NAME = "joycity_pages"
+GRAPH_NAME      = "joycity_kg"
+DEPT_LABEL      = "legacy"
+
+# --dept 인수 처리
+_parser = _argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--dept", default="")
+_known, _ = _parser.parse_known_args()
+
+if _known.dept:
+    sys.path.insert(0, str(ROOT / "src" / "pipeline"))
+    from dept_config import load_dept as _load_dept
+    _cfg = _load_dept(_known.dept)
+    COLLECTION_NAME = _cfg["qdrant_collection"]
+    GRAPH_NAME      = _cfg["falkordb_graph"]
+    DEPT_LABEL      = f"{_cfg['name']} ({_known.dept})"
 
 # ─── 골든셋 ───────────────────────────────────────────────────────────────────
 GOLDEN_SET = [
@@ -268,8 +287,10 @@ def generate_response(context: str, question: str, claude) -> str:
 # ─── 평가 실행 ────────────────────────────────────────────────────────────────
 def run_evaluation():
     print("=" * 60)
-    print("  Semantica 골든셋 평가 — Week 4")
+    print("  Semantica 골든셋 평가")
     print("=" * 60)
+    print(f"  본부: {DEPT_LABEL}")
+    print(f"  컬렉션: {COLLECTION_NAME}  그래프: {GRAPH_NAME}")
     print(f"  시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  총 질문: {len(GOLDEN_SET)}개")
     print()
