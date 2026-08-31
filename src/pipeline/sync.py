@@ -128,10 +128,15 @@ def delete_page_vectors(qc, collection_name: str, source_url: str) -> int:
 
 # ─── FalkorDB 엣지 삭제 (source_url 필터) ────────────────────────────────────
 def delete_page_edges(graph, source_url: str) -> int:
-    """source_url이 일치하는 엣지 전체 삭제. 삭제된 수 반환."""
+    """
+    source_url이 일치하는 자동 생성 엣지만 삭제. 수동 입력 엣지(is_manual=true)는 보존.
+    삭제된 수 반환.
+    """
     try:
         res = graph.query(
-            "MATCH ()-[r:REL {source_url: $url}]->() DELETE r RETURN count(r) AS cnt",
+            "MATCH ()-[r:REL {source_url: $url}]->() "
+            "WHERE r.is_manual IS NULL OR r.is_manual = false "
+            "DELETE r RETURN count(r) AS cnt",
             {"url": source_url}
         )
         return res.result_set[0][0] if res.result_set else 0
