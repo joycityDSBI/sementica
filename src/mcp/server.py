@@ -10,11 +10,11 @@ Claude Code에서 사용할 수 있는 3가지 검색 도구를 제공합니다:
   # stdio (Claude Code 로컬 연결)
   python src/mcp/server.py
 
-  # SSE (원격 연결, 포트 8765)
-  python src/mcp/server.py --transport sse --port 8765
+  # Streamable HTTP (원격 연결, 포트 8765)
+  python src/mcp/server.py --transport streamable-http --port 8765
 
 Claude Code 등록:
-  claude mcp add --transport sse joycity-ontology http://<서버IP>:8765/sse
+  claude mcp add --transport http joycity-ontology http://<서버IP>:8765/mcp
 """
 
 import argparse
@@ -295,10 +295,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="JoyCity Ontology MCP 서버")
     parser.add_argument("--dept",      default="",
                         help="본부 이름 (config/departments.yaml의 key). 미지정 시 legacy 모드")
-    parser.add_argument("--transport", default="sse", choices=["stdio", "sse"],
-                        help="전송 방식 (기본: sse)")
-    parser.add_argument("--host",      default="0.0.0.0", help="SSE 호스트 (기본: 0.0.0.0)")
-    parser.add_argument("--port",      type=int, default=8765, help="SSE 포트 (기본: 8765)")
+    parser.add_argument("--transport", default="streamable-http",
+                        choices=["stdio", "streamable-http", "sse"],
+                        help="전송 방식 (기본: streamable-http)")
+    parser.add_argument("--host",      default="0.0.0.0", help="호스트 (기본: 0.0.0.0)")
+    parser.add_argument("--port",      type=int, default=8765, help="포트 (기본: 8765)")
     args = parser.parse_args()
 
     # 본부 설정 로드 (포트도 departments.yaml 에서 가져올 수 있음)
@@ -316,8 +317,13 @@ if __name__ == "__main__":
             except Exception:
                 pass
 
-    if args.transport == "sse":
-        print(f"🚀 {DEPT_NAME} Ontology MCP 서버 시작 (SSE)")
+    if args.transport == "streamable-http":
+        print(f"🚀 {DEPT_NAME} Ontology MCP 서버 시작 (Streamable HTTP)")
+        print(f"   주소: http://{args.host}:{args.port}/mcp")
+        print(f"   Claude Code 등록: claude mcp add --transport http {args.dept or 'joycity'}-ontology http://<서버IP>:{args.port}/mcp")
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    elif args.transport == "sse":
+        print(f"🚀 {DEPT_NAME} Ontology MCP 서버 시작 (SSE 레거시)")
         print(f"   주소: http://{args.host}:{args.port}/sse")
         print(f"   Claude Code 등록: claude mcp add --transport sse {args.dept or 'joycity'}-ontology http://<서버IP>:{args.port}/sse")
         mcp.run(transport="sse", host=args.host, port=args.port)
