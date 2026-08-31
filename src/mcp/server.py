@@ -20,6 +20,7 @@ Claude Code 등록:
 import argparse
 import json
 import os
+import sys
 import uuid
 from pathlib import Path
 from typing import Any
