@@ -313,8 +313,13 @@ def sync_page(
 # ─── 동기화 상태 관리 ─────────────────────────────────────────────────────────
 def load_sync_state(state_path: Path) -> dict:
     if state_path.exists():
-        return json.loads(state_path.read_text(encoding="utf-8"))
-    # 초기 상태: 1970-01-01 (전체 동기화)
+        text = state_path.read_text(encoding="utf-8").strip()
+        if text:
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                print(f"  ⚠️  sync_state.json 파싱 실패 — 초기 상태로 재설정")
+    # 파일 없거나 비어있거나 손상된 경우: 1970-01-01 (전체 동기화)
     return {"last_sync_time": "1970-01-01T00:00:00.000Z", "total_synced": 0}
 
 
