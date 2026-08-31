@@ -328,6 +328,7 @@ def fetch_modified_pages(client, token: str, since_iso: str) -> list:
     """last_edited_time > since_iso 인 페이지만 반환 (최신순 정렬)"""
     modified = []
     cursor   = None
+    batch    = 1
     while True:
         body = {
             "filter": {"value": "page", "property": "object"},
@@ -347,12 +348,18 @@ def fetch_modified_pages(client, token: str, since_iso: str) -> list:
         results = data.get("results", [])
 
         stop = False
+        added_this_batch = 0
         for page in results:
             last_edited = page.get("last_edited_time", "")
             if last_edited <= since_iso:
                 stop = True
                 break
             modified.append(page)
+            added_this_batch += 1
+
+        print(f"    배치 {batch:02d}: {len(results)}개 조회 → {added_this_batch}개 수정됨 (누적 {len(modified)}개)"
+              + (" ← 기준 시각 도달, 중단" if stop else ""))
+        batch += 1
 
         if stop or not data.get("has_more"):
             break
