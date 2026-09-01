@@ -50,7 +50,11 @@ from notion_fetch import (
     notion_headers, fetch_blocks_recursive, page_title,
     RATE_LIMIT_DELAY,
 )
-from semantica_helper import merge_node, extract_with_fallback, is_decision_triplet, record_decision_node
+from semantica_helper import (
+    merge_node, extract_with_fallback,
+    is_decision_triplet, record_decision_node,
+    upsert_event_node,
+)
 
 # DB 로거 (POSTGRES_URL 없으면 no-op)
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
@@ -69,7 +73,38 @@ FALKORDB_PORT    = int(os.environ.get("FALKORDB_PORT", "6379"))
 CHUNK_SIZE       = 800
 CHUNK_OVERLAP    = 200
 
-# Claude 트리플 추출 프롬프트 (ingest.py와 동일)
+# ─── 이벤트 추출 프롬프트 (ingest.py와 동일) ──────────────────────────────────
+EVENT_EXTRACT_PROMPT = """\
+다음 텍스트에서 게임/서비스의 이벤트·업데이트를 추출하세요.
+날짜가 명시된 항목만 추출합니다. 날짜 형식: YYYY-MM-DD 또는 YY-MM-DD.
+
+이벤트 유형 (event_type):
+  client_update   — 클라이언트 패치·업데이트
+  server_update   — 서버 점검·배포
+  user_event      — 신규·복귀·기간한정 유저 이벤트
+  season          — 시즌 개막·종료
+  content_release — 신규 콘텐츠 오픈
+  maintenance     — 정기 점검
+  incident        — 장애 발생·복구
+  kpi_milestone   — DAU·매출 마일스톤 달성
+
+텍스트:
+{text}
+
+이벤트가 있으면 JSON 배열, 없으면 [] 로만 응답하세요:
+[
+  {{
+    "game":        "게임명",
+    "event_type":  "client_update",
+    "date":        "YYYY-MM-DD",
+    "title":       "이벤트 제목",
+    "description": "상세 설명 (없으면 빈 문자열)",
+    "target":      "신규유저,복귀유저 (해당 없으면 빈 문자열)",
+    "manager":     "담당자 또는 팀 이름 (모르면 빈 문자열)"
+  }}
+]"""
+
+# ─── 트리플 추출 프롬프트 ──────────────────────────────────────────────────────
 EXTRACT_PROMPT = """\
 다음 텍스트에서 엔티티-관계-엔티티 트리플을 추출하세요.
 담당자, 팀, 업무, 정책, 프로젝트, 시스템 간의 명시적 관계를 추출합니다.
@@ -168,6 +203,32 @@ def _norm_pred(val) -> dict:
     return {"name": str(val)}
 
 
+def extract_events_from_text(llm_client, text: str) -> list[dict]:
+    """Claude로 텍스트에서 날짜 기반 시계열 이벤트를 추출합니다."""
+    try:
+        resp = llm_client.messages.create(
+            model=os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@default"),
+            max_tokens=1024,
+            messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=text[:3000])}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [
+                e for e in parsed
+                if isinstance(e, dict) and e.get("game") and e.get("date")
+            ]
+        return []
+    except Exception:
+        return []
+
+
 def extract_triplets(llm_client, text: str) -> list:
     try:
         resp = llm_client.messages.create(
@@ -213,6 +274,7 @@ def sync_page(
         "deleted_edges":   0,
         "new_chunks":      0,
         "new_triplets":    0,
+        "new_events":      0,
     }
 
     print(f"  🔄 {title[:60]}")
@@ -321,6 +383,20 @@ def sync_page(
 
     result["new_triplets"] = edges_created
     print(f"     그래프: {len(node_cache)}개 노드 / {edges_created}개 엣지")
+
+    # 6. 이벤트 추출 + FalkorDB :Event 노드 저장
+    events = extract_events_from_text(llm_client, body)
+    ev_stored = 0
+    if events:
+        for ev in events:
+            ev["source_url"] = source_url
+            nid = upsert_event_node(graph, ev)
+            if nid >= 0:
+                ev_stored += 1
+        print(f"     이벤트: {ev_stored}/{len(events)}개 :Event 노드 저장")
+    else:
+        print(f"     이벤트: 없음")
+    result["new_events"] = ev_stored
 
     return result
 
@@ -527,14 +603,16 @@ def main():
     success  = [r for r in results if not r.get("error") and not r.get("skipped")]
     errors   = [r for r in results if r.get("error")]
     skipped  = [r for r in results if r.get("skipped")]
-    total_v  = sum(r.get("new_chunks", 0) for r in success)
+    total_v  = sum(r.get("new_chunks",   0) for r in success)
     total_e  = sum(r.get("new_triplets", 0) for r in success)
+    total_ev = sum(r.get("new_events",   0) for r in success)
 
     print(f"\n[4/4] 동기화 결과")
     print("=" * 60)
     print(f"  처리: {len(success)}개 / 건너뜀: {len(skipped)}개 / 오류: {len(errors)}개")
     print(f"  신규 벡터 청크: {total_v}개")
     print(f"  신규 트리플:    {total_e}개")
+    print(f"  신규 이벤트:    {total_ev}개 :Event 노드")
 
     # ── 상태 저장 ─────────────────────────────────────────────────────────
     if not args.dry_run:
