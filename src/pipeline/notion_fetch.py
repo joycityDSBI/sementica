@@ -210,6 +210,73 @@ def fetch_blocks_recursive(client, token, block_id, depth=0, max_depth=4) -> str
     return text
 
 
+def extract_db_properties(page: dict) -> dict:
+    """
+    Notion DB 항목의 속성을 평탄한 딕셔너리로 추출합니다.
+    일반 페이지(title 속성만 있는 경우)는 빈 딕셔너리를 반환합니다.
+
+    지원 속성 유형:
+      select, multi_select, date, people, rich_text,
+      number, checkbox, url, email, phone_number
+
+    Returns:
+        {"게임명": "POTC", "이벤트날짜": "2026-04-12", "담당자": ["김도형"], ...}
+    """
+    props  = page.get("properties", {})
+    result = {}
+
+    for key, val in props.items():
+        ptype = val.get("type", "")
+        if ptype == "title":
+            continue   # 제목은 page_title()에서 별도 처리
+        try:
+            if ptype == "select":
+                sel = val.get("select")
+                if sel:
+                    result[key] = sel["name"]
+            elif ptype == "multi_select":
+                items = val.get("multi_select", [])
+                if items:
+                    result[key] = [s["name"] for s in items]
+            elif ptype == "date":
+                dt = val.get("date")
+                if dt and dt.get("start"):
+                    result[key] = dt["start"][:10]   # YYYY-MM-DD 만
+            elif ptype == "people":
+                people = val.get("people", [])
+                names  = [p.get("name", "") for p in people if p.get("name")]
+                if names:
+                    result[key] = names
+            elif ptype == "rich_text":
+                texts = val.get("rich_text", [])
+                text  = "".join(t.get("plain_text", "") for t in texts).strip()
+                if text:
+                    result[key] = text
+            elif ptype == "number":
+                num = val.get("number")
+                if num is not None:
+                    result[key] = num
+            elif ptype == "checkbox":
+                result[key] = val.get("checkbox", False)
+            elif ptype == "url":
+                url = val.get("url")
+                if url:
+                    result[key] = url
+            elif ptype == "email":
+                email = val.get("email")
+                if email:
+                    result[key] = email
+            elif ptype == "phone_number":
+                phone = val.get("phone_number")
+                if phone:
+                    result[key] = phone
+            # relation은 ID만 있어 이름이 없으므로 생략
+        except Exception:
+            continue
+
+    return result
+
+
 def page_title(page: dict) -> str:
     props = page.get("properties", {})
     for key in ("title", "Name", "이름", "제목"):
@@ -227,28 +294,40 @@ def safe_filename(title: str) -> str:
 
 # ─── 페이지 저장 ──────────────────────────────────────────────────────────────
 def save_page(client, token, page, idx, output_dir: Path) -> dict:
-    page_id = page["id"].replace("-", "")
-    title   = page_title(page)
-    url     = page.get("url", "")
+    page_id  = page["id"].replace("-", "")
+    title    = page_title(page)
+    url      = page.get("url", "")
+    db_props = extract_db_properties(page)   # DB 항목이면 속성 추출, 일반 페이지면 {}
 
     print(f"  [{idx:03d}] {title[:60]}")
     print(f"        {url}")
+    if db_props:
+        print(f"        DB 속성: {list(db_props.keys())}")
 
     try:
         text       = fetch_blocks_recursive(client, token, page_id)
         word_count = len(text.split())
 
+        # frontmatter 구성 — DB 속성이 있으면 db_properties 줄 추가
+        frontmatter = (
+            f"---\n"
+            f"title: {title}\n"
+            f"notion_url: {url}\n"
+            f"page_id: {page_id}\n"
+        )
+        if db_props:
+            frontmatter += f"db_properties: {json.dumps(db_props, ensure_ascii=False)}\n"
+        frontmatter += "---\n\n"
+
         fname    = f"{idx:03d}_{safe_filename(title)}.md"
         out_path = output_dir / fname
-        out_path.write_text(
-            f"---\ntitle: {title}\nnotion_url: {url}\npage_id: {page_id}\n---\n\n{text}",
-            encoding="utf-8",
-        )
+        out_path.write_text(frontmatter + text, encoding="utf-8")
 
         ok = word_count >= 50
         print(f"        저장: {fname} ({word_count} 단어) {'✅' if ok else '⚠️ 텍스트 부족'}")
         return {"idx": idx, "title": title, "url": url, "page_id": page_id,
-                "word_count": word_count, "file": str(out_path), "meaningful": ok}
+                "word_count": word_count, "file": str(out_path), "meaningful": ok,
+                "db_properties": db_props}
     except Exception as e:
         print(f"        ❌ 오류: {e}")
         return {"idx": idx, "title": title, "url": url, "meaningful": False, "error": str(e)}

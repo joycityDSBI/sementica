@@ -212,9 +212,11 @@ def init_falkordb(reset: bool = False):
 
 # ─── 파싱 유틸 ───────────────────────────────────────────────────────────────
 def parse_md(path: Path) -> dict:
-    """마크다운 파일에서 frontmatter + body 파싱"""
+    """마크다운 파일에서 frontmatter + body 파싱.
+    db_properties 줄이 있으면 JSON으로 파싱해 meta에 포함합니다.
+    """
     content = path.read_text(encoding="utf-8")
-    meta = {"title": path.stem, "notion_url": "", "page_id": ""}
+    meta = {"title": path.stem, "notion_url": "", "page_id": "", "db_properties": {}}
     body = content
     if content.startswith("---"):
         end = content.find("---", 3)
@@ -222,7 +224,15 @@ def parse_md(path: Path) -> dict:
             for line in content[3:end].splitlines():
                 if ":" in line:
                     k, _, v = line.partition(":")
-                    meta[k.strip()] = v.strip()
+                    k = k.strip()
+                    v = v.strip()
+                    if k == "db_properties":
+                        try:
+                            meta["db_properties"] = json.loads(v)
+                        except Exception:
+                            pass
+                    else:
+                        meta[k] = v
             body = content[end + 3:].strip()
     return {"meta": meta, "body": body, "file": str(path)}
 
@@ -247,6 +257,42 @@ def _norm_pred(val) -> dict:
                 pass
         return pred
     return {"name": str(val)}
+
+
+# DB 속성 키 별칭 — 다양한 한국어/영어 컬럼명을 통일
+_DATE_KEYS    = {"이벤트날짜", "날짜", "일자", "date", "event_date", "시작일", "시작날짜"}
+_GAME_KEYS    = {"게임명", "게임", "game", "product", "서비스명", "서비스"}
+_TYPE_KEYS    = {"이벤트유형", "유형", "event_type", "type", "종류"}
+_MANAGER_KEYS = {"담당자", "담당팀", "manager", "owner", "담당"}
+
+
+def _event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | None:
+    """
+    Notion DB 속성에서 이벤트 정보를 추출합니다.
+    날짜 + 게임명이 모두 있을 때만 Event 노드로 변환합니다.
+    LLM 없이 100% 정확하게 처리됩니다.
+    """
+    def _first(keys):
+        for k in keys:
+            if k in db_props:
+                v = db_props[k]
+                return ", ".join(v) if isinstance(v, list) else str(v)
+        return None
+
+    date = _first(_DATE_KEYS)
+    game = _first(_GAME_KEYS)
+    if not date or not game:
+        return None   # 필수 필드 없으면 이벤트 아님
+
+    return {
+        "game":        game,
+        "event_type":  _first(_TYPE_KEYS) or "user_event",
+        "date":        date[:10],
+        "title":       title,
+        "description": "",
+        "manager":     _first(_MANAGER_KEYS) or "",
+        "source_url":  source_url,
+    }
 
 
 def extract_events_from_text(text: str) -> list[dict]:
@@ -477,20 +523,37 @@ def ingest_page(path: Path, dry_run: bool = False) -> dict:
             result["graph"] = {"nodes": 0, "edges": 0}
             print(f"     그래프: 트리플 없음 — 건너뜀")
 
-        # 4. 이벤트 추출 및 저장
-        events = extract_events_from_text(body)
-        result["event_count"] = len(events)
-        if events:
-            ev_stored = 0
-            for ev in events:
-                ev["source_url"] = meta.get("notion_url", "")
+        # 4. 이벤트 저장 (DB 속성 우선 → 없으면 LLM 텍스트 추출)
+        source_url  = meta.get("notion_url", "")
+        db_props    = meta.get("db_properties", {})
+        ev_stored   = 0
+        skip_llm_ev = False
+
+        # 4a. Notion DB 속성에서 직접 생성 (LLM 없이, 정확도 100%)
+        if db_props:
+            ev = _event_from_db_props(db_props, source_url, meta.get("title", ""))
+            if ev:
                 nid = upsert_event_node(_falkordb, ev)
                 if nid >= 0:
-                    ev_stored += 1
-            print(f"     이벤트: {ev_stored}/{len(events)}개 :Event 노드 저장")
-        else:
-            result["event_count"] = 0
-            print(f"     이벤트: 없음 (날짜 명시 이벤트 미감지)")
+                    ev_stored   += 1
+                    skip_llm_ev  = True
+                    print(f"     이벤트: DB 속성에서 직접 생성 ({ev['game']} / {ev['date']})")
+
+        # 4b. DB 속성에 이벤트 없으면 LLM으로 텍스트 추출
+        if not skip_llm_ev:
+            events = extract_events_from_text(body)
+            if events:
+                for ev in events:
+                    ev["source_url"] = source_url
+                    nid = upsert_event_node(_falkordb, ev)
+                    if nid >= 0:
+                        ev_stored += 1
+                if ev_stored:
+                    print(f"     이벤트: {ev_stored}/{len(events)}개 :Event 노드 저장 (LLM 추출)")
+            else:
+                print(f"     이벤트: 없음 (날짜 명시 이벤트 미감지)")
+
+        result["event_count"] = ev_stored
 
         # API 레이트 리밋 준수
         time.sleep(0.5)

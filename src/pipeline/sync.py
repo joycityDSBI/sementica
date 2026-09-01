@@ -48,6 +48,7 @@ except ImportError:
 from dept_config import load_dept
 from notion_fetch import (
     notion_headers, fetch_blocks_recursive, page_title,
+    extract_db_properties,
     RATE_LIMIT_DELAY,
 )
 from semantica_helper import (
@@ -103,6 +104,45 @@ EVENT_EXTRACT_PROMPT = """\
     "manager":     "담당자 또는 팀 이름 (모르면 빈 문자열)"
   }}
 ]"""
+
+# ─── DB 속성 키 별칭 ─────────────────────────────────────────────────────────
+_DATE_KEYS    = {"이벤트날짜", "날짜", "일자", "date", "event_date", "시작일", "시작날짜"}
+_GAME_KEYS    = {"게임명", "게임", "game", "product", "서비스명", "서비스"}
+_TYPE_KEYS    = {"이벤트유형", "유형", "event_type", "type", "종류"}
+_MANAGER_KEYS = {"담당자", "담당팀", "manager", "owner", "담당"}
+
+
+def _event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | None:
+    """
+    Notion DB 속성 딕셔너리에서 Event dict를 직접 생성합니다.
+    날짜와 게임명이 모두 있을 때만 반환, 없으면 None.
+    """
+    if not db_props:
+        return None
+
+    date_val = next((db_props[k] for k in _DATE_KEYS if k in db_props), None)
+    game_val = next((db_props[k] for k in _GAME_KEYS if k in db_props), None)
+    if not date_val or not game_val:
+        return None
+
+    type_val = next((db_props[k] for k in _TYPE_KEYS if k in db_props), "")
+    mgr_raw  = next((db_props[k] for k in _MANAGER_KEYS if k in db_props), "")
+    if isinstance(mgr_raw, list):
+        mgr_val = ", ".join(mgr_raw)
+    else:
+        mgr_val = str(mgr_raw) if mgr_raw else ""
+
+    return {
+        "game":        str(game_val),
+        "date":        str(date_val)[:10],
+        "title":       title,
+        "event_type":  str(type_val),
+        "manager":     mgr_val,
+        "source_url":  source_url,
+        "description": "",
+        "target":      "",
+    }
+
 
 # ─── 트리플 추출 프롬프트 ──────────────────────────────────────────────────────
 EXTRACT_PROMPT = """\
@@ -385,17 +425,32 @@ def sync_page(
     print(f"     그래프: {len(node_cache)}개 노드 / {edges_created}개 엣지")
 
     # 6. 이벤트 추출 + FalkorDB :Event 노드 저장
-    events = extract_events_from_text(llm_client, body)
-    ev_stored = 0
-    if events:
-        for ev in events:
-            ev["source_url"] = source_url
+    # 6a. Notion DB 속성에서 직접 생성 (LLM 없음, 100% 정확)
+    ev_stored    = 0
+    skip_llm_ev  = False
+    db_props     = extract_db_properties(page_meta)
+    if db_props:
+        ev = _event_from_db_props(db_props, source_url, title)
+        if ev:
             nid = upsert_event_node(graph, ev)
             if nid >= 0:
-                ev_stored += 1
-        print(f"     이벤트: {ev_stored}/{len(events)}개 :Event 노드 저장")
-    else:
-        print(f"     이벤트: 없음")
+                ev_stored   += 1
+                skip_llm_ev  = True
+            print(f"     이벤트(DB속성): {ev['game']} / {ev['date']} / {ev['event_type'] or '유형미지정'} → {'저장' if nid >= 0 else '실패'}")
+
+    # 6b. DB 속성에 이벤트 없으면 LLM 텍스트 추출
+    if not skip_llm_ev:
+        events = extract_events_from_text(llm_client, body)
+        if events:
+            for ev in events:
+                ev["source_url"] = source_url
+                nid = upsert_event_node(graph, ev)
+                if nid >= 0:
+                    ev_stored += 1
+            print(f"     이벤트(LLM): {ev_stored}/{len(events)}개 :Event 노드 저장")
+        else:
+            print(f"     이벤트: 없음")
+
     result["new_events"] = ev_stored
 
     return result
