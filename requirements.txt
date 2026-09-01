@@ -5,6 +5,7 @@
 
 # ── Vertex AI / Claude ────────────────────────────────────────────────────────
 anthropic[vertex]>=0.40.0
+google-genai>=1.0.0               # google.genai (Vertex AI 통합 SDK)
 google-cloud-aiplatform>=1.38.0   # Text Embedding API (torch 불필요)
 
 # ── 벡터 스토어 ───────────────────────────────────────────────────────────────
@@ -27,3 +28,4 @@ psycopg2-binary>=2.9.0
 # ── 유틸 ──────────────────────────────────────────────────────────────────────
 httpx>=0.24.0
 numpy>=1.24.0
+pyyaml>=6.0.0                     # departments.yaml 파싱
