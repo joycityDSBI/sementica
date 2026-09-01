@@ -376,7 +376,7 @@ if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
             )
             items = parse_qa_response(msg.content[0].text)
             verified = 0
-        for item in items:
+            for item in items:
                 ok = verify_by_search(item["question"], item["answer"])
                 if ok:
                     item["source_url"] = chunk[0].get("url", "")
