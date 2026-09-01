@@ -239,20 +239,25 @@ def parse_qa_response(text: str) -> list:
         return []
 
 
-# ─── 검색 기반 검증 함수 ──────────────────────────────────────────────────────
-VERIFY_PROMPT = """다음 검색 결과에 질문의 정답이 포함되어 있는지 판단하세요.
+# ─── 검색 기반 검증 함수 (전체 파이프라인) ───────────────────────────────────
+_ANSWER_PROMPT = """아래 컨텍스트를 바탕으로 질문에 답하세요. 컨텍스트에 없는 내용은 답하지 마세요.
 
-질문: {question}
-정답 (기준): {answer}
-
-검색 결과:
+컨텍스트:
 {context}
 
-판단 기준:
-- 검색 결과 텍스트에서 정답의 핵심 정보를 추출할 수 있으면 "pass"
-- 정보가 없거나 불완전하면 "fail"
+질문: {question}
 
-JSON으로만 응답: {{"verdict": "pass"|"fail", "reason": "한 줄"}}"""
+답변 (간결하게):"""
+
+_SCORE_PROMPT = """다음 응답이 정답의 핵심 정보를 포함하는지 판단하세요.
+
+질문: {question}
+정답: {answer}
+응답: {response}
+
+JSON으로만 응답: {{"verdict": "pass"|"fail", "reason": "한 줄"}}
+- pass: 응답이 정답의 핵심 정보를 포함
+- fail: 응답에 정보 없음/틀림/부분적"""
 
 
 def _embed_text(text: str) -> list:
@@ -263,8 +268,13 @@ def _embed_text(text: str) -> list:
 
 
 def verify_by_search(question: str, answer: str, search_limit: int = 7) -> bool:
-    """실제 검색 결과로 Q&A 검증 — 검색 결과에서 답변 가능하면 True"""
+    """검색 → 답변 생성 → 정답 일치 확인 전체 파이프라인으로 Q&A 검증.
+
+    평가 시와 동일한 흐름으로 검증하므로
+    '검색은 되지만 답변 생성 때 정보가 누락되는' 질문도 걸러낼 수 있습니다.
+    """
     try:
+        # 1. 검색
         vec = _embed_text(question)
         result = qdrant.query_points(
             collection_name=COLLECTION_NAME,
@@ -272,24 +282,39 @@ def verify_by_search(question: str, answer: str, search_limit: int = 7) -> bool:
             limit=search_limit,
             with_payload=True,
         )
+        if not result.points:
+            return False
+
         context = ""
         for h in result.points:
             p = h.payload or {}
-            context += f"[{p.get('title','')}]\n{p.get('text','')[:500]}\n\n"
+            context += f"[{p.get('title','')}]\n{p.get('text','')[:600]}\n\n"
 
-        msg = claude.messages.create(
+        # 2. 답변 생성
+        gen = claude.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=200,
+            messages=[{
+                "role": "user",
+                "content": _ANSWER_PROMPT.format(
+                    context=context[:4000], question=question
+                ),
+            }],
+        )
+        response = gen.content[0].text.strip()
+
+        # 3. 생성된 답변이 정답과 일치하는지 채점
+        judge = claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=100,
             messages=[{
                 "role": "user",
-                "content": VERIFY_PROMPT.format(
-                    question=question,
-                    answer=answer,
-                    context=context[:3000],
+                "content": _SCORE_PROMPT.format(
+                    question=question, answer=answer, response=response[:500]
                 ),
             }],
         )
-        text = msg.content[0].text.strip()
+        text = judge.content[0].text.strip()
         m = re.search(r'\{.*?\}', text, re.DOTALL)
         if m:
             verdict = json.loads(m.group()).get("verdict", "fail")
