@@ -191,24 +191,17 @@ def init_qdrant(reset: bool = False):
 def init_falkordb(reset: bool = False):
     global _falkordb
     try:
-        from semantica.graph_store.falkordb_store import FalkorDBStore
-        store = FalkorDBStore(
-            host=FALKORDB_HOST,
-            port=FALKORDB_PORT,
-            graph_name=GRAPH_NAME,
-        )
-        store.connect()
+        import falkordb as _fdb_lib
+        db = _fdb_lib.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
 
         if reset:
             try:
-                store.delete_graph(GRAPH_NAME)
+                db.delete_graph(GRAPH_NAME)
                 print(f"  🗑️  FalkorDB 그래프 삭제: {GRAPH_NAME}")
-                store.connect()
             except Exception:
                 pass
 
-        store.select_graph(GRAPH_NAME)
-        _falkordb = store
+        _falkordb = db.select_graph(GRAPH_NAME)
         print(f"  ✅ FalkorDB 연결 완료 — 그래프: {GRAPH_NAME}")
         return True
     except Exception as e:
@@ -416,11 +409,19 @@ def store_graph(triplets: list, source_url: str) -> dict:
                 rel_props[k] = pred[k]
 
         try:
-            _falkordb.create_relationship(
-                start_node_id=subj_id,
-                end_node_id=obj_id,
-                rel_type="REL",
-                properties=rel_props,
+            # rel_props 키를 파라미터명 충돌 없이 SET으로 처리
+            params = {"_s": subj_id, "_o": obj_id}
+            set_parts = []
+            for k, v in rel_props.items():
+                pk = f"_p_{k}"
+                params[pk] = v
+                set_parts.append(f"r.{k} = ${pk}")
+            set_clause = ("SET " + ", ".join(set_parts)) if set_parts else ""
+            _falkordb.query(
+                "MATCH (s) WHERE id(s) = $_s "
+                "MATCH (o) WHERE id(o) = $_o "
+                f"CREATE (s)-[r:REL]->(o) {set_clause}",
+                params,
             )
             edges_created += 1
 
