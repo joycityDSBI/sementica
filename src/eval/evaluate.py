@@ -2,9 +2,15 @@
 골든셋 평가 스크립트
 20개 질문으로 Semantica 검색 품질을 자동 평가합니다.
 
+평가 대상 도구:
+    - hybrid_search  : 벡터 + 그래프 결합 검색 (주 평가 도구)
+    - path_search    : 두 엔티티 간 최단 경로 탐색 동작 확인
+    - decision_trace : 의사결정 체인 탐색 동작 확인
+
 실행:
     python src/eval/evaluate.py                    # legacy (joycity_pages)
     python src/eval/evaluate.py --dept strategic   # 본부별 컬렉션 사용
+    python src/eval/evaluate.py --dept strategic --skip-tools  # 도구 동작 확인 생략
 
 결과:
     data/eval/eval_result_YYYYMMDD_HHMMSS.json
