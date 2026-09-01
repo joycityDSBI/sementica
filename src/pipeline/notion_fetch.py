@@ -294,10 +294,11 @@ def safe_filename(title: str) -> str:
 
 # ─── 페이지 저장 ──────────────────────────────────────────────────────────────
 def save_page(client, token, page, idx, output_dir: Path) -> dict:
-    page_id  = page["id"].replace("-", "")
-    title    = page_title(page)
-    url      = page.get("url", "")
-    db_props = extract_db_properties(page)   # DB 항목이면 속성 추출, 일반 페이지면 {}
+    page_id      = page["id"].replace("-", "")
+    title        = page_title(page)
+    url          = page.get("url", "")
+    last_edited  = page.get("last_edited_time", "")   # ISO 8601 문자열
+    db_props     = extract_db_properties(page)   # DB 항목이면 속성 추출, 일반 페이지면 {}
 
     print(f"  [{idx:03d}] {title[:60]}")
     print(f"        {url}")
@@ -314,6 +315,7 @@ def save_page(client, token, page, idx, output_dir: Path) -> dict:
             f"title: {title}\n"
             f"notion_url: {url}\n"
             f"page_id: {page_id}\n"
+            f"last_edited_time: {last_edited}\n"
         )
         if db_props:
             frontmatter += f"db_properties: {json.dumps(db_props, ensure_ascii=False)}\n"

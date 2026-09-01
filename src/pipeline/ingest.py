@@ -29,6 +29,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
+try:
+    from db_logger import upsert_notion_page as _upsert_notion_page
+except Exception:
+    def _upsert_notion_page(*a, **kw): pass   # PostgreSQL 없으면 no-op
+
 from semantica_helper import (
     merge_node, extract_with_fallback,
     is_decision_triplet, record_decision_node,
@@ -225,7 +231,7 @@ def parse_md(path: Path) -> dict:
     db_properties 줄이 있으면 JSON으로 파싱해 meta에 포함합니다.
     """
     content = path.read_text(encoding="utf-8")
-    meta = {"title": path.stem, "notion_url": "", "page_id": "", "db_properties": {}}
+    meta = {"title": path.stem, "notion_url": "", "page_id": "", "last_edited_time": "", "db_properties": {}}
     body = content
     if content.startswith("---"):
         end = content.find("---", 3)
@@ -515,7 +521,7 @@ def store_graph(triplets: list, source_url: str) -> dict:
 
 
 # ─── 페이지 인제스천 ─────────────────────────────────────────────────────────
-def ingest_page(path: Path, dry_run: bool = False) -> dict:
+def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
     page = parse_md(path)
     meta = page["meta"]
     body = page["body"]
@@ -526,6 +532,16 @@ def ingest_page(path: Path, dry_run: bool = False) -> dict:
 
     if word_count < 50:
         print(f"     ⚠️  텍스트 부족 — 건너뜀")
+        if not dry_run and meta.get("page_id"):
+            _upsert_notion_page(
+                page_id=meta["page_id"], dept=dept,
+                notion_url=meta.get("notion_url", ""),
+                title=meta.get("title", ""),
+                last_edited_time=meta.get("last_edited_time"),
+                word_count=word_count,
+                is_db_item=bool(meta.get("db_properties")),
+                status="skipped",
+            )
         return {"file": str(path), "skipped": True, "reason": "텍스트 부족"}
 
     result = {
@@ -591,6 +607,22 @@ def ingest_page(path: Path, dry_run: bool = False) -> dict:
                 print(f"     이벤트: 없음 (날짜 명시 이벤트 미감지)")
 
         result["event_count"] = ev_stored
+
+        # ── notion_pages 레지스트리 업서트 (PostgreSQL) ──────────────────
+        if meta.get("page_id"):
+            _upsert_notion_page(
+                page_id=meta["page_id"],
+                dept=dept,
+                notion_url=meta.get("notion_url", ""),
+                title=meta.get("title", ""),
+                last_edited_time=meta.get("last_edited_time"),
+                word_count=word_count,
+                chunk_count=result.get("chunk_count", 0),
+                triplet_count=result.get("triplet_count", 0),
+                event_count=ev_stored,
+                is_db_item=bool(meta.get("db_properties")),
+                status="ok",
+            )
     else:
         print(f"     [DRY-RUN] 저장 없이 확인만")
 
@@ -687,7 +719,7 @@ def main():
     _t_start = time.time()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(ingest_page, f, args.dry_run): f for f in md_files}
+        futures = {executor.submit(ingest_page, f, args.dry_run, args.dept): f for f in md_files}
         done = 0
         for future in as_completed(futures):
             f = futures[future]

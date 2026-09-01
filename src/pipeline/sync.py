@@ -60,9 +60,10 @@ from semantica_helper import (
 # DB 로거 (POSTGRES_URL 없으면 no-op)
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 try:
-    from db_logger import log_sync_result
+    from db_logger import log_sync_result, upsert_notion_page as _upsert_notion_page
 except Exception:
     def log_sync_result(*a, **kw): pass
+    def _upsert_notion_page(*a, **kw): pass
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
 GCP_PROJECT      = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
@@ -299,7 +300,7 @@ def extract_triplets(llm_client, text: str) -> list:
 def sync_page(
     notion_client, token: str, page_meta: dict,
     qc, embed_client, llm_client, graph,
-    collection_name: str, dry_run: bool = False,
+    collection_name: str, dry_run: bool = False, dept: str = "",
 ) -> dict:
     """
     단일 페이지를 Notion에서 가져와 Qdrant + FalkorDB 업데이트
@@ -337,6 +338,14 @@ def sync_page(
     if len(body.split()) < 50:
         print(f"     ⚠️  텍스트 부족 ({len(body.split())} 단어) — 건너뜀")
         result["skipped"] = True
+        _upsert_notion_page(
+            page_id=page_id, dept=dept,
+            notion_url=source_url, title=title,
+            last_edited_time=page_meta.get("last_edited_time"),
+            word_count=len(body.split()),
+            is_db_item=bool(extract_db_properties(page_meta)),
+            status="skipped",
+        )
         return result
 
     # 2. 기존 벡터 삭제
@@ -458,6 +467,21 @@ def sync_page(
             print(f"     이벤트: 없음")
 
     result["new_events"] = ev_stored
+
+    # ── notion_pages 레지스트리 업서트 (PostgreSQL) ───────────────────────────
+    _upsert_notion_page(
+        page_id=page_id,
+        dept=dept,
+        notion_url=source_url,
+        title=title,
+        last_edited_time=page_meta.get("last_edited_time"),
+        word_count=len(body.split()),
+        chunk_count=result.get("new_chunks", 0),
+        triplet_count=result.get("new_triplets", 0),
+        event_count=ev_stored,
+        is_db_item=bool(extract_db_properties(page_meta)),
+        status="ok",
+    )
 
     return result
 
@@ -655,7 +679,7 @@ def main():
             r = sync_page(
                 notion_client, token, page,
                 qc, embed_client, llm_client, graph,
-                collection_name, dry_run=args.dry_run,
+                collection_name, dry_run=args.dry_run, dept=args.dept,
             )
             results.append(r)
             time.sleep(0.5)

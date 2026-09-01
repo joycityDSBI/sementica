@@ -185,3 +185,80 @@ def log_sync_result(
         print(f"  [DB] sync_log 기록 실패: {e}")
     finally:
         conn.close()
+
+
+# ─── Notion 페이지 레지스트리 ─────────────────────────────────────────────────
+
+def upsert_notion_page(
+    page_id: str,
+    dept: str,
+    notion_url: str = "",
+    title: str = "",
+    last_edited_time=None,   # datetime | ISO 문자열 | None
+    word_count: int = 0,
+    chunk_count: int = 0,
+    triplet_count: int = 0,
+    event_count: int = 0,
+    is_db_item: bool = False,
+    status: str = "ok",      # "ok" | "skipped" | "error"
+    error_msg: str = None,
+) -> None:
+    """
+    Notion 페이지 1건을 notion_pages 테이블에 UPSERT합니다.
+    (page_id, dept) 조합이 이미 있으면 갱신, 없으면 삽입.
+    PostgreSQL 연결 없으면 no-op.
+    """
+    conn = _get_conn()
+    if conn is None:
+        return
+    # last_edited_time 정규화
+    if isinstance(last_edited_time, str) and last_edited_time:
+        try:
+            last_edited_time = datetime.fromisoformat(
+                last_edited_time.replace("Z", "+00:00")
+            )
+        except Exception:
+            last_edited_time = None
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO notion_pages
+                        (page_id, dept, notion_url, title, last_edited_time,
+                         last_ingested_at, word_count, chunk_count, triplet_count,
+                         event_count, is_db_item, status, error_msg)
+                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT ON CONSTRAINT uq_notion_pages_page_dept
+                    DO UPDATE SET
+                        notion_url       = EXCLUDED.notion_url,
+                        title            = EXCLUDED.title,
+                        last_edited_time = EXCLUDED.last_edited_time,
+                        last_ingested_at = NOW(),
+                        word_count       = EXCLUDED.word_count,
+                        chunk_count      = EXCLUDED.chunk_count,
+                        triplet_count    = EXCLUDED.triplet_count,
+                        event_count      = EXCLUDED.event_count,
+                        is_db_item       = EXCLUDED.is_db_item,
+                        status           = EXCLUDED.status,
+                        error_msg        = EXCLUDED.error_msg
+                    """,
+                    (
+                        page_id[:32] if page_id else "",
+                        dept[:50]    if dept     else "",
+                        notion_url or "",
+                        (title or "")[:500],
+                        last_edited_time,
+                        word_count,
+                        chunk_count,
+                        triplet_count,
+                        event_count,
+                        is_db_item,
+                        (status or "ok")[:20],
+                        error_msg,
+                    ),
+                )
+    except Exception as e:
+        print(f"  [DB] notion_pages upsert 실패: {e}")
+    finally:
+        conn.close()
