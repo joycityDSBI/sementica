@@ -203,24 +203,114 @@ def graph_search(graph, entity: str) -> list:
     return relations
 
 
-def hybrid_search(embed_client, qdrant, graph, query: str) -> dict:
-    sem = semantic_search(embed_client, qdrant, query, limit=5)
-    grp = graph_search(graph, query)
+_COMPLEX_PATTERNS = frozenset([
+    "이고", "이며", "하는", "이면서", "이자",
+    "담당하는", "작성한", "소속된", "승인한", "결정한",
+    "관련된", "연관된", "포함된", "연결된",
+])
 
-    # 관계 요약 텍스트 생성
+
+def _is_complex_query(query: str) -> bool:
+    """복합 쿼리 여부 휴리스틱 탐지 (15자+ AND 복합 패턴 OR 6단어+)"""
+    if len(query) >= 15 and any(p in query for p in _COMPLEX_PATTERNS):
+        return True
+    if len(query.split()) >= 6:
+        return True
+    return False
+
+
+def _decompose_query(query: str, claude) -> list:
+    """Claude로 복합 쿼리를 서브쿼리 2~3개로 분해"""
+    import re as _re
+    try:
+        msg = claude.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "다음 복합 질문을 독립적으로 검색 가능한 서브쿼리 2~3개로 분해하세요.\n"
+                    "JSON 배열만 반환하세요. 예: [\"서브쿼리1\", \"서브쿼리2\"]\n\n"
+                    f"질문: {query}"
+                ),
+            }],
+        )
+        text = msg.content[0].text.strip()
+        m = _re.search(r'\[.*?\]', text, _re.DOTALL)
+        if m:
+            parts = json.loads(m.group())
+            parts = [p.strip() for p in parts if isinstance(p, str) and p.strip()]
+            if 2 <= len(parts) <= 4:
+                return parts
+    except Exception:
+        pass
+    return [query]   # 분해 실패 시 원본 반환
+
+
+def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
+    """벡터 + 그래프 혼합 검색.
+
+    복합 쿼리일 경우 Claude로 서브쿼리 분해 후 각각 검색하고,
+    URL 중복 제거 + coverage 가중 재랭킹으로 병합합니다.
+    """
+    # ── 1. 복합 쿼리 감지 및 분해 ──────────────────────────────────────────
+    sub_queries = [query]
+    decomposed = False
+    if claude and _is_complex_query(query):
+        sub_queries = _decompose_query(query, claude)
+        decomposed = len(sub_queries) > 1
+
+    # ── 2. 서브쿼리별 검색 및 결과 수집 ────────────────────────────────────
+    url_counts: dict = {}
+    url_best: dict = {}
+    all_graph: list = []
+    graph_seen: set = set()
+
+    for sq in sub_queries:
+        sem = semantic_search(embed_client, qdrant, sq, limit=5)
+        grp = graph_search(graph, sq)
+
+        for s in sem:
+            url = s.get("url", "")
+            if url not in url_counts:
+                url_counts[url] = 0
+                url_best[url] = s.copy()
+            url_counts[url] += 1
+            if s["score"] > url_best[url]["score"]:
+                url_best[url] = s.copy()
+
+        for r in grp:
+            key = (r["subject"], r["predicate"], r["object"])
+            if key not in graph_seen:
+                graph_seen.add(key)
+                all_graph.append(r)
+
+    # ── 3. coverage 가중 재랭킹 ────────────────────────────────────────────
+    sem_final = []
+    for url, item in url_best.items():
+        coverage = url_counts[url]
+        sem_final.append({
+            **item,
+            "score": round(item["score"] * (1 + 0.15 * (coverage - 1)), 4),
+            "coverage": coverage,
+        })
+    sem_final.sort(key=lambda x: x["score"], reverse=True)
+
+    # ── 4. 컨텍스트 합성 ───────────────────────────────────────────────────
     graph_text = ""
-    for r in grp[:10]:
+    for r in all_graph[:10]:
         cond = f" (조건: {r['condition']})" if r.get("condition") else ""
         graph_text += f"- {r['subject']} →[{r['predicate']}]→ {r['object']}{cond}\n"
 
-    # 벡터 검색 텍스트 합치기
     vector_text = ""
-    for s in sem:
+    for s in sem_final:
         vector_text += f"[{s['title']}]\n{s['text']}\n\n"
 
     return {
-        "semantic": sem,
-        "graph": grp,
+        "semantic": sem_final,
+        "graph": all_graph,
+        "decomposed": decomposed,
+        "sub_queries": sub_queries if decomposed else [],
         "combined_context": (
             "=== 그래프 관계 ===\n" + graph_text +
             "\n=== 관련 문서 ===\n" + vector_text
@@ -318,13 +408,16 @@ def run_evaluation():
         print(f"[{i:02d}/20] {qid} ({cat} / {diff})")
         print(f"  Q: {question}")
 
-        # 1. 하이브리드 검색
+        # 1. 하이브리드 검색 (복합 쿼리 자동 분해)
         t0 = time.time()
         try:
-            search_result = hybrid_search(embed_client, qdrant, graph, question)
+            search_result = hybrid_search(embed_client, qdrant, graph, question,
+                                          claude=claude)
             context = search_result["combined_context"]
             sem_count = len(search_result["semantic"])
             grp_count = len(search_result["graph"])
+            decomposed = search_result.get("decomposed", False)
+            sub_queries = search_result.get("sub_queries", [])
         except Exception as e:
             print(f"  ❌ 검색 오류: {e}")
             results.append({**item, "score": 0.0, "reason": f"검색 실패: {e}",
@@ -344,7 +437,8 @@ def run_evaluation():
 
         score_icon = "✅" if score >= 0.8 else ("⚡" if score >= 0.4 else "❌")
         print(f"  {score_icon} 점수: {score:.1f} | {reason}")
-        print(f"     검색: 벡터 {sem_count}건 + 그래프 {grp_count}건 ({search_time}s)")
+        decomp_info = f" [분해: {len(sub_queries)}개]" if decomposed else ""
+        print(f"     검색: 벡터 {sem_count}건 + 그래프 {grp_count}건 ({search_time}s){decomp_info}")
         print()
 
         row = {
