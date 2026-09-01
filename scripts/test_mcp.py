@@ -89,11 +89,27 @@ def extract_result(resp: dict):
     content = result.get("content", [])
     if content:
         texts = [c.get("text", "") for c in content if c.get("type") == "text"]
-        try:
-            return json.loads(texts[0]), None
-        except Exception:
-            return texts[0], None
+        if texts:
+            try:
+                parsed = json.loads(texts[0])
+                # FastMCP x-fastmcp-wrap-result: {"result": [...]} 형태로 감싸는 경우
+                if isinstance(parsed, dict) and list(parsed.keys()) == ["result"]:
+                    return parsed["result"], None
+                return parsed, None
+            except Exception:
+                return texts[0], None
     return result, None
+
+
+def to_list(result) -> list:
+    """결과를 항상 리스트로 정규화"""
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        for key in ("result", "results", "items", "data"):
+            if key in result and isinstance(result[key], list):
+                return result[key]
+    return []
 
 
 def main():
@@ -131,17 +147,18 @@ def main():
     if "semantic_search" in tool_names:
         resp = call_mcp(url, sid, "tools/call",
                         {"name": "semantic_search",
-                         "arguments": {"query": "운영팀 담당 업무", "top_k": 3}}, 2)
+                         "arguments": {"query": "운영팀 담당 업무", "limit": 3}}, 2)
         result, err = extract_result(resp)
         if err:
             print(f"  ❌ {err}")
         else:
-            hits = result if isinstance(result, list) else result.get("results", [])
+            hits = to_list(result)
             print(f"  ✅ 결과 {len(hits)}건")
             for h in hits[:2]:
-                title = h.get("title") or h.get("page_title", "")
-                score = h.get("score", "")
-                print(f"    • [{score:.3f}] {title}" if isinstance(score, float) else f"    • {title}")
+                if isinstance(h, dict):
+                    title = h.get("title") or h.get("page_title", "")
+                    score = h.get("score", "")
+                    print(f"    • [{score:.3f}] {title}" if isinstance(score, float) else f"    • {title}")
     else:
         print("  ⚠️  도구 없음")
 
@@ -150,16 +167,19 @@ def main():
     if "graph_search" in tool_names:
         resp = call_mcp(url, sid, "tools/call",
                         {"name": "graph_search",
-                         "arguments": {"entity": "운영팀", "depth": 2}}, 3)
+                         "arguments": {"entity": "운영팀", "depth": 1}}, 3)
         result, err = extract_result(resp)
         if err:
             print(f"  ❌ {err}")
         else:
-            nodes = result.get("nodes", []) if isinstance(result, dict) else []
-            edges = result.get("edges", result.get("relationships", [])) if isinstance(result, dict) else []
-            print(f"  ✅ 노드 {len(nodes)}개, 엣지 {len(edges)}개")
-            for n in nodes[:3]:
-                print(f"    • {n.get('name', n)}")
+            r = result if isinstance(result, dict) else {}
+            outgoing = r.get("outgoing", [])
+            incoming = r.get("incoming", [])
+            print(f"  ✅ 발견: {r.get('found', False)}, 엔티티: {r.get('entity','')}")
+            print(f"     outgoing {len(outgoing)}개, incoming {len(incoming)}개")
+            for rel in outgoing[:3]:
+                if isinstance(rel, dict):
+                    print(f"    → [{rel.get('relation','')}] {rel.get('target_name','')}")
     else:
         print("  ⚠️  도구 없음")
 
@@ -168,16 +188,21 @@ def main():
     if "hybrid_search" in tool_names:
         resp = call_mcp(url, sid, "tools/call",
                         {"name": "hybrid_search",
-                         "arguments": {"query": "점검 프로세스 담당자", "top_k": 3}}, 4)
+                         "arguments": {"query": "점검 프로세스 담당자", "limit": 3}}, 4)
         result, err = extract_result(resp)
         if err:
             print(f"  ❌ {err}")
         else:
-            hits = result if isinstance(result, list) else result.get("results", [])
-            print(f"  ✅ 결과 {len(hits)}건")
-            for h in hits[:2]:
-                title = h.get("title") or h.get("page_title", "")
-                print(f"    • {title}")
+            r = result if isinstance(result, dict) else {}
+            sem = r.get("semantic_results", [])
+            gph = r.get("graph_results", [])
+            summary = r.get("entity_summary", [])
+            print(f"  ✅ 벡터 {len(sem)}건, 그래프 {len(gph)}건")
+            for h in sem[:2]:
+                if isinstance(h, dict):
+                    print(f"    • {h.get('title','')}")
+            for s in summary[:3]:
+                print(f"    ↔ {s}")
     else:
         print("  ⚠️  도구 없음")
 
@@ -186,16 +211,21 @@ def main():
     if "path_search" in tool_names:
         resp = call_mcp(url, sid, "tools/call",
                         {"name": "path_search",
-                         "arguments": {"from_entity": "운영팀", "to_entity": "점검"}}, 5)
+                         "arguments": {"start_entity": "운영팀", "end_entity": "점검",
+                                       "max_hops": 5}}, 5)
         result, err = extract_result(resp)
         if err:
             print(f"  ❌ {err}")
         else:
-            found = result.get("found", False) if isinstance(result, dict) else bool(result)
-            path = result.get("path", []) if isinstance(result, dict) else []
-            print(f"  ✅ 경로 {'발견' if found else '없음'} (홉 수: {len(path)})")
-            if path:
-                print(f"    {' → '.join(str(p) for p in path)}")
+            r = result if isinstance(result, dict) else {}
+            found = r.get("found", False)
+            path_nodes = r.get("path_nodes", [])
+            hops = r.get("hops", len(path_nodes))
+            print(f"  ✅ 경로 {'발견' if found else '없음'} ({hops} 홉)")
+            if path_nodes:
+                print(f"    {' → '.join(str(p) for p in path_nodes)}")
+            elif not found:
+                print(f"    (연결 경로 없음 — 엔티티명을 실제 데이터에 맞게 조정 필요)")
     else:
         print("  ⚠️  도구 없음")
 
@@ -209,13 +239,17 @@ def main():
         if err:
             print(f"  ❌ {err}")
         else:
-            found = result.get("found", 0) if isinstance(result, dict) else 0
-            decisions = result.get("decisions", []) if isinstance(result, dict) else []
-            print(f"  ✅ 의사결정 노드 {found}개")
-            for d in decisions[:2]:
-                print(f"    • [{d.get('action','')}] {d.get('subject','')} → {d.get('outcome','')}")
+            r = result if isinstance(result, dict) else {}
+            decisions = r.get("decisions", [])
+            chain = r.get("chain_summary", [])
+            print(f"  ✅ Decision 노드 {r.get('found', len(decisions))}개")
+            for d in decisions[:3]:
+                if isinstance(d, dict):
+                    print(f"    • [{d.get('action','')}] {d.get('subject','')} → {d.get('outcome','')}")
+            for s in chain[:3]:
+                print(f"    ↻ {s}")
             if not decisions:
-                print("    (Decision 노드 없음 — 데이터 re-sync 후 재확인 필요)")
+                print("    (Decision 노드 없음 — sync.py --full 재실행 후 확인 필요)")
     else:
         print("  ⚠️  도구 없음")
 
