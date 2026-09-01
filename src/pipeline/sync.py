@@ -68,6 +68,8 @@ except Exception:
 GCP_PROJECT      = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 LOCATION         = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
 EMBED_MODEL_NAME = "text-multilingual-embedding-002"
+EMBED_BATCH_SIZE = 50     # Vertex AI 배치 크기
+HAIKU_MODEL      = "claude-haiku-4-5-20251001"   # 트리플·이벤트 추출용
 QDRANT_URL       = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST    = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT    = int(os.environ.get("FALKORDB_PORT", "6379"))
@@ -247,7 +249,7 @@ def extract_events_from_text(llm_client, text: str) -> list[dict]:
     """Claude로 텍스트에서 날짜 기반 시계열 이벤트를 추출합니다."""
     try:
         resp = llm_client.messages.create(
-            model=os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@default"),
+            model=HAIKU_MODEL,   # Sonnet → Haiku (3~5배 빠름)
             max_tokens=1024,
             messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=text[:3000])}],
         )
@@ -272,7 +274,7 @@ def extract_events_from_text(llm_client, text: str) -> list[dict]:
 def extract_triplets(llm_client, text: str) -> list:
     try:
         resp = llm_client.messages.create(
-            model=os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@default"),
+            model=HAIKU_MODEL,   # Sonnet → Haiku (3~5배 빠름)
             max_tokens=2048,
             messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=text[:3000])}],
         )
@@ -347,21 +349,26 @@ def sync_page(
     result["deleted_edges"] = deleted_e
     print(f"     엣지 삭제: {deleted_e}개")
 
-    # 4. 청킹 + 임베딩 + Qdrant 저장
+    # 4. 청킹 + 배치 임베딩 + Qdrant 일괄 저장
     chunks = _make_chunks(body)
     new_chunks = 0
-    for i, chunk in enumerate(chunks):
+    if chunks:
         try:
-            res = embed_client.models.embed_content(
-                model=EMBED_MODEL_NAME, contents=[chunk]
-            )
-            vec      = list(res.embeddings[0].values)
-            chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_url}#chunk{i}"))
-            qc.upsert(
-                collection_name=collection_name,
-                points=[{
-                    "id":      chunk_id,
-                    "vector":  vec,
+            # 4-1. 배치 임베딩 (EMBED_BATCH_SIZE 단위, API 호출 최소화)
+            all_vecs = []
+            for bi in range(0, len(chunks), EMBED_BATCH_SIZE):
+                batch = chunks[bi:bi + EMBED_BATCH_SIZE]
+                res   = embed_client.models.embed_content(
+                    model=EMBED_MODEL_NAME, contents=batch
+                )
+                all_vecs.extend([list(e.values) for e in res.embeddings])
+
+            # 4-2. 전체 청크 한 번에 Qdrant upsert
+            points = []
+            for i, (chunk, vec) in enumerate(zip(chunks, all_vecs)):
+                points.append({
+                    "id":     str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_url}#chunk{i}")),
+                    "vector": vec,
                     "payload": {
                         "title":       title,
                         "source_url":  source_url,
@@ -370,12 +377,11 @@ def sync_page(
                         "chunk_index": i,
                         "chunk_total": len(chunks),
                     },
-                }],
-            )
-            new_chunks += 1
+                })
+            qc.upsert(collection_name=collection_name, points=points)
+            new_chunks = len(chunks)
         except Exception as e:
-            print(f"     ⚠️  청크 {i} 저장 실패: {e}")
-        time.sleep(0.1)
+            print(f"     ⚠️  배치 임베딩/저장 실패: {e}")
 
     result["new_chunks"] = new_chunks
     print(f"     벡터 저장: {new_chunks}개 청크")

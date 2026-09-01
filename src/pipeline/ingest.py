@@ -22,8 +22,10 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -59,11 +61,14 @@ GRAPH_NAME       = "joycity_kg"      # --dept 없을 때 기본값
 # Vertex AI 다국어 임베딩 (한국어 지원, 768차원)
 EMBED_MODEL_NAME = "text-multilingual-embedding-002"
 EMBED_DIM        = 768
+EMBED_BATCH_SIZE = 50   # Vertex AI 배치 최대 권장 크기 (최대 250, 안전 수치 50)
 
-# ─── Vertex AI 설정 ───────────────────────────────────────────────────────────
+# ─── Vertex AI / LLM 설정 ────────────────────────────────────────────────────
 GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 LOCATION    = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
 MODEL       = os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@default")
+# 트리플/이벤트 추출: Haiku 사용 (Sonnet 대비 3~5배 빠름, 추출 품질 충분)
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
 
 # ─── 트리플 추출 프롬프트 (week1_verify.py 와 동일) ─────────────────────────
 EXTRACT_PROMPT = """\
@@ -123,6 +128,10 @@ EVENT_EXTRACT_PROMPT = """\
   }}
 ]"""
 
+
+# ─── 스레드 안전 잠금 ────────────────────────────────────────────────────────
+_qdrant_lock   = threading.Lock()   # Qdrant 동시 쓰기 보호
+_falkordb_lock = threading.Lock()   # FalkorDB 동시 쓰기 보호
 
 # ─── 클라이언트 초기화 ────────────────────────────────────────────────────────
 _llm_client    = None
@@ -296,12 +305,12 @@ def _event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | 
 
 
 def extract_events_from_text(text: str) -> list[dict]:
-    """Claude로 텍스트에서 날짜 기반 시계열 이벤트를 추출합니다."""
+    """Claude Haiku로 텍스트에서 날짜 기반 시계열 이벤트를 추출합니다."""
     if not _llm_client:
         return []
     try:
         resp = _llm_client.messages.create(
-            model=MODEL,
+            model=HAIKU_MODEL,   # Sonnet → Haiku (3~5배 빠름)
             max_tokens=1024,
             messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=text[:3000])}],
         )
@@ -324,13 +333,13 @@ def extract_events_from_text(text: str) -> list[dict]:
 
 
 def extract_triplets(text: str) -> list:
-    """Claude Sonnet 4.6로 타입 있는 트리플 추출"""
+    """Claude Haiku로 타입 있는 트리플 추출 (Sonnet 대비 3~5배 빠름)"""
     if not _llm_client:
         return []
     raw = ""
     try:
         resp = _llm_client.messages.create(
-            model=MODEL,
+            model=HAIKU_MODEL,   # Sonnet → Haiku
             max_tokens=2048,
             messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=text[:3000])}],
         )
@@ -377,47 +386,72 @@ def _make_chunks(text: str) -> list[str]:
     return chunks
 
 
-# ─── 벡터 저장 (청킹) ────────────────────────────────────────────────────────
+# ─── 임베딩 배치 헬퍼 ────────────────────────────────────────────────────────
+def _embed_batch(chunks: list[str]) -> list[list[float]]:
+    """청크 목록을 EMBED_BATCH_SIZE 단위 배치로 임베딩.
+    기존 1개씩 순차 호출 대비 API 호출 횟수를 1/50로 줄입니다.
+    """
+    all_vecs = []
+    for i in range(0, len(chunks), EMBED_BATCH_SIZE):
+        batch = chunks[i:i + EMBED_BATCH_SIZE]
+        result = _embed_model.models.embed_content(
+            model=EMBED_MODEL_NAME,
+            contents=batch,
+        )
+        all_vecs.extend([list(e.values) for e in result.embeddings])
+    return all_vecs
+
+
+# ─── 벡터 저장 (배치 임베딩 + 단일 Qdrant 삽입) ─────────────────────────────
 def store_vector(page: dict) -> int:
-    """페이지를 청크로 분할 → 각 청크 임베딩 → Qdrant 저장
+    """페이지를 청크로 분할 → 배치 임베딩 → Qdrant 일괄 저장
+    개선: 청크당 1회 API 호출 → 페이지당 1회 배치 호출 (최대 50배 빠름)
     Returns: 저장된 청크 수 (0이면 실패)
     """
     body = page["body"]
     if not body.strip():
         return 0
-    meta = page["meta"]
+    meta     = page["meta"]
     base_url = meta.get("notion_url") or page["file"]
 
     chunks = _make_chunks(body)
-    stored = 0
+    if not chunks:
+        return 0
+
+    # 1. 전체 청크 배치 임베딩 (API 호출 최소화)
+    try:
+        vecs = _embed_batch(chunks)
+    except Exception as e:
+        print(f"     ⚠️  임베딩 배치 실패: {e}")
+        return 0
+
+    # 2. 전체 ID·페이로드 구성
+    all_ids      = []
+    all_payloads = []
     for i, chunk in enumerate(chunks):
-        try:
-            result = _embed_model.models.embed_content(
-                model=EMBED_MODEL_NAME,
-                contents=[chunk],
-            )
-            vec = result.embeddings[0].values
-            # 청크별 고유 ID: 페이지 UUID + 청크 인덱스
-            chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{base_url}#chunk{i}"))
-            payload = {
-                "title":      meta.get("title", ""),
-                "source_url": meta.get("notion_url", ""),
-                "page_id":    meta.get("page_id", ""),
-                "text":       chunk,
-                "chunk_index": i,
-                "chunk_total": len(chunks),
-                "file":       page["file"],
-            }
+        all_ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, f"{base_url}#chunk{i}")))
+        all_payloads.append({
+            "title":       meta.get("title", ""),
+            "source_url":  meta.get("notion_url", ""),
+            "page_id":     meta.get("page_id", ""),
+            "text":        chunk,
+            "chunk_index": i,
+            "chunk_total": len(chunks),
+            "file":        page["file"],
+        })
+
+    # 3. 한 번에 Qdrant 저장 (락으로 동시 쓰기 보호)
+    try:
+        with _qdrant_lock:
             _qdrant_store.insert_vectors(
-                vectors=[vec],
-                ids=[chunk_id],
-                payloads=[payload],
+                vectors=vecs,
+                ids=all_ids,
+                payloads=all_payloads,
             )
-            stored += 1
-        except Exception as e:
-            print(f"     ⚠️  청크 {i} 저장 실패: {e}")
-        time.sleep(0.1)   # Vertex AI API rate limit
-    return stored
+        return len(chunks)
+    except Exception as e:
+        print(f"     ⚠️  Qdrant 배치 저장 실패: {e}")
+        return 0
 
 
 # ─── 그래프 저장 ─────────────────────────────────────────────────────────────
@@ -509,14 +543,15 @@ def ingest_page(path: Path, dry_run: bool = False) -> dict:
         result["chunk_count"]   = chunk_count
         print(f"     벡터: {'✅' if chunk_count > 0 else '❌'} {chunk_count}개 청크 저장")
 
-        # 2. 트리플 추출 (LLM 우선 → 실패 시 Semantica fallback)
+        # 2. 트리플 추출 (LLM 우선 → 실패 시 Semantica fallback) — API 호출, 락 불필요
         triplets, src = extract_with_fallback(extract_triplets, body)
         result["triplet_count"] = len(triplets)
         print(f"     트리플: {len(triplets)}개 추출 [{src}]")
 
-        # 3. 그래프 저장
+        # 3. 그래프 저장 (FalkorDB 락으로 동시 쓰기 보호)
         if triplets:
-            stats = store_graph(triplets, meta.get("notion_url", ""))
+            with _falkordb_lock:
+                stats = store_graph(triplets, meta.get("notion_url", ""))
             result["graph"] = stats
             print(f"     그래프: 노드 {stats['nodes']}개, 엣지 {stats['edges']}개 저장")
         else:
@@ -533,30 +568,29 @@ def ingest_page(path: Path, dry_run: bool = False) -> dict:
         if db_props:
             ev = _event_from_db_props(db_props, source_url, meta.get("title", ""))
             if ev:
-                nid = upsert_event_node(_falkordb, ev)
+                with _falkordb_lock:
+                    nid = upsert_event_node(_falkordb, ev)
                 if nid >= 0:
                     ev_stored   += 1
                     skip_llm_ev  = True
                     print(f"     이벤트: DB 속성에서 직접 생성 ({ev['game']} / {ev['date']})")
 
-        # 4b. DB 속성에 이벤트 없으면 LLM으로 텍스트 추출
+        # 4b. DB 속성에 이벤트 없으면 LLM으로 텍스트 추출 (API 호출, 락 불필요)
         if not skip_llm_ev:
             events = extract_events_from_text(body)
             if events:
-                for ev in events:
-                    ev["source_url"] = source_url
-                    nid = upsert_event_node(_falkordb, ev)
-                    if nid >= 0:
-                        ev_stored += 1
+                with _falkordb_lock:
+                    for ev in events:
+                        ev["source_url"] = source_url
+                        nid = upsert_event_node(_falkordb, ev)
+                        if nid >= 0:
+                            ev_stored += 1
                 if ev_stored:
                     print(f"     이벤트: {ev_stored}/{len(events)}개 :Event 노드 저장 (LLM 추출)")
             else:
                 print(f"     이벤트: 없음 (날짜 명시 이벤트 미감지)")
 
         result["event_count"] = ev_stored
-
-        # API 레이트 리밋 준수
-        time.sleep(0.5)
     else:
         print(f"     [DRY-RUN] 저장 없이 확인만")
 
@@ -570,6 +604,8 @@ def main():
                         help="본부 이름 (config/departments.yaml의 key). 미지정 시 legacy 모드(data/notion_samples)")
     parser.add_argument("--dry-run", action="store_true", help="연결 확인만 (저장 안 함)")
     parser.add_argument("--reset",   action="store_true", help="기존 데이터 삭제 후 재인제스천")
+    parser.add_argument("--workers", type=int, default=5,
+                        help="병렬 처리 워커 수 (기본: 5). Vertex AI 쿼터에 따라 조정")
     args = parser.parse_args()
 
     # ── 본부 설정 로드 ──────────────────────────────────────────────────────
@@ -643,12 +679,30 @@ def main():
     print(f"\n[2/4] 인제스천 대상: {len(md_files)}개 파일")
     print(f"       {samples_dir}")
 
-    # ── 인제스천 실행 ────────────────────────────────────────────────────────
-    print(f"\n[3/4] 페이지 인제스천 시작")
-    results = []
-    for f in md_files:
-        r = ingest_page(f, dry_run=args.dry_run)
-        results.append(r)
+    # ── 인제스천 실행 (병렬) ─────────────────────────────────────────────────
+    workers = args.workers
+    print(f"\n[3/4] 페이지 인제스천 시작 (워커: {workers}개 병렬)")
+    print(f"       임베딩: 배치 {EMBED_BATCH_SIZE}개씩 / 트리플: Haiku / DB 쓰기: 락 보호")
+    results  = []
+    _t_start = time.time()
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(ingest_page, f, args.dry_run): f for f in md_files}
+        done = 0
+        for future in as_completed(futures):
+            f = futures[future]
+            done += 1
+            try:
+                r = future.result()
+                results.append(r)
+                status = "⏭️ " if r.get("skipped") else "✅"
+                print(f"  [{done:03d}/{len(md_files):03d}] {status} {f.name}")
+            except Exception as e:
+                print(f"  [{done:03d}/{len(md_files):03d}] ❌ {f.name}: {e}")
+                results.append({"file": str(f), "error": str(e), "skipped": True})
+
+    elapsed = int(time.time() - _t_start)
+    print(f"\n  ⏱️  소요 시간: {elapsed // 60}분 {elapsed % 60}초")
 
     # ── 결과 요약 ────────────────────────────────────────────────────────────
     print(f"\n[4/4] 결과 요약")
