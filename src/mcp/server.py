@@ -102,6 +102,135 @@ def _embed(text: str) -> list[float]:
     return result.embeddings[0].values
 
 
+# ─── 복합 쿼리 분해 헬퍼 ─────────────────────────────────────────────────────
+
+_COMPLEX_PATTERNS = frozenset([
+    "이고", "이며", "하는", "이면서", "이자",
+    "담당하는", "작성한", "소속된", "승인한", "결정한",
+    "관련된", "연관된", "포함된", "연결된",
+])
+
+
+def _is_complex_query(query: str) -> bool:
+    """복합 쿼리 여부 휴리스틱 탐지 (15자+ AND 복합 패턴 OR 6단어+)"""
+    if len(query) >= 15 and any(p in query for p in _COMPLEX_PATTERNS):
+        return True
+    if len(query.split()) >= 6:
+        return True
+    return False
+
+
+def _decompose_query(query: str) -> list[str]:
+    """Claude Haiku로 복합 쿼리를 독립적 서브쿼리 2~3개로 분해"""
+    try:
+        import anthropic
+        import re as _re
+        client = anthropic.Anthropic()
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "다음 복합 질문을 독립적으로 검색 가능한 서브쿼리 2~3개로 분해하세요.\n"
+                    "JSON 배열만 반환하세요. 예: [\"서브쿼리1\", \"서브쿼리2\"]\n\n"
+                    f"질문: {query}"
+                ),
+            }],
+        )
+        text = msg.content[0].text.strip()
+        m = _re.search(r'\[.*?\]', text, _re.DOTALL)
+        if m:
+            import json as _json
+            parts = _json.loads(m.group())
+            parts = [p.strip() for p in parts if isinstance(p, str) and p.strip()]
+            if 2 <= len(parts) <= 4:
+                return parts
+    except Exception:
+        pass
+    return [query]   # 분해 실패 시 원본 유지
+
+
+def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
+    """서브쿼리 단위 벡터+그래프 검색 (내부 헬퍼)"""
+    # ─ 벡터 검색 ─
+    sem: list = []
+    try:
+        vec = _embed(sub_query)
+        qc = _get_qdrant()
+        result = qc.query_points(
+            collection_name=COLLECTION_NAME,
+            query=vec,
+            limit=limit,
+            with_payload=True,
+        )
+        for h in result.points:
+            p = h.payload or {}
+            sem.append({
+                "title":        p.get("title", ""),
+                "source_url":   p.get("source_url", ""),
+                "text_preview": p.get("text", "")[:300],
+                "score":        round(h.score, 4),
+            })
+    except Exception:
+        pass
+
+    # ─ 그래프 검색 ─
+    gph: list = []
+    try:
+        graph = _get_falkordb()
+        words = [w for w in sub_query.split() if len(w) >= 2]
+        seen: set = set()
+        for word in words[:2]:
+            nodes = graph.query(
+                "MATCH (n) WHERE n.name CONTAINS $name RETURN n.name LIMIT 2",
+                {"name": word},
+            )
+            for row in nodes.result_set:
+                entity_name = row[0]
+                if entity_name in seen:
+                    continue
+                seen.add(entity_name)
+                g = graph_search(entity_name, depth=1)
+                if g.get("found"):
+                    gph.append(g)
+    except Exception:
+        pass
+
+    return sem, gph
+
+
+def _merge_semantic_results(results_per_query: list) -> list:
+    """서브쿼리별 벡터 결과 URL 중복 제거 + coverage 가중 재랭킹
+
+    여러 서브쿼리에서 공통으로 등장하는 문서일수록 높은 점수를 부여합니다.
+    부스트 공식: score * (1 + 0.15 * (coverage - 1))
+    """
+    url_counts: dict = {}
+    url_best: dict = {}
+
+    for results in results_per_query:
+        for r in results:
+            url = r.get("source_url", "")
+            if url not in url_counts:
+                url_counts[url] = 0
+                url_best[url] = r.copy()
+            url_counts[url] += 1
+            if r["score"] > url_best[url]["score"]:
+                url_best[url] = r.copy()
+
+    merged = []
+    for url, item in url_best.items():
+        coverage = url_counts[url]
+        merged.append({
+            **item,
+            "coverage": coverage,
+            "score": round(item["score"] * (1 + 0.15 * (coverage - 1)), 4),
+        })
+
+    return sorted(merged, key=lambda x: x["score"], reverse=True)
+
+
 # ─── DB 로거 ──────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 try:
@@ -286,56 +415,65 @@ def hybrid_search(query: str, limit: int = 5) -> dict[str, Any]:
     """
     벡터 검색 + 그래프 탐색을 결합한 혼합 검색입니다.
     가장 정확하고 풍부한 답변이 필요할 때 사용하세요.
-    검색 결과에서 핵심 엔티티를 추출해 그래프 관계까지 함께 반환합니다.
+
+    복합 쿼리 자동 분해:
+      "A팀에서 B 업무를 담당하는 사람이 작성한 문서는?" 같은 복합 질문은
+      Claude Haiku가 서브쿼리 2~3개로 분해한 뒤 각각 검색하고 결과를
+      coverage 가중치로 재랭킹하여 병합합니다.
 
     Args:
-        query: 검색할 자연어 질문 (한국어 가능)
+        query: 검색할 자연어 질문 (한국어 가능, 복합 질문 지원)
         limit: 벡터 검색 결과 수 (기본값: 5)
 
     Returns:
-        {semantic_results, graph_results, entity_summary}
+        {semantic_results, graph_results, entity_summary,
+         decomposed, sub_queries}
     """
     _t0 = time.time()
     _err = None
     _result = None
     try:
-        # 1. 벡터 검색
-        semantic = semantic_search(query, limit=limit)
+        # ── 1. 복합 쿼리 감지 및 서브쿼리 분해 ─────────────────────────────
+        sub_queries = [query]
+        decomposed = False
+        if _is_complex_query(query):
+            sub_queries = _decompose_query(query)
+            decomposed = len(sub_queries) > 1
 
-        # 2. 쿼리에서 핵심 명사를 추출해 그래프 탐색
-        graph = _get_falkordb()
-        words = [w for w in query.split() if len(w) >= 2]
+        # ── 2. 서브쿼리별 벡터+그래프 검색 ────────────────────────────────
+        sem_per_q: list[list] = []
+        all_graph_hits: list = []
 
-        graph_hits = []
-        seen_entities = set()
-        for word in words[:3]:
-            node_q = (
-                "MATCH (n) WHERE n.name CONTAINS $name "
-                "RETURN n.name AS name, labels(n)[0] AS type LIMIT 3"
-            )
-            nodes = graph.query(node_q, {"name": word})
-            for row in nodes.result_set:
-                entity_name = row[0]
-                if entity_name in seen_entities:
-                    continue
-                seen_entities.add(entity_name)
-                g = graph_search(entity_name, depth=1)
-                if g.get("found"):
-                    graph_hits.append(g)
+        for sq in sub_queries:
+            sem, gph = _run_sub_search(sq, limit=limit)
+            sem_per_q.append(sem)
+            all_graph_hits.extend(gph)
 
-        # 3. 결합 요약
-        entity_summary = []
+        # ── 3. 벡터 결과 병합 (coverage 재랭킹) ────────────────────────────
+        semantic = _merge_semantic_results(sem_per_q)
+
+        # ── 4. 그래프 결과 중복 제거 ────────────────────────────────────────
+        seen_entities: set = set()
+        graph_hits: list = []
+        for g in all_graph_hits:
+            if g["entity"] not in seen_entities:
+                seen_entities.add(g["entity"])
+                graph_hits.append(g)
+
+        # ── 5. 관계 요약 ────────────────────────────────────────────────────
+        entity_summary: list[str] = []
         for g in graph_hits:
-            if g.get("outgoing"):
-                for rel in g["outgoing"][:3]:
-                    entity_summary.append(
-                        f"{g['entity']} → {rel['relation']} → {rel['target_name']}"
-                    )
+            for rel in (g.get("outgoing") or [])[:3]:
+                entity_summary.append(
+                    f"{g['entity']} → {rel['relation']} → {rel['target_name']}"
+                )
 
         _result = {
             "semantic_results": semantic,
             "graph_results":    graph_hits,
             "entity_summary":   entity_summary,
+            "decomposed":       decomposed,
+            "sub_queries":      sub_queries if decomposed else [],
         }
         return _result
     except Exception as e:
