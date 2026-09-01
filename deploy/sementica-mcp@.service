@@ -1,0 +1,42 @@
+# systemd 템플릿 서비스 — 본부별 MCP 인스턴스
+# 배포 위치: /etc/systemd/system/sementica-mcp@.service
+#
+# 사용법:
+#   sudo systemctl enable --now sementica-mcp@strategic
+#   sudo systemctl enable --now sementica-mcp@dev
+#   sudo systemctl enable --now sementica-mcp@platform
+#
+# 상태 확인:
+#   sudo systemctl status sementica-mcp@strategic
+#
+# 포트는 departments.yaml의 mcp_port 값을 따릅니다:
+#   strategic → 8765
+#   dev       → 8766
+#   platform  → 8767
+
+[Unit]
+Description=Semantica MCP Server (%i)
+After=network.target falkordb.service qdrant.service
+Wants=falkordb.service qdrant.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/sementica
+EnvironmentFile=/home/ubuntu/sementica/.env
+
+ExecStart=/home/ubuntu/sementica/.venv/bin/python \
+    src/mcp/server.py \
+    --dept %i \
+    --transport streamable-http
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# 메모리 제한 (본부당)
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
