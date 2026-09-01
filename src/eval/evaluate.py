@@ -53,9 +53,10 @@ COLLECTION_NAME = "joycity_pages"
 GRAPH_NAME      = "joycity_kg"
 DEPT_LABEL      = "legacy"
 
-# --dept 인수 처리
+# --dept / --golden 인수 처리
 _parser = _argparse.ArgumentParser(add_help=False)
-_parser.add_argument("--dept", default="")
+_parser.add_argument("--dept",   default="")
+_parser.add_argument("--golden", default="", help="골든셋 JSON 파일 경로 (gen_golden_set.py 결과)")
 _known, _ = _parser.parse_known_args()
 
 if _known.dept:
@@ -66,8 +67,25 @@ if _known.dept:
     GRAPH_NAME      = _cfg["falkordb_graph"]
     DEPT_LABEL      = f"{_cfg['name']} ({_known.dept})"
 
-# ─── 골든셋 ───────────────────────────────────────────────────────────────────
-GOLDEN_SET = [
+# ─── 골든셋 로드 ──────────────────────────────────────────────────────────────
+# --golden 파일이 지정되면 그 파일에서 로드, 없으면 내장 기본 골든셋 사용
+def _load_golden(path: str) -> list:
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    # gen_golden_set.py 출력 형식: {"meta": {...}, "questions": [...]}
+    if isinstance(data, dict) and "questions" in data:
+        return data["questions"]
+    # 단순 리스트 형식도 허용
+    if isinstance(data, list):
+        return data
+    raise ValueError(f"골든셋 형식 오류: {path}")
+
+_GOLDEN_PATH = _known.golden
+if _GOLDEN_PATH and Path(_GOLDEN_PATH).exists():
+    GOLDEN_SET = _load_golden(_GOLDEN_PATH)
+    print(f"  📂 외부 골든셋 로드: {_GOLDEN_PATH} ({len(GOLDEN_SET)}문항)")
+else:
+    # 내장 기본 골든셋 (하위 호환)
+    GOLDEN_SET = [
     # 카테고리 1: 담당자
     {"id": "Q01", "category": "담당자", "difficulty": "easy",
      "question": "점검 시작과 서버 오픈 단계는 어느 팀이 담당하나요?",
@@ -133,7 +151,7 @@ GOLDEN_SET = [
     {"id": "Q20", "category": "복합", "difficulty": "hard",
      "question": "IN-JOY가 '왜 매출이 떨어졌나'에 답하지 못하는 이유는 무엇이고, FDE는 이를 어떻게 해결하려 하나요?",
      "answer": "IN-JOY는 End-to-End 도구(화면)만 먼저 만들었으나 온톨로지(규칙)와 디지털 트윈(엔진)이 비어 있어 분석 불가. FDE의 TAKE 모델로 파견 중 수집한 업무 지식을 온톨로지에 축적하여 AI 분석 기반을 구축하는 것이 해결 방향."},
-]
+]  # ← 내장 기본 골든셋 끝 (else 블록)
 
 # ─── 클라이언트 초기화 ────────────────────────────────────────────────────────
 def init_clients():
@@ -389,6 +407,8 @@ def run_evaluation():
     print(f"  컬렉션: {COLLECTION_NAME}  그래프: {GRAPH_NAME}")
     print(f"  시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  총 질문: {len(GOLDEN_SET)}개")
+    if _GOLDEN_PATH:
+        print(f"  골든셋:  {_GOLDEN_PATH}")
     print()
 
     print("🔌 클라이언트 초기화 중...")
@@ -405,7 +425,7 @@ def run_evaluation():
         question = item["question"]
         answer = item["answer"]
 
-        print(f"[{i:02d}/20] {qid} ({cat} / {diff})")
+        print(f"[{i:02d}/{len(GOLDEN_SET)}] {qid} ({cat} / {diff})")
         print(f"  Q: {question}")
 
         # 1. 하이브리드 검색 (복합 쿼리 자동 분해)
@@ -459,14 +479,14 @@ def run_evaluation():
         time.sleep(0.5)  # API 요청 간격
 
     # ─── 결과 집계 ────────────────────────────────────────────────────────────
-    total_score = sum(r["score"] for r in results) / len(results)
+    total_score = sum(r["score"] for r in results) / len(results) if results else 0
     passed = sum(1 for r in results if r["score"] >= 0.7)
 
     print("=" * 60)
     print("  📊 평가 결과 요약")
     print("=" * 60)
     print(f"  전체 평균:  {total_score:.3f} ({'✅ 목표 달성' if total_score >= 0.7 else '❌ 목표 미달'}, 목표 0.70)")
-    print(f"  통과 (≥0.7): {passed}/20문항")
+    print(f"  통과 (≥0.7): {passed}/{len(results)}문항")
     print()
     print("  카테고리별:")
     for cat, scores in category_scores.items():
