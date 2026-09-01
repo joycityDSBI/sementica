@@ -239,8 +239,68 @@ def parse_qa_response(text: str) -> list:
         return []
 
 
-# ─── 3. 페이지 기반 Q&A 생성 ─────────────────────────────────────────────────
-print("🤖 페이지 기반 Q&A 생성 중...")
+# ─── 검색 기반 검증 함수 ──────────────────────────────────────────────────────
+VERIFY_PROMPT = """다음 검색 결과에 질문의 정답이 포함되어 있는지 판단하세요.
+
+질문: {question}
+정답 (기준): {answer}
+
+검색 결과:
+{context}
+
+판단 기준:
+- 검색 결과 텍스트에서 정답의 핵심 정보를 추출할 수 있으면 "pass"
+- 정보가 없거나 불완전하면 "fail"
+
+JSON으로만 응답: {{"verdict": "pass"|"fail", "reason": "한 줄"}}"""
+
+
+def _embed_text(text: str) -> list:
+    result = embed_client.models.embed_content(
+        model="text-multilingual-embedding-002", contents=[text[:2000]]
+    )
+    return result.embeddings[0].values
+
+
+def verify_by_search(question: str, answer: str, search_limit: int = 7) -> bool:
+    """실제 검색 결과로 Q&A 검증 — 검색 결과에서 답변 가능하면 True"""
+    try:
+        vec = _embed_text(question)
+        result = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=vec,
+            limit=search_limit,
+            with_payload=True,
+        )
+        context = ""
+        for h in result.points:
+            p = h.payload or {}
+            context += f"[{p.get('title','')}]\n{p.get('text','')[:500]}\n\n"
+
+        msg = claude.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=100,
+            messages=[{
+                "role": "user",
+                "content": VERIFY_PROMPT.format(
+                    question=question,
+                    answer=answer,
+                    context=context[:3000],
+                ),
+            }],
+        )
+        text = msg.content[0].text.strip()
+        m = re.search(r'\{.*?\}', text, re.DOTALL)
+        if m:
+            verdict = json.loads(m.group()).get("verdict", "fail")
+            return verdict == "pass"
+    except Exception:
+        pass
+    return False
+
+
+# ─── 3. 페이지 기반 Q&A 생성 + 즉시 검증 ────────────────────────────────────
+print("🤖 페이지 기반 Q&A 생성 + 검증 중...")
 all_candidates = []
 
 # 카테고리별 현재 수집 현황 추적
@@ -249,7 +309,7 @@ cat_counts = {c: 0 for c in CATEGORY_TARGETS}
 for i, page in enumerate(pages):
     # 목표 달성 시 중단 (관계 제외)
     non_rel_done = all(
-        cat_counts[c] >= CATEGORY_TARGETS[c]
+        cat_counts[c] >= CATEGORY_TARGETS[c] * 2   # 후보 2배 수집 후 선별
         for c in ("담당자", "정책/규정", "문서위치", "복합")
     )
     if non_rel_done:
@@ -269,12 +329,21 @@ for i, page in enumerate(pages):
             }],
         )
         items = parse_qa_response(msg.content[0].text)
+
+        verified = 0
         for item in items:
-            item["source_url"] = page["url"]
-            item["source_title"] = page["title"]
-            all_candidates.append(item)
-            cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
-        print(f" → {len(items)}개")
+            # 검색 결과로 검증 — 답변 가능한 질문만 채택
+            ok = verify_by_search(item["question"], item["answer"])
+            if ok:
+                item["source_url"] = page["url"]
+                item["source_title"] = page["title"]
+                item["verified"] = True
+                all_candidates.append(item)
+                cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
+                verified += 1
+            time.sleep(0.2)
+
+        print(f" → {len(items)}개 생성, {verified}개 검증 통과")
     except Exception as e:
         print(f" ⚠️  {e}")
 
@@ -306,12 +375,18 @@ if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
                 }],
             )
             items = parse_qa_response(msg.content[0].text)
-            for item in items:
-                item["source_url"] = chunk[0].get("url", "")
-                item["source_title"] = f"관계: {chunk[0]['subject']}"
-                all_candidates.append(item)
-                cat_counts["관계"] = cat_counts.get("관계", 0) + 1
-            print(f" → {len(items)}개")
+            verified = 0
+        for item in items:
+                ok = verify_by_search(item["question"], item["answer"])
+                if ok:
+                    item["source_url"] = chunk[0].get("url", "")
+                    item["source_title"] = f"관계: {chunk[0]['subject']}"
+                    item["verified"] = True
+                    all_candidates.append(item)
+                    cat_counts["관계"] = cat_counts.get("관계", 0) + 1
+                    verified += 1
+                time.sleep(0.2)
+            print(f" → {len(items)}개 생성, {verified}개 검증 통과")
         except Exception as e:
             print(f" ⚠️  {e}")
         time.sleep(0.3)
