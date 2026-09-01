@@ -27,7 +27,11 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from semantica_helper import merge_node, extract_with_fallback, is_decision_triplet, record_decision_node
+from semantica_helper import (
+    merge_node, extract_with_fallback,
+    is_decision_triplet, record_decision_node,
+    upsert_event_node,
+)
 
 # ─── .env 로드 ────────────────────────────────────────────────────────────────
 _env_path = Path(__file__).parent.parent.parent / ".env"
@@ -87,6 +91,37 @@ JSON 배열로만 응답하세요 (설명 없이):
 
 조건/순서/소요시간이 없으면 해당 키를 생략하세요.
 트리플이 없으면 빈 배열 [] 반환."""
+
+# ─── 이벤트 추출 프롬프트 ────────────────────────────────────────────────────
+EVENT_EXTRACT_PROMPT = """\
+다음 텍스트에서 게임/서비스의 이벤트·업데이트를 추출하세요.
+날짜가 명시된 항목만 추출합니다. 날짜 형식: YYYY-MM-DD 또는 YY-MM-DD.
+
+이벤트 유형 (event_type):
+  client_update   — 클라이언트 패치·업데이트
+  server_update   — 서버 점검·배포
+  user_event      — 신규·복귀·기간한정 유저 이벤트
+  season          — 시즌 개막·종료
+  content_release — 신규 콘텐츠 오픈
+  maintenance     — 정기 점검
+  incident        — 장애 발생·복구
+  kpi_milestone   — DAU·매출 마일스톤 달성
+
+텍스트:
+{text}
+
+이벤트가 있으면 JSON 배열, 없으면 [] 로만 응답하세요:
+[
+  {{
+    "game":        "게임명",
+    "event_type":  "client_update",
+    "date":        "YYYY-MM-DD",
+    "title":       "이벤트 제목",
+    "description": "상세 설명 (없으면 빈 문자열)",
+    "target":      "신규유저,복귀유저 (해당 없으면 빈 문자열)",
+    "manager":     "담당자 또는 팀 이름 (모르면 빈 문자열)"
+  }}
+]"""
 
 
 # ─── 클라이언트 초기화 ────────────────────────────────────────────────────────
@@ -219,6 +254,34 @@ def _norm_pred(val) -> dict:
                 pass
         return pred
     return {"name": str(val)}
+
+
+def extract_events_from_text(text: str) -> list[dict]:
+    """Claude로 텍스트에서 날짜 기반 시계열 이벤트를 추출합니다."""
+    if not _llm_client:
+        return []
+    try:
+        resp = _llm_client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=text[:3000])}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw = parts[1] if len(parts) > 1 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw = raw.strip()
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [
+                e for e in parsed
+                if isinstance(e, dict) and e.get("game") and e.get("date")
+            ]
+        return []
+    except Exception:
+        return []
 
 
 def extract_triplets(text: str) -> list:
@@ -413,6 +476,21 @@ def ingest_page(path: Path, dry_run: bool = False) -> dict:
             result["graph"] = {"nodes": 0, "edges": 0}
             print(f"     그래프: 트리플 없음 — 건너뜀")
 
+        # 4. 이벤트 추출 및 저장
+        events = extract_events_from_text(body)
+        result["event_count"] = len(events)
+        if events:
+            ev_stored = 0
+            for ev in events:
+                ev["source_url"] = meta.get("notion_url", "")
+                nid = upsert_event_node(_falkordb, ev)
+                if nid >= 0:
+                    ev_stored += 1
+            print(f"     이벤트: {ev_stored}/{len(events)}개 :Event 노드 저장")
+        else:
+            result["event_count"] = 0
+            print(f"     이벤트: 없음 (날짜 명시 이벤트 미감지)")
+
         # API 레이트 리밋 준수
         time.sleep(0.5)
     else:
@@ -517,12 +595,14 @@ def main():
     total_tri   = sum(r.get("triplet_count", 0) for r in results)
     total_nod   = sum(r.get("graph", {}).get("nodes", 0) for r in results)
     total_edg   = sum(r.get("graph", {}).get("edges", 0) for r in results)
+    total_ev    = sum(r.get("event_count", 0) for r in results)
 
     print(f"  페이지:  {len(stored)}/{len(md_files)} 저장 완료")
     print(f"  청크:    {total_chunks}개 벡터 저장 (800자 단위, 200자 겹침)")
     print(f"  건너뜀:  {len(skipped)}개 (텍스트 부족)")
     print(f"  트리플:  {total_tri}개 추출")
     print(f"  그래프:  노드 {total_nod}개 / 엣지 {total_edg}개 저장")
+    print(f"  이벤트:  {total_ev}개 :Event 노드 저장")
 
     # ── 로그 저장 ────────────────────────────────────────────────────────────
     log = {

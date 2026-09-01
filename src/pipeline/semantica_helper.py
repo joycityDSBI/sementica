@@ -1,7 +1,7 @@
 """
 Semantica 프레임워크 통합 헬퍼
 
-다섯 가지 기능을 제공합니다:
+여덟 가지 기능을 제공합니다:
 
 1. merge_node()            — FalkorDB MERGE 기반 엔티티 중복 제거
                              같은 이름+타입의 노드가 이미 존재하면 생성하지 않고 기존 노드 ID 반환
@@ -16,6 +16,13 @@ Semantica 프레임워크 통합 헬퍼
 5. record_decision_node()  — FalkorDB에 :Decision 노드 기록 + 인과 연결 (LED_TO 엣지)
 
 6. trace_decision_chain()  — 엔티티 이름으로 관련 의사결정 체인 탐색
+
+7. upsert_event_node()     — FalkorDB에 :Event 노드 MERGE 기록
+                             :Game 노드 자동 연결 (HAD_EVENT 엣지)
+                             시간 순서대로 FOLLOWED_BY 엣지 자동 생성
+
+8. get_event_chain()       — 게임/서비스의 시계열 이벤트 이력 조회
+                             날짜 범위 필터, 이벤트 유형 필터 지원
 
 의존성:
   pip install semantica[graph-falkordb]   # NER/RE fallback 사용 시
@@ -483,4 +490,317 @@ def trace_decision_chain(graph, entity_name: str, max_depth: int = 4) -> dict:
             "decisions":     [],
             "chain_summary": [],
             "error":         str(e),
+        }
+
+
+# ─── 7. 이벤트 노드 (upsert_event_node) ─────────────────────────────────────
+
+EVENT_TYPES: frozenset = frozenset([
+    "client_update", "server_update", "user_event",
+    "season", "content_release", "maintenance", "incident", "kpi_milestone",
+])
+
+
+def _date_to_ts(date_str: str) -> int:
+    """ISO 8601 날짜 문자열 → Unix timestamp (UTC 기준). 실패 시 0 반환."""
+    from datetime import datetime, timezone as _tz
+    for fmt in ("%Y-%m-%d", "%y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+        try:
+            dt = datetime.strptime(date_str.strip(), fmt).replace(tzinfo=_tz.utc)
+            return int(dt.timestamp())
+        except ValueError:
+            continue
+    return 0
+
+
+def _month_to_quarter(month: int) -> str:
+    return f"Q{(month - 1) // 3 + 1}"
+
+
+def upsert_event_node(graph, event: dict) -> int:
+    """
+    :Event 노드를 FalkorDB에 MERGE 방식으로 생성/갱신.
+
+    event 딕셔너리 필수 키:
+        game        — 게임/서비스 이름 (예: "POTC")
+        date        — 날짜 문자열 (YYYY-MM-DD)
+        title       — 이벤트 제목
+
+    선택 키:
+        event_type  — 이벤트 유형 (EVENT_TYPES 중 하나, 기본 "user_event")
+        description — 이벤트 상세 설명
+        target      — 대상 유저 세그먼트 (콤마 구분 문자열)
+        manager     — 담당자/팀 이름 (기존 Person/Team 노드와 연결)
+        source_url  — 출처 URL
+
+    부수 효과:
+        - :Game 노드 MERGE (없으면 자동 생성)
+        - (Game)-[:HAD_EVENT]->(Event) 엣지 생성
+        - 같은 게임의 이전/이후 이벤트와 FOLLOWED_BY 엣지 자동 연결
+
+    Returns:
+        FalkorDB node id (실패 시 -1)
+    """
+    from datetime import datetime, timezone as _tz
+
+    game        = str(event.get("game",        "")).strip()
+    event_type  = str(event.get("event_type",  "")).strip()
+    date        = str(event.get("date",        "")).strip()
+    title       = str(event.get("title",       "")).strip()
+    description = str(event.get("description", ""))
+    target      = str(event.get("target",      ""))
+    manager     = str(event.get("manager",     ""))
+    source_url  = str(event.get("source_url",  ""))
+
+    if not (game and date and title):
+        return -1
+
+    # event_type 정규화
+    if event_type not in EVENT_TYPES:
+        event_type = "user_event"
+
+    # 날짜 파싱
+    date_ts = _date_to_ts(date)
+    if date_ts == 0:
+        return -1
+
+    try:
+        dt      = datetime.utcfromtimestamp(date_ts)
+        year    = dt.year
+        month   = dt.month
+        quarter = _month_to_quarter(month)
+    except Exception:
+        year, month, quarter = 0, 0, ""
+
+    # 안정적 ID: game | event_type | date
+    event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{game}|{event_type}|{date}"))
+    ts       = datetime.now(_tz.utc).isoformat()
+
+    # ── 1. :Event 노드 MERGE ────────────────────────────────────────────────
+    try:
+        r = graph.query(
+            "MERGE (e:Event {event_id: $eid}) "
+            "ON CREATE SET "
+            "  e.game = $game, e.event_type = $etype, e.date = $date, "
+            "  e.date_ts = $date_ts, e.year = $year, e.month = $month, "
+            "  e.quarter = $quarter, e.title = $title, "
+            "  e.description = $desc, e.target = $target, "
+            "  e.source_url = $url, e.ts = $ts "
+            "RETURN id(e) AS nid",
+            {
+                "eid":     event_id,  "game":    game,    "etype":   event_type,
+                "date":    date,      "date_ts": date_ts, "year":    year,
+                "month":   month,     "quarter": quarter, "title":   title,
+                "desc":    description, "target": target,
+                "url":     source_url,  "ts":     ts,
+            },
+        )
+        if not r.result_set:
+            return -1
+        event_node_id = r.result_set[0][0]
+    except Exception as e:
+        print(f"    ⚠️  Event 노드 생성 실패 ({game}/{date}/{title}): {e}")
+        return -1
+
+    # ── 2. :Game 노드 MERGE + HAD_EVENT 엣지 ───────────────────────────────
+    try:
+        graph.query(
+            "MERGE (g:Game {name: $name}) ON CREATE SET g.source_url = $url "
+            "RETURN id(g)",
+            {"name": game, "url": source_url},
+        )
+        graph.query(
+            "MATCH (g:Game {name: $game}), (e:Event {event_id: $eid}) "
+            "MERGE (g)-[:HAD_EVENT {date: $date}]->(e)",
+            {"game": game, "eid": event_id, "date": date},
+        )
+    except Exception:
+        pass
+
+    # ── 3. 담당자/팀 MANAGED_BY 엣지 ───────────────────────────────────────
+    if manager:
+        try:
+            mgr_r = graph.query(
+                "MATCH (m) WHERE m.name = $name RETURN id(m) LIMIT 1",
+                {"name": manager},
+            )
+            if mgr_r.result_set:
+                graph.query(
+                    "MATCH (m {name: $mgr}), (e:Event {event_id: $eid}) "
+                    "MERGE (e)-[:MANAGED_BY]->(m)",
+                    {"mgr": manager, "eid": event_id},
+                )
+        except Exception:
+            pass
+
+    # ── 4. FOLLOWED_BY 자동 연결 (같은 게임, 날짜 순서) ─────────────────────
+    try:
+        # 직전 이벤트
+        prev_r = graph.query(
+            "MATCH (e:Event) WHERE e.game = $game AND e.date_ts < $ts "
+            "RETURN e.event_id, e.date_ts ORDER BY e.date_ts DESC LIMIT 1",
+            {"game": game, "ts": date_ts},
+        )
+        if prev_r.result_set:
+            prev_eid  = prev_r.result_set[0][0]
+            prev_ts_v = prev_r.result_set[0][1]
+            days_diff = round((date_ts - prev_ts_v) / 86400)
+            graph.query(
+                "MATCH (p:Event {event_id: $p}), (c:Event {event_id: $c}) "
+                "MERGE (p)-[:FOLLOWED_BY {days_diff: $dd}]->(c)",
+                {"p": prev_eid, "c": event_id, "dd": days_diff},
+            )
+
+        # 직후 이벤트
+        next_r = graph.query(
+            "MATCH (e:Event) WHERE e.game = $game AND e.date_ts > $ts "
+            "RETURN e.event_id, e.date_ts ORDER BY e.date_ts ASC LIMIT 1",
+            {"game": game, "ts": date_ts},
+        )
+        if next_r.result_set:
+            next_eid  = next_r.result_set[0][0]
+            next_ts_v = next_r.result_set[0][1]
+            days_diff = round((next_ts_v - date_ts) / 86400)
+            graph.query(
+                "MATCH (c:Event {event_id: $c}), (n:Event {event_id: $n}) "
+                "MERGE (c)-[:FOLLOWED_BY {days_diff: $dd}]->(n)",
+                {"c": event_id, "n": next_eid, "dd": days_diff},
+            )
+    except Exception:
+        pass  # FOLLOWED_BY 실패는 치명적이지 않음
+
+    return event_node_id
+
+
+# ─── 8. 이벤트 체인 조회 (get_event_chain) ──────────────────────────────────
+
+def get_event_chain(
+    graph,
+    game: str,
+    event_type: str | None = None,
+    from_date:  str | None = None,
+    to_date:    str | None = None,
+    limit: int = 20,
+) -> dict:
+    """
+    게임/서비스의 시계열 이벤트를 날짜순으로 조회.
+
+    Args:
+        graph:      FalkorDB graph 객체
+        game:       게임/서비스 이름 (부분 일치)
+        event_type: 필터링할 이벤트 유형 (None이면 전체)
+        from_date:  시작 날짜 YYYY-MM-DD (None이면 제한 없음)
+        to_date:    종료 날짜 YYYY-MM-DD (None이면 제한 없음)
+        limit:      최대 반환 개수 (기본 20)
+
+    Returns:
+        {
+          "game": str,
+          "found": bool,
+          "total": int,
+          "events": [
+            {
+              "event_id", "game", "event_type", "date", "title",
+              "description", "target", "source_url",
+              "prev_event": {"title", "date"} | None,
+              "next_event": {"title", "date"} | None,
+            }, ...
+          ],
+          "timeline_summary": ["2026-04-12: [client_update] 클라이언트 업데이트", ...]
+        }
+    """
+    from_ts = _date_to_ts(from_date) if from_date else 0
+    to_ts   = _date_to_ts(to_date)   if to_date   else 9_999_999_999
+
+    try:
+        # 게임명 부분 일치로 실제 이름 확인
+        game_r = graph.query(
+            "MATCH (g:Game) WHERE g.name CONTAINS $name RETURN g.name LIMIT 1",
+            {"name": game},
+        )
+        # 게임 노드가 없으면 event.game 필드에서 직접 탐색
+        if game_r.result_set:
+            actual_game = game_r.result_set[0][0]
+        else:
+            ev_r = graph.query(
+                "MATCH (e:Event) WHERE e.game CONTAINS $name RETURN e.game LIMIT 1",
+                {"name": game},
+            )
+            actual_game = ev_r.result_set[0][0] if ev_r.result_set else game
+
+        # 이벤트 유형 필터 조건 분기 (FalkorDB IS NULL 파라미터 미지원 대응)
+        if event_type:
+            type_clause = "AND e.event_type = $etype "
+            params = {"game": actual_game, "etype": event_type, "from_ts": from_ts, "to_ts": to_ts}
+        else:
+            type_clause = ""
+            params = {"game": actual_game, "from_ts": from_ts, "to_ts": to_ts}
+
+        cypher = (
+            "MATCH (e:Event) "
+            "WHERE e.game = $game "
+            f"  {type_clause}"
+            "  AND e.date_ts >= $from_ts AND e.date_ts <= $to_ts "
+            "RETURN e.event_id, e.game, e.event_type, e.date, "
+            "       e.title, e.description, e.target, e.source_url "
+            f"ORDER BY e.date_ts ASC LIMIT {int(limit)}"
+        )
+        r = graph.query(cypher, params)
+
+        if not r.result_set:
+            return {
+                "game": actual_game, "found": False,
+                "total": 0, "events": [], "timeline_summary": [],
+            }
+
+        events = []
+        for row in r.result_set:
+            eid = row[0]
+            # 직전/직후 이벤트
+            prev_r = graph.query(
+                "MATCH (prev:Event)-[:FOLLOWED_BY]->(e:Event {event_id: $eid}) "
+                "RETURN prev.title, prev.date LIMIT 1",
+                {"eid": eid},
+            )
+            next_r = graph.query(
+                "MATCH (e:Event {event_id: $eid})-[:FOLLOWED_BY]->(nxt:Event) "
+                "RETURN nxt.title, nxt.date LIMIT 1",
+                {"eid": eid},
+            )
+            events.append({
+                "event_id":    row[0],
+                "game":        row[1],
+                "event_type":  row[2],
+                "date":        row[3],
+                "title":       row[4],
+                "description": row[5] or "",
+                "target":      row[6] or "",
+                "source_url":  row[7] or "",
+                "prev_event":  {"title": prev_r.result_set[0][0], "date": prev_r.result_set[0][1]}
+                               if prev_r.result_set else None,
+                "next_event":  {"title": next_r.result_set[0][0], "date": next_r.result_set[0][1]}
+                               if next_r.result_set else None,
+            })
+
+        timeline_summary = [
+            f"{e['date']}: [{e['event_type']}] {e['title']}"
+            for e in events
+        ]
+
+        return {
+            "game":             actual_game,
+            "found":            True,
+            "total":            len(events),
+            "events":           events,
+            "timeline_summary": timeline_summary,
+        }
+
+    except Exception as ex:
+        return {
+            "game":             game,
+            "found":            False,
+            "total":            0,
+            "events":           [],
+            "timeline_summary": [],
+            "error":            str(ex),
         }

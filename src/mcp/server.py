@@ -243,9 +243,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
 try:
     from semantica_helper import find_shortest_path as _find_path
     from semantica_helper import trace_decision_chain as _trace_decision
+    from semantica_helper import get_event_chain as _get_event_chain
+    from semantica_helper import upsert_event_node as _upsert_event_node
 except Exception:
-    _find_path = None
-    _trace_decision = None
+    _find_path          = None
+    _trace_decision     = None
+    _get_event_chain    = None
+    _upsert_event_node  = None
 
 # ─── FastMCP 서버 ─────────────────────────────────────────────────────────────
 from fastmcp import FastMCP
@@ -258,7 +262,8 @@ mcp = FastMCP(
         "semantic_search로 의미 기반 검색, graph_search로 관계 탐색, "
         "hybrid_search로 두 가지를 결합한 검색을 수행하세요. "
         "path_search로 두 엔티티 간 최단 경로를, "
-        "decision_trace로 의사결정 인과 체인을 탐색할 수 있습니다."
+        "decision_trace로 의사결정 인과 체인을, "
+        "timeline_search로 게임/서비스의 시계열 이벤트 이력을 탐색할 수 있습니다."
     ),
 )
 
@@ -563,6 +568,69 @@ def decision_trace(entity: str, max_depth: int = 4) -> dict[str, Any]:
         log_mcp_request(
             dept=DEPT_NAME, tool="decision_trace", query=entity,
             result_count=len(_result.get("decisions", [])) if _result else 0,
+            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+        )
+
+
+@mcp.tool()
+def timeline_search(
+    game: str,
+    event_type: str = "",
+    from_date:  str = "",
+    to_date:    str = "",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """
+    게임/서비스의 시계열 이벤트 이력을 날짜순으로 조회합니다.
+    "POTC 2026년 전체 이벤트", "Q2 클라이언트 업데이트 목록" 같은 질문에 사용하세요.
+
+    Args:
+        game:       게임/서비스 이름 (예: "POTC", 부분 일치 가능)
+        event_type: 이벤트 유형 필터 (빈 문자열이면 전체 조회)
+                    "client_update" | "server_update" | "user_event" |
+                    "season" | "content_release" | "maintenance" |
+                    "incident" | "kpi_milestone"
+        from_date:  조회 시작 날짜 (YYYY-MM-DD, 빈 문자열이면 제한 없음)
+        to_date:    조회 종료 날짜 (YYYY-MM-DD, 빈 문자열이면 제한 없음)
+        limit:      최대 반환 이벤트 수 (기본값: 20)
+
+    Returns:
+        {
+          game, found, total,
+          events: [{event_id, game, event_type, date, title, description,
+                    target, source_url, prev_event, next_event}],
+          timeline_summary: ["2026-04-12: [client_update] 클라이언트 업데이트", ...]
+        }
+
+    사용 예:
+        timeline_search(game="POTC")
+        timeline_search(game="POTC", event_type="user_event", from_date="2026-01-01")
+        timeline_search(game="POTC", from_date="2026-04-01", to_date="2026-09-30")
+    """
+    _t0 = time.time()
+    _err = None
+    _result: dict | None = None
+    try:
+        if _get_event_chain is None:
+            return {"game": game, "found": False, "error": "timeline_search 모듈을 로드할 수 없습니다"}
+        graph = _get_falkordb()
+        _result = _get_event_chain(
+            graph,
+            game       = game,
+            event_type = event_type or None,
+            from_date  = from_date  or None,
+            to_date    = to_date    or None,
+            limit      = limit,
+        )
+        return _result
+    except Exception as e:
+        _err = str(e)
+        raise
+    finally:
+        log_mcp_request(
+            dept=DEPT_NAME, tool="timeline_search",
+            query=f"{game} {event_type} {from_date}~{to_date}",
+            result_count=(_result.get("total", 0) if _result else 0),
             duration_ms=int((time.time() - _t0) * 1000), error=_err,
         )
 
