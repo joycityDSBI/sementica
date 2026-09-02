@@ -44,7 +44,7 @@ if _env_path.exists():
 
 # ─── 경로 설정 ────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
-from semantica_helper import upsert_event_node, get_event_chain, EVENT_TYPES
+from semantica_helper import EVENT_TYPES, get_event_chain, upsert_event_node
 
 ROOT_DIR  = Path(__file__).parent.parent.parent
 LOGS_DIR  = ROOT_DIR / "data" / "logs"
@@ -278,7 +278,7 @@ def list_events(
         if ev.get("target"):
             print(f"  {'':12} {'':17} → 대상: {ev['target']}")
 
-    print(f"\n  --- 타임라인 요약 ---")
+    print("\n  --- 타임라인 요약 ---")
     for line in result["timeline_summary"]:
         print(f"  {line}")
 
@@ -357,7 +357,7 @@ def main():
                 print(f"     {err}")
 
         if not events:
-            print(f"\n  임포트할 이벤트 없음")
+            print("\n  임포트할 이벤트 없음")
             sys.exit(0)
 
         print(f"\n  임포트 대상: {len(events)}건")
@@ -389,7 +389,7 @@ def main():
 
     # ── 결과 요약 ────────────────────────────────────────────────────────────
     print(f"\n{'=' * 60}")
-    print(f"  결과 요약")
+    print("  결과 요약")
     print(f"  총 이벤트: {stats['total']}건")
     if not stats["dry_run"]:
         print(f"  그래프 저장: {stats['stored_graph']}건 (:Event/:Game 노드)")
@@ -397,7 +397,7 @@ def main():
         if stats["failed"]:
             print(f"  실패:       {stats['failed']}건")
     else:
-        print(f"  [DRY-RUN] 실제 저장 없음")
+        print("  [DRY-RUN] 실제 저장 없음")
 
 
 if __name__ == "__main__":

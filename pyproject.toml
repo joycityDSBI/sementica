@@ -1,0 +1,34 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "I",     # isort
+    "W",     # pycodestyle warnings
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific
+    "DTZ",   # flake8-datetimez
+    "FURB",  # refurb
+]
+ignore = [
+    # 파이프라인 특성상 허용: 넓은 예외 처리 (한 페이지 실패가 전체를 막지 않도록)
+    "BLE001",  # blind exception: Exception — 파이프라인 resilience 패턴
+    "S110",    # try-except-pass — 연결 실패 시 no-op 처리 (DB 로거 등)
+    # 타입 힌트 일부 허용
+    "RUF013",  # implicit Optional — 기존 코드 스타일 유지
+    # 기타 허용
+    "E501",    # line too long — 프롬프트 문자열이 길어 예외
+    "UP007",   # X | Y → Optional[X] 미적용 (Python 3.9 이하 호환)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["semantica", "semantica_helper", "dept_config", "notion_fetch", "db_logger"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

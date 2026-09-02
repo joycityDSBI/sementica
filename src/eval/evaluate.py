@@ -155,10 +155,10 @@ else:
 
 # ─── 클라이언트 초기화 ────────────────────────────────────────────────────────
 def init_clients():
-    from google import genai
-    from qdrant_client import QdrantClient
     import falkordb as fdb
     from anthropic import AnthropicVertex
+    from google import genai
+    from qdrant_client import QdrantClient
 
     embed_client = genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
     qdrant = QdrantClient(url=QDRANT_URL)
@@ -518,7 +518,7 @@ def run_evaluation():
 
     # Markdown 리포트
     md_lines = [
-        f"# Semantica 골든셋 평가 결과\n",
+        "# Semantica 골든셋 평가 결과\n",
         f"- **평가일시**: {ts}",
         f"- **전체 평균**: {total_score:.3f} ({'✅ 목표 달성' if total_score >= 0.7 else '❌ 목표 미달'})",
         f"- **통과 문항**: {passed}/20\n",
@@ -543,7 +543,7 @@ def run_evaluation():
     md_path = out_dir / f"eval_report_{ts}.md"
     md_path.write_text("\n".join(md_lines), encoding="utf-8")
 
-    print(f"\n  💾 결과 저장:")
+    print("\n  💾 결과 저장:")
     print(f"     JSON: {json_path}")
     print(f"     MD:   {md_path}")
     print()

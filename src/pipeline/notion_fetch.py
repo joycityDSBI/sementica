@@ -16,12 +16,12 @@ API 권한이 있는 모든 페이지를 수집해 data/{dept}/notion_pages/ 에
   python src/pipeline/notion_fetch.py --list-depts
 """
 
-import os
-import json
-import time
 import argparse
+import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 # .env 로드
@@ -36,7 +36,7 @@ if _env_path.exists():
 try:
     import httpx
 except ImportError:
-    raise SystemExit("httpx가 필요합니다: pip install httpx")
+    raise SystemExit("httpx가 필요합니다: pip install httpx") from None
 
 NOTION_VERSION   = "2022-06-28"
 RATE_LIMIT_DELAY = 0.34   # 3 req/s 준수
@@ -425,7 +425,7 @@ def main():
         encoding="utf-8",
     )
     print(f"\n결과: {summary_path}")
-    print(f"\n다음 단계:")
+    print("\n다음 단계:")
     print(f"  python src/pipeline/ingest.py --dept {args.dept} --reset")
 
 

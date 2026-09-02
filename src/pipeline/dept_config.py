@@ -9,7 +9,7 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:
-    raise SystemExit("pyyaml이 필요합니다: pip install pyyaml")
+    raise SystemExit("pyyaml이 필요합니다: pip install pyyaml") from None
 
 CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "departments.yaml"
 

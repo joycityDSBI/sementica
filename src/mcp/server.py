@@ -18,11 +18,9 @@ Claude Code 등록:
 """
 
 import argparse
-import json
 import os
 import sys
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -115,16 +113,15 @@ def _is_complex_query(query: str) -> bool:
     """복합 쿼리 여부 휴리스틱 탐지 (15자+ AND 복합 패턴 OR 6단어+)"""
     if len(query) >= 15 and any(p in query for p in _COMPLEX_PATTERNS):
         return True
-    if len(query.split()) >= 6:
-        return True
-    return False
+    return len(query.split()) >= 6
 
 
 def _decompose_query(query: str) -> list[str]:
     """Claude Haiku로 복합 쿼리를 독립적 서브쿼리 2~3개로 분해"""
     try:
-        import anthropic
         import re as _re
+
+        import anthropic
         client = anthropic.Anthropic()
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -242,8 +239,8 @@ except Exception:
 sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
 try:
     from semantica_helper import find_shortest_path as _find_path
-    from semantica_helper import trace_decision_chain as _trace_decision
     from semantica_helper import get_event_chain as _get_event_chain
+    from semantica_helper import trace_decision_chain as _trace_decision
     from semantica_helper import upsert_event_node as _upsert_event_node
 except Exception:
     _find_path          = None
@@ -252,7 +249,7 @@ except Exception:
     _upsert_event_node  = None
 
 # ─── FastMCP 서버 ─────────────────────────────────────────────────────────────
-from fastmcp import FastMCP
+from fastmcp import FastMCP  # noqa: E402
 
 mcp = FastMCP(
     name="JoyCity Ontology",
@@ -361,7 +358,7 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
-def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:  # noqa: C901
+def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
     """
     특정 엔티티(사람·팀·프로세스·시스템 등)를 중심으로 연결된 관계를 그래프에서 탐색합니다.
     문서 내용이 아닌 '구조적 관계'(누가 무엇을 담당하는지, 어떤 팀에 속하는지 등)를 파악할 때 사용합니다.

@@ -19,6 +19,7 @@ Notion 샘플 페이지 → Qdrant(벡터) + FalkorDB(그래프) 저장
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -36,8 +37,10 @@ except Exception:
     def _upsert_notion_page(*a, **kw): pass   # PostgreSQL 없으면 no-op
 
 from semantica_helper import (
-    merge_node, extract_with_fallback,
-    is_decision_triplet, record_decision_node,
+    extract_with_fallback,
+    is_decision_triplet,
+    merge_node,
+    record_decision_node,
     upsert_event_node,
 )
 
@@ -213,7 +216,7 @@ def init_qdrant(reset: bool = False):
         return True
     except Exception as e:
         print(f"  ❌ Qdrant 연결 실패: {e}")
-        print(f"     → Docker Desktop 실행 후 'docker-compose up -d' 확인")
+        print("     → Docker Desktop 실행 후 'docker-compose up -d' 확인")
         return False
 
 
@@ -235,7 +238,7 @@ def init_falkordb(reset: bool = False):
         return True
     except Exception as e:
         print(f"  ❌ FalkorDB 연결 실패: {e}")
-        print(f"     → Docker Desktop 실행 후 'docker-compose up -d' 확인")
+        print("     → Docker Desktop 실행 후 'docker-compose up -d' 확인")
         return False
 
 
@@ -256,10 +259,8 @@ def parse_md(path: Path) -> dict:
                     k = k.strip()
                     v = v.strip()
                     if k == "db_properties":
-                        try:
+                        with contextlib.suppress(Exception):
                             meta["db_properties"] = json.loads(v)
-                        except Exception:
-                            pass
                     else:
                         meta[k] = v
             body = content[end + 3:].strip()
@@ -280,10 +281,8 @@ def _norm_pred(val) -> dict:
             if k in val:
                 pred[k] = str(val[k])
         if "order" in val:
-            try:
+            with contextlib.suppress(ValueError, TypeError):
                 pred["order"] = int(val["order"])
-            except (ValueError, TypeError):
-                pass
         return pred
     return {"name": str(val)}
 
@@ -338,8 +337,7 @@ def extract_events_from_text(text: str) -> list[dict]:
         if raw.startswith("```"):
             parts = raw.split("```")
             raw = parts[1] if len(parts) > 1 else raw
-            if raw.startswith("json"):
-                raw = raw[4:]
+            raw = raw.removeprefix("json")
         raw = raw.strip()
         parsed = json.loads(raw)
         if isinstance(parsed, list):
@@ -367,8 +365,7 @@ def extract_triplets(text: str) -> list:
         if raw.startswith("```"):
             parts = raw.split("```")
             raw = parts[1] if len(parts) > 1 else raw
-            if raw.startswith("json"):
-                raw = raw[4:]
+            raw = raw.removeprefix("json")
         raw = raw.strip()
         parsed = json.loads(raw)
         if not isinstance(parsed, list):
@@ -545,7 +542,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
     print(f"     URL: {meta.get('notion_url', '-')}")
 
     if word_count < 50:
-        print(f"     ⚠️  텍스트 부족 — 건너뜀")
+        print("     ⚠️  텍스트 부족 — 건너뜀")
         if not dry_run and meta.get("page_id"):
             _upsert_notion_page(
                 page_id=meta["page_id"], dept=dept,
@@ -586,7 +583,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
             print(f"     그래프: 노드 {stats['nodes']}개, 엣지 {stats['edges']}개 저장")
         else:
             result["graph"] = {"nodes": 0, "edges": 0}
-            print(f"     그래프: 트리플 없음 — 건너뜀")
+            print("     그래프: 트리플 없음 — 건너뜀")
 
         # 4. 이벤트 저장 (DB 속성 우선 → 없으면 LLM 텍스트 추출)
         source_url  = meta.get("notion_url", "")
@@ -618,7 +615,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
                 if ev_stored:
                     print(f"     이벤트: {ev_stored}/{len(events)}개 :Event 노드 저장 (LLM 추출)")
             else:
-                print(f"     이벤트: 없음 (날짜 명시 이벤트 미감지)")
+                print("     이벤트: 없음 (날짜 명시 이벤트 미감지)")
 
         result["event_count"] = ev_stored
 
@@ -638,7 +635,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
                 status="ok",
             )
     else:
-        print(f"     [DRY-RUN] 저장 없이 확인만")
+        print("     [DRY-RUN] 저장 없이 확인만")
 
     return result
 
@@ -669,7 +666,7 @@ def main():
         print(f"  컬렉션: {COLLECTION_NAME}  그래프: {GRAPH_NAME}")
         print(f"  데이터: {samples_dir}")
     else:
-        print(f"\n  ⚠️  --dept 없음 → legacy 모드 (data/notion_samples, joycity_pages)")
+        print("\n  ⚠️  --dept 없음 → legacy 모드 (data/notion_samples, joycity_pages)")
 
 
     print("\n" + "=" * 60)
@@ -734,10 +731,8 @@ def main():
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(ingest_page, f, args.dry_run, args.dept): f for f in md_files}
-        done = 0
-        for future in as_completed(futures):
+        for done, future in enumerate(as_completed(futures), start=1):
             f = futures[future]
-            done += 1
             try:
                 r = future.result()
                 results.append(r)
@@ -751,7 +746,7 @@ def main():
     print(f"\n  ⏱️  소요 시간: {elapsed // 60}분 {elapsed % 60}초")
 
     # ── 결과 요약 ────────────────────────────────────────────────────────────
-    print(f"\n[4/4] 결과 요약")
+    print("\n[4/4] 결과 요약")
     print("=" * 60)
     stored      = [r for r in results if not r.get("skipped") and r.get("vector_stored")]
     skipped     = [r for r in results if r.get("skipped")]

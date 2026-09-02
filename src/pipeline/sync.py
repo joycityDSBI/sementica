@@ -20,12 +20,13 @@ Cron 등록 (매일 새벽 2시):
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # ─── .env 로드 ────────────────────────────────────────────────────────────────
@@ -43,24 +44,29 @@ sys.path.insert(0, str(Path(__file__).parent))
 try:
     import httpx
 except ImportError:
-    raise SystemExit("httpx가 필요합니다: pip install httpx")
+    raise SystemExit("httpx가 필요합니다: pip install httpx") from None
 
-from dept_config import load_dept
-from notion_fetch import (
-    notion_headers, fetch_blocks_recursive, page_title,
-    extract_db_properties,
+from dept_config import load_dept  # noqa: E402
+from notion_fetch import (  # noqa: E402
     RATE_LIMIT_DELAY,
+    extract_db_properties,
+    fetch_blocks_recursive,
+    notion_headers,
+    page_title,
 )
-from semantica_helper import (
-    merge_node, extract_with_fallback,
-    is_decision_triplet, record_decision_node,
+from semantica_helper import (  # noqa: E402
+    extract_with_fallback,
+    is_decision_triplet,
+    merge_node,
+    record_decision_node,
     upsert_event_node,
 )
 
 # DB 로거 (POSTGRES_URL 없으면 no-op)
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 try:
-    from db_logger import log_sync_result, upsert_notion_page as _upsert_notion_page
+    from db_logger import log_sync_result
+    from db_logger import upsert_notion_page as _upsert_notion_page
 except Exception:
     def log_sync_result(*a, **kw): pass
     def _upsert_notion_page(*a, **kw): pass
@@ -134,11 +140,8 @@ def _event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | 
         return None
 
     type_val = next((db_props[k] for k in _TYPE_KEYS if k in db_props), "")
-    mgr_raw  = next((db_props[k] for k in _MANAGER_KEYS if k in db_props), "")
-    if isinstance(mgr_raw, list):
-        mgr_val = ", ".join(mgr_raw)
-    else:
-        mgr_val = str(mgr_raw) if mgr_raw else ""
+    mgr_raw = next((db_props[k] for k in _MANAGER_KEYS if k in db_props), "")
+    mgr_val = ", ".join(mgr_raw) if isinstance(mgr_raw, list) else str(mgr_raw) if mgr_raw else ""
 
     return {
         "game":        str(game_val),
@@ -227,25 +230,22 @@ def _get_stored_pages(dept: str) -> list[dict]:
     try:
         import psycopg2
         conn = psycopg2.connect(pg_url)
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT page_id, notion_url, title
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT page_id, notion_url, title
                        FROM notion_pages
                        WHERE dept = %s AND status IN ('ok', 'skipped')
                        ORDER BY last_ingested_at DESC""",
-                    (dept,),
-                )
-                return [{"page_id": r[0], "notion_url": r[1], "title": r[2] or r[0]}
-                        for r in cur.fetchall()]
+                (dept,),
+            )
+            return [{"page_id": r[0], "notion_url": r[1], "title": r[2] or r[0]}
+                    for r in cur.fetchall()]
     except Exception as e:
         print(f"  ⚠️  notion_pages 조회 실패: {e}")
         return []
     finally:
-        try:
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:
-            pass
 
 
 def _mark_page_deleted(page_id: str, dept: str) -> None:
@@ -256,19 +256,16 @@ def _mark_page_deleted(page_id: str, dept: str) -> None:
     try:
         import psycopg2
         conn = psycopg2.connect(pg_url)
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE notion_pages SET status='deleted' WHERE page_id=%s AND dept=%s",
-                    (page_id, dept),
-                )
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE notion_pages SET status='deleted' WHERE page_id=%s AND dept=%s",
+                (page_id, dept),
+            )
     except Exception as e:
         print(f"  ⚠️  삭제 마킹 실패: {e}")
     finally:
-        try:
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:
-            pass
 
 
 def delete_page_events(graph, source_url: str) -> int:
@@ -302,7 +299,7 @@ def reconcile_deleted_pages(
 
     stored = _get_stored_pages(dept)
     if not stored:
-        print("  ℹ️  notion_pages 테이블에 데이터 없음.")
+        print("  [i] notion_pages 테이블에 데이터 없음.")
         print("      ingest.py 실행 후 재시도하세요.")
         return {"checked": 0, "deleted": 0}
 
@@ -329,7 +326,7 @@ def reconcile_deleted_pages(
                 _mark_page_deleted(page_id, dept)
                 print(f"       → 벡터 {v_del}개 / 엣지 {e_del}개 / 이벤트 {ev_del}개 삭제 완료")
             else:
-                print(f"       [DRY-RUN] 삭제 예정")
+                print("       [DRY-RUN] 삭제 예정")
 
             deleted_pages.append({"page_id": page_id, "title": title, "url": source_url})
         else:
@@ -347,7 +344,7 @@ def reconcile_deleted_pages(
 # ─── Qdrant 벡터 삭제 (source_url 필터) ──────────────────────────────────────
 def delete_page_vectors(qc, collection_name: str, source_url: str) -> int:
     """source_url이 일치하는 벡터 전체 삭제. 삭제된 수 반환."""
-    from qdrant_client.models import Filter, FieldCondition, MatchValue
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
     try:
         result = qc.delete(
             collection_name=collection_name,
@@ -394,10 +391,8 @@ def _norm_pred(val) -> dict:
             if k in val:
                 pred[k] = str(val[k])
         if "order" in val:
-            try:
+            with contextlib.suppress(ValueError, TypeError):
                 pred["order"] = int(val["order"])
-            except (ValueError, TypeError):
-                pass
         return pred
     return {"name": str(val)}
 
@@ -414,8 +409,7 @@ def extract_events_from_text(llm_client, text: str) -> list[dict]:
         if raw.startswith("```"):
             parts = raw.split("```")
             raw = parts[1] if len(parts) > 1 else raw
-            if raw.startswith("json"):
-                raw = raw[4:]
+            raw = raw.removeprefix("json")
         raw = raw.strip()
         parsed = json.loads(raw)
         if isinstance(parsed, list):
@@ -480,7 +474,7 @@ def sync_page(
     print(f"     {source_url}")
 
     if dry_run:
-        print(f"     [DRY-RUN] 건너뜀")
+        print("     [DRY-RUN] 건너뜀")
         return result
 
     # 1. Notion에서 본문 가져오기
@@ -530,7 +524,7 @@ def sync_page(
 
             # 4-2. 전체 청크 한 번에 Qdrant upsert
             points = []
-            for i, (chunk, vec) in enumerate(zip(chunks, all_vecs)):
+            for i, (chunk, vec) in enumerate(zip(chunks, all_vecs, strict=True)):
                 points.append({
                     "id":     str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_url}#chunk{i}")),
                     "vector": vec,
@@ -620,7 +614,7 @@ def sync_page(
                     ev_stored += 1
             print(f"     이벤트(LLM): {ev_stored}/{len(events)}개 :Event 노드 저장")
         else:
-            print(f"     이벤트: 없음")
+            print("     이벤트: 없음")
 
     result["new_events"] = ev_stored
 
@@ -650,7 +644,7 @@ def load_sync_state(state_path: Path) -> dict:
             try:
                 return json.loads(text)
             except json.JSONDecodeError:
-                print(f"  ⚠️  sync_state.json 파싱 실패 — 초기 상태로 재설정")
+                print("  ⚠️  sync_state.json 파싱 실패 — 초기 상태로 재설정")
     # 파일 없거나 비어있거나 손상된 경우: 1970-01-01 (전체 동기화)
     return {"last_sync_time": "1970-01-01T00:00:00.000Z", "total_synced": 0}
 
@@ -774,7 +768,7 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
 
     start_time = time.time()
-    now_iso    = datetime.now(timezone.utc).isoformat()
+    now_iso    = datetime.now(UTC).isoformat()
     state      = load_sync_state(state_path)
     since_iso  = "1970-01-01T00:00:00.000Z" if args.full else state["last_sync_time"]
 
@@ -791,10 +785,10 @@ def main():
 
     # ── 클라이언트 초기화 ──────────────────────────────────────────────────
     print("\n[1/4] 클라이언트 초기화")
-    from google import genai
-    from qdrant_client import QdrantClient
     import falkordb as fdb
     from anthropic import AnthropicVertex
+    from google import genai
+    from qdrant_client import QdrantClient
 
     embed_client = genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
     qc           = QdrantClient(url=QDRANT_URL)
@@ -816,7 +810,7 @@ def main():
 
     # ── 수정 페이지 조회 ───────────────────────────────────────────────────
     keyword = args.search.strip()
-    print(f"\n[2/4] Notion에서 수정 페이지 조회 중...")
+    print("\n[2/4] Notion에서 수정 페이지 조회 중...")
     if keyword:
         print(f"   검색 키워드: '{keyword}' (Notion 검색 API 사용)")
     with httpx.Client(timeout=60) as notion_client:
@@ -841,7 +835,7 @@ def main():
             return
 
         # ── 동기화 실행 ─────────────────────────────────────────────────
-        print(f"\n[3/4] 페이지 동기화 시작")
+        print("\n[3/4] 페이지 동기화 시작")
         results = []
         for i, page in enumerate(modified_pages, 1):
             print(f"\n  [{i:03d}/{len(modified_pages):03d}]")
@@ -861,7 +855,7 @@ def main():
     total_e  = sum(r.get("new_triplets", 0) for r in success)
     total_ev = sum(r.get("new_events",   0) for r in success)
 
-    print(f"\n[4/4] 동기화 결과")
+    print("\n[4/4] 동기화 결과")
     print("=" * 60)
     print(f"  처리: {len(success)}개 / 건너뜀: {len(skipped)}개 / 오류: {len(errors)}개")
     print(f"  신규 벡터 청크: {total_v}개")

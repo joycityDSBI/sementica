@@ -13,7 +13,7 @@ POSTGRES_URL 환경변수가 설정되지 않았거나 psycopg2가 없으면
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from functools import wraps
 from pathlib import Path
 
@@ -61,16 +61,15 @@ def log_mcp_request(
     if conn is None:
         return
     try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
                     INSERT INTO mcp_request_log
                         (dept, tool, query, result_count, duration_ms, error)
                     VALUES (%s, %s, %s, %s, %s, %s)
                     """,
-                    (dept, tool, query[:2000], result_count, duration_ms, error),
-                )
+                (dept, tool, query[:2000], result_count, duration_ms, error),
+            )
     except Exception as e:
         print(f"  [DB] mcp_request_log 기록 실패: {e}")
     finally:
@@ -151,35 +150,34 @@ def log_sync_result(
     # since_time 정규화
     if isinstance(since_time, str):
         try:
-            since_time = datetime.fromisoformat(since_time.replace("Z", "+00:00"))
+            since_time = datetime.fromisoformat(since_time.removesuffix("Z") + "+00:00")
         except Exception:
             since_time = None
     try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
                     INSERT INTO sync_log
                         (dept, search_keyword, since_time, modified_found,
                          processed, skipped, errors, new_chunks, new_triplets,
                          duration_sec, status, error_detail)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (
-                        dept,
-                        search_keyword or None,
-                        since_time,
-                        modified_found,
-                        processed,
-                        skipped,
-                        errors,
-                        new_chunks,
-                        new_triplets,
-                        duration_sec,
-                        status,
-                        error_detail,
-                    ),
-                )
+                (
+                    dept,
+                    search_keyword or None,
+                    since_time,
+                    modified_found,
+                    processed,
+                    skipped,
+                    errors,
+                    new_chunks,
+                    new_triplets,
+                    duration_sec,
+                    status,
+                    error_detail,
+                ),
+            )
         print(f"  [DB] sync_log 기록 완료 (status={status})")
     except Exception as e:
         print(f"  [DB] sync_log 기록 실패: {e}")
@@ -216,17 +214,16 @@ def upsert_notion_page(
         if last_edited_time.strip():
             try:
                 last_edited_time = datetime.fromisoformat(
-                    last_edited_time.replace("Z", "+00:00")
+                    last_edited_time.removesuffix("Z") + "+00:00"
                 )
             except Exception:
                 last_edited_time = None
         else:
             last_edited_time = None   # 빈 문자열 → NULL
     try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
                     INSERT INTO notion_pages
                         (page_id, dept, notion_url, title, last_edited_time,
                          last_ingested_at, word_count, chunk_count, triplet_count,
@@ -246,21 +243,21 @@ def upsert_notion_page(
                         status           = EXCLUDED.status,
                         error_msg        = EXCLUDED.error_msg
                     """,
-                    (
-                        page_id[:32] if page_id else "",
-                        dept[:50]    if dept     else "",
-                        notion_url or "",
-                        (title or "")[:500],
-                        last_edited_time,
-                        word_count,
-                        chunk_count,
-                        triplet_count,
-                        event_count,
-                        is_db_item,
-                        (status or "ok")[:20],
-                        error_msg,
-                    ),
-                )
+                (
+                    page_id[:32] if page_id else "",
+                    dept[:50]    if dept     else "",
+                    notion_url or "",
+                    (title or "")[:500],
+                    last_edited_time,
+                    word_count,
+                    chunk_count,
+                    triplet_count,
+                    event_count,
+                    is_db_item,
+                    (status or "ok")[:20],
+                    error_msg,
+                ),
+            )
     except Exception as e:
         print(f"  [DB] notion_pages upsert 실패: {e}")
     finally:

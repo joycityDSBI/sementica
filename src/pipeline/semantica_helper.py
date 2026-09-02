@@ -29,9 +29,8 @@ Semantica 프레임워크 통합 헬퍼
 """
 
 import re
-import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 # ─── Semantica 가용 여부 자동 감지 ──────────────────────────────────────────────
 _SEM_AVAILABLE   = False   # Semantica 패키지 설치 여부
@@ -330,7 +329,7 @@ def record_decision_node(graph, triplet: dict, source_url: str) -> int:
         uuid.NAMESPACE_URL,
         f"{source_url}|{subj_name}|{pred_name}|{obj_name}",
     ))
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
 
     try:
         r = graph.query(
@@ -503,10 +502,10 @@ EVENT_TYPES: frozenset = frozenset([
 
 def _date_to_ts(date_str: str) -> int:
     """ISO 8601 날짜 문자열 → Unix timestamp (UTC 기준). 실패 시 0 반환."""
-    from datetime import datetime, timezone as _tz
+    from datetime import datetime
     for fmt in ("%Y-%m-%d", "%y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
         try:
-            dt = datetime.strptime(date_str.strip(), fmt).replace(tzinfo=_tz.utc)
+            dt = datetime.strptime(date_str.strip(), fmt).replace(tzinfo=UTC)
             return int(dt.timestamp())
         except ValueError:
             continue
@@ -541,7 +540,7 @@ def upsert_event_node(graph, event: dict) -> int:
     Returns:
         FalkorDB node id (실패 시 -1)
     """
-    from datetime import datetime, timezone as _tz
+    from datetime import datetime
 
     game        = str(event.get("game",        "")).strip()
     event_type  = str(event.get("event_type",  "")).strip()
@@ -574,7 +573,7 @@ def upsert_event_node(graph, event: dict) -> int:
 
     # 안정적 ID: game | event_type | date
     event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{game}|{event_type}|{date}"))
-    ts       = datetime.now(_tz.utc).isoformat()
+    ts       = datetime.now(UTC).isoformat()
 
     # ── 1. :Event 노드 MERGE ────────────────────────────────────────────────
     try:

@@ -93,10 +93,10 @@ print()
 
 # ─── 클라이언트 초기화 ────────────────────────────────────────────────────────
 print("🔌 클라이언트 초기화...")
-from google import genai as _genai
-from qdrant_client import QdrantClient
 import falkordb as _fdb
 from anthropic import AnthropicVertex
+from google import genai as _genai
+from qdrant_client import QdrantClient
 
 embed_client = _genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
 qdrant       = QdrantClient(url=QDRANT_URL)

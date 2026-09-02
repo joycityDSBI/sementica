@@ -52,7 +52,7 @@ def _init_client():
     try:
         from anthropic import AnthropicVertex
         _client = AnthropicVertex(project_id=GCP_PROJECT, region=LOCATION)
-        print(f"✅ Claude on Vertex AI 초기화 완료")
+        print("✅ Claude on Vertex AI 초기화 완료")
         print(f"   프로젝트: {GCP_PROJECT} | 모델: {MODEL} | 리전: {LOCATION}")
         return True
     except Exception as e:
@@ -142,8 +142,7 @@ def extract_triplets(text: str, source_url: str = "") -> dict:
         if raw.startswith("```"):
             parts = raw.split("```")
             raw = parts[1] if len(parts) > 1 else raw
-            if raw.startswith("json"):
-                raw = raw[4:]
+            raw = raw.removeprefix("json")
         raw = raw.strip()
 
         parsed = json.loads(raw)
@@ -198,7 +197,7 @@ def verify_file(md_path: Path) -> dict:
     print(f"\n📄 {md_path.name}  ({word_count} 단어)")
 
     if word_count < 50:
-        print(f"   ⚠️  텍스트 부족 (< 50단어) — Premise 1 불합격")
+        print("   ⚠️  텍스트 부족 (< 50단어) — Premise 1 불합격")
         return {
             "file": str(md_path), "word_count": word_count,
             "premise1": False, "pass": False,
@@ -244,7 +243,7 @@ def main():
     results = []
 
     if args.text:
-        print(f"\n🔬 텍스트 직접 검증")
+        print("\n🔬 텍스트 직접 검증")
         print(f"   입력: {args.text[:120]}")
         result = extract_triplets(args.text, "manual-test")
         results.append(result)
