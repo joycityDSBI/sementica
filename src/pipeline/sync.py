@@ -201,9 +201,9 @@ def check_page_exists(client, token: str, page_id_nodash: str) -> bool:
     - archived=true → 휴지통으로 이동 (삭제로 간주)
     - 네트워크 오류 → True 반환 (안전 우선, 실수로 삭제 방지)
     """
-    # 대시 없는 32자 UUID → Notion API 형식으로 변환
-    pid = page_id_nodash.replace("-", "")
-    notion_id = f"{pid[:8]}-{pid[8:12]}-{pid[12:16]}-{pid[16:20]}-{pid[20:]}"
+    # 대시 없는 32자 page_id → Notion API 형식 UUID로 변환
+    pid = page_id_nodash.replace("-", "")   # 혹시 대시 섞인 경우 정규화
+    notion_id = f"{pid[:8]}-{pid[8:12]}-{pid[12:16]}-{pid[16:20]}-{pid[20:32]}"
     try:
         resp = client.get(
             f"https://api.notion.com/v1/pages/{notion_id}",
