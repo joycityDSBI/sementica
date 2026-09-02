@@ -1,0 +1,22 @@
+[Unit]
+Description=Semantica Ops Web Dashboard
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=seongin
+WorkingDirectory=/home/seongin/sementica
+EnvironmentFile=/home/seongin/sementica/.env
+ExecStart=/home/seongin/sementica/.venv/bin/python src/ops/web_app.py --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sementica-ops
+
+# 외부 직접 노출 없이 nginx reverse proxy 경유
+# GCP 방화벽: 8080 포트는 내부(127.0.0.1)만 바인딩
+
+[Install]
+WantedBy=multi-user.target
