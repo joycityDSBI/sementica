@@ -76,10 +76,10 @@ except Exception:
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
 GCP_PROJECT      = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION         = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
+LOCATION         = os.environ.get("VERTEX_AI_LOCATION", "us-central1")
 EMBED_MODEL_NAME = "text-multilingual-embedding-002"
 EMBED_BATCH_SIZE = 50     # Vertex AI 배치 크기
-HAIKU_MODEL      = "claude-haiku-4-5-20251001"   # 트리플·이벤트 추출용
+HAIKU_MODEL      = "claude-haiku-3-5@default"    # 트리플·이벤트 추출용
 QDRANT_URL       = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST    = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT    = int(os.environ.get("FALKORDB_PORT", "6379"))

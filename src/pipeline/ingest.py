@@ -74,10 +74,10 @@ EMBED_BATCH_SIZE = 50   # Vertex AI 배치 최대 권장 크기 (최대 250, 안
 
 # ─── Vertex AI / LLM 설정 ────────────────────────────────────────────────────
 GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION    = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
+LOCATION    = os.environ.get("VERTEX_AI_LOCATION", "us-central1")
 MODEL       = os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@default")
 # 트리플/이벤트 추출: Haiku 사용 (Sonnet 대비 3~5배 빠름, 추출 품질 충분)
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
+HAIKU_MODEL = "claude-haiku-3-5@default"
 
 # ─── 트리플 추출 프롬프트 (week1_verify.py 와 동일) ─────────────────────────
 EXTRACT_PROMPT = """\
