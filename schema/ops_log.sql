@@ -77,6 +77,33 @@ CREATE TRIGGER trg_notion_pages_updated_at
     BEFORE UPDATE ON notion_pages
     FOR EACH ROW EXECUTE FUNCTION _set_updated_at();
 
+-- 검색 품질 골든셋 — 테스트 케이스 저장
+CREATE TABLE IF NOT EXISTS search_golden_set (
+    id           BIGSERIAL    PRIMARY KEY,
+    dept         VARCHAR(50)  NOT NULL,
+    query        TEXT         NOT NULL,          -- 테스트 쿼리
+    expected     TEXT[]       NOT NULL,          -- 기대 문서 제목 목록 (하나라도 top-k 내 있으면 Pass)
+    top_k        INT          NOT NULL DEFAULT 5,
+    notes        TEXT,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_golden_dept ON search_golden_set (dept, id DESC);
+
+-- 골든셋 실행 이력
+CREATE TABLE IF NOT EXISTS golden_run_log (
+    id           BIGSERIAL    PRIMARY KEY,
+    dept         VARCHAR(50)  NOT NULL,
+    total        INT,
+    passed       INT,
+    failed       INT,
+    avg_score    NUMERIC(5,4),
+    detail       JSONB,                          -- [{golden_id, query, passed, score, matched, results}]
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_golden_run_dept ON golden_run_log (dept, created_at DESC);
+
 -- 유용한 뷰: 본부별 인제스천 현황
 CREATE OR REPLACE VIEW v_ingest_summary AS
 SELECT
