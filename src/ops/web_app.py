@@ -14,6 +14,7 @@ Semantica 웹 운영 대시보드
   pip install fastapi uvicorn
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -55,6 +56,50 @@ app.add_middleware(
 
 # ─── 잡 저장소 ────────────────────────────────────────────────────────────────
 _jobs: dict[str, dict] = {}
+_JOBS_LOG = ROOT / "data" / "logs" / "batch_jobs.json"
+
+
+def _persist_job(job: dict) -> None:
+    """완료된 잡 메타데이터를 JSON 파일에 저장 (proc·lines 제외, 최대 100건 보존)."""
+    try:
+        history: list = []
+        if _JOBS_LOG.exists():
+            try:
+                history = json.loads(_JOBS_LOG.read_text(encoding="utf-8"))
+            except Exception:
+                history = []
+        # 동일 job_id 중복 제거 후 최신 항목을 앞에 삽입
+        history = [h for h in history if h.get("job_id") != job.get("job_id")]
+        entry = {k: v for k, v in job.items() if k not in ("proc", "lines")}
+        history.insert(0, entry)
+        history = history[:100]
+        _JOBS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        _JOBS_LOG.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _load_jobs_history() -> None:
+    """앱 시작 시 이전 잡 이력을 _jobs에 복원.
+    재시작으로 중단된 running 상태는 error로 변경."""
+    if not _JOBS_LOG.exists():
+        return
+    try:
+        for entry in json.loads(_JOBS_LOG.read_text(encoding="utf-8")):
+            jid = entry.get("job_id")
+            if not jid or jid in _jobs:
+                continue
+            if entry.get("status") == "running":
+                entry["status"]     = "error"   # 재시작으로 인한 강제 중단
+                entry["returncode"] = -1
+            entry.setdefault("proc",  None)
+            entry.setdefault("lines", [])
+            _jobs[jid] = entry
+    except Exception:
+        pass
+
+
+_load_jobs_history()   # 앱 기동 시 이전 이력 복원
 
 
 # ─── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -372,6 +417,7 @@ def batch_run(req: BatchRequest):
         _jobs[job_id]["status"]      = "done" if rc == 0 else "error"
         _jobs[job_id]["returncode"]  = rc
         _jobs[job_id]["finished_at"] = datetime.now(UTC).isoformat()
+        _persist_job(_jobs[job_id])   # 완료 즉시 파일에 영속화
 
     threading.Thread(target=_read, daemon=True).start()
     return {"job_id": job_id, "label": job["label"]}
@@ -398,6 +444,7 @@ def batch_cancel(job_id: str):
     if job["status"] == "running":
         job["proc"].terminate()
         job["status"] = "cancelled"
+        _persist_job(job)   # 취소 이력도 영속화
     return {"status": job["status"]}
 
 
@@ -435,12 +482,13 @@ def search_test(req: SearchRequest):
         vec = list(res.embeddings[0].values)
 
         from qdrant_client import QdrantClient
-        hits = QdrantClient(url=QDRANT_URL).search(
+        result = QdrantClient(url=QDRANT_URL).query_points(
             collection_name=collection,
-            query_vector=vec,
+            query=vec,
             limit=req.limit,
             with_payload=True,
         )
+        hits = result.points
         return {
             "query":   req.query,
             "results": [
@@ -542,12 +590,13 @@ def _embed_query(query: str) -> list[float]:
 
 def _qdrant_search(collection: str, vec: list[float], top_k: int):
     from qdrant_client import QdrantClient
-    return QdrantClient(url=QDRANT_URL).search(
+    result = QdrantClient(url=QDRANT_URL).query_points(
         collection_name=collection,
-        query_vector=vec,
+        query=vec,
         limit=top_k,
         with_payload=True,
     )
+    return result.points   # ScoredPoint 리스트 반환 (deprecated .search() 대체)
 
 
 @app.post("/api/golden/run")

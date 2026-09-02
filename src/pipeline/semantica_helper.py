@@ -761,13 +761,18 @@ def get_event_chain(
             type_clause = ""
             params = {"game": actual_game, "from_ts": from_ts, "to_ts": to_ts}
 
+        # OPTIONAL MATCH 으로 prev/next 를 단일 쿼리에서 조회 (이벤트당 2회 N+1 제거)
         cypher = (
             "MATCH (e:Event) "
             "WHERE e.game = $game "
             f"  {type_clause}"
             "  AND e.date_ts >= $from_ts AND e.date_ts <= $to_ts "
+            "OPTIONAL MATCH (prev:Event)-[:FOLLOWED_BY]->(e) "
+            "OPTIONAL MATCH (e)-[:FOLLOWED_BY]->(nxt:Event) "
             "RETURN e.event_id, e.game, e.event_type, e.date, "
-            "       e.title, e.description, e.target, e.source_url "
+            "       e.title, e.description, e.target, e.source_url, "
+            "       prev.title AS prev_title, prev.date AS prev_date, "
+            "       nxt.title AS next_title, nxt.date AS next_date "
             f"ORDER BY e.date_ts ASC LIMIT {int(limit)}"
         )
         r = graph.query(cypher, params)
@@ -780,18 +785,8 @@ def get_event_chain(
 
         events = []
         for row in r.result_set:
-            eid = row[0]
-            # 직전/직후 이벤트
-            prev_r = graph.query(
-                "MATCH (prev:Event)-[:FOLLOWED_BY]->(e:Event {event_id: $eid}) "
-                "RETURN prev.title, prev.date LIMIT 1",
-                {"eid": eid},
-            )
-            next_r = graph.query(
-                "MATCH (e:Event {event_id: $eid})-[:FOLLOWED_BY]->(nxt:Event) "
-                "RETURN nxt.title, nxt.date LIMIT 1",
-                {"eid": eid},
-            )
+            # row: [event_id, game, event_type, date, title, description,
+            #        target, source_url, prev_title, prev_date, next_title, next_date]
             events.append({
                 "event_id":    row[0],
                 "game":        row[1],
@@ -801,10 +796,8 @@ def get_event_chain(
                 "description": row[5] or "",
                 "target":      row[6] or "",
                 "source_url":  row[7] or "",
-                "prev_event":  {"title": prev_r.result_set[0][0], "date": prev_r.result_set[0][1]}
-                               if prev_r.result_set else None,
-                "next_event":  {"title": next_r.result_set[0][0], "date": next_r.result_set[0][1]}
-                               if next_r.result_set else None,
+                "prev_event":  {"title": row[8],  "date": row[9]}  if row[8]  else None,
+                "next_event":  {"title": row[10], "date": row[11]} if row[10] else None,
             })
 
         timeline_summary = [

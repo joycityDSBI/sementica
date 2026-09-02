@@ -327,6 +327,7 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     """
     _t0 = time.time()
     _err = None
+    results = []   # finally 블록에서 참조 가능하도록 try 외부에서 초기화
     try:
         vec = _embed(query)
         qc = _get_qdrant()
@@ -336,7 +337,6 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
             limit=limit,
             with_payload=True,
         )
-        results = []
         for h in result.points:
             p = h.payload or {}
             results.append({
@@ -433,15 +433,16 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
                 "r.condition AS condition, r.order AS order, r.source_url AS source_url "
                 "LIMIT 20"
             )
+            rel_result = graph.query(rel_query, {"name": matched_name})
         else:
+            # r[-1] 은 FalkorDB 에서 미지원 → path 기반 추출로 교체 (source_url 제외)
             rel_query = (
-                "MATCH (n {name: $name})-[r:REL*1..2]->(m) "
-                "RETURN [rel in r | rel.rel_name] AS relations, m.name AS target, "
-                "labels(m)[0] AS target_type, r[-1].source_url AS source_url "
+                "MATCH p=(n {name: $name})-[:REL*1..2]->(m) "
+                "RETURN [r IN relationships(p) | r.rel_name] AS relation, "
+                "m.name AS target, labels(m)[0] AS target_type "
                 "LIMIT 30"
             )
-
-        rel_result = graph.query(rel_query, {"name": matched_name})
+            rel_result = graph.query(rel_query, {"name": matched_name})
 
         relations = []
         for row in rel_result.result_set:
