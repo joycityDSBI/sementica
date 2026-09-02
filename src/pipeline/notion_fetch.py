@@ -325,7 +325,7 @@ def save_page(client, token, page, idx, output_dir: Path) -> dict:
         out_path = output_dir / fname
         out_path.write_text(frontmatter + text, encoding="utf-8")
 
-        ok = word_count >= 50
+        ok = word_count >= 30
         print(f"        저장: {fname} ({word_count} 단어) {'✅' if ok else '⚠️ 텍스트 부족'}")
         return {"idx": idx, "title": title, "url": url, "page_id": page_id,
                 "word_count": word_count, "file": str(out_path), "meaningful": ok,

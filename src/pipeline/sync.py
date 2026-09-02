@@ -486,7 +486,7 @@ def sync_page(
         result["error"] = str(e)
         return result
 
-    if len(body.split()) < 50:
+    if len(body.split()) < 30:
         print(f"     ⚠️  텍스트 부족 ({len(body.split())} 단어) — 건너뜀")
         result["skipped"] = True
         _upsert_notion_page(

@@ -541,7 +541,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
     print(f"\n  📄 {path.name}  ({word_count} 단어)")
     print(f"     URL: {meta.get('notion_url', '-')}")
 
-    if word_count < 50:
+    if word_count < 30:
         print("     ⚠️  텍스트 부족 — 건너뜀")
         if not dry_run and meta.get("page_id"):
             _upsert_notion_page(
