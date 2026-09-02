@@ -116,7 +116,12 @@ EVENT_EXTRACT_PROMPT = """\
   content_release — 신규 콘텐츠 오픈
   maintenance     — 정기 점검
   incident        — 장애 발생·복구
-  kpi_milestone   — DAU·매출 마일스톤 달성
+  kpi_milestone   — DAU·매출·ROAS 마일스톤 달성
+  ua_budget       — UA 매체 예산 변경 (증액·감액·중단)
+  ua_creative     — UA 소재(크리에이티브) 교체·추가·중단
+  ua_channel      — UA 매체·채널 추가·제거·전략 변경
+  ua_targeting    — UA 타겟·오디언스 세그먼트 변경
+  ua_abtest       — UA A/B 테스트 시작·종료·결과 적용
 
 텍스트:
 {text}
