@@ -643,6 +643,87 @@ def golden_run(dept: str = "strategic"):
             "avg_score": avg_score, "detail": detail}
 
 
+@app.post("/api/golden/generate")
+def golden_generate(dept: str = "strategic", count: int = 5):
+    """인제스트된 페이지 제목을 기반으로 골든셋 케이스를 LLM이 자동 생성."""
+    conn = _pg_conn()
+    if not conn:
+        raise HTTPException(503, "PostgreSQL 없음")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT page_id, title, notion_url FROM notion_pages "
+                "WHERE dept=%s AND status='ok' AND word_count >= 30 AND title IS NOT NULL "
+                "ORDER BY RANDOM() LIMIT %s",
+                (dept, min(count, 30)),
+            )
+            pages = _rows(cur)
+        conn.close()
+    except Exception as e:
+        conn.close()
+        raise HTTPException(500, str(e)) from e
+
+    if not pages:
+        return {"cases": [], "error": "인제스트된 페이지가 없습니다. (ingest 먼저 실행하세요)"}
+
+    page_list = "\n".join(
+        f"{i + 1}. {p['title']}" for i, p in enumerate(pages)
+    )
+    prompt = f"""아래는 사내 업무 문서 목록입니다.
+각 문서를 찾기 위해 실무자가 실제로 검색창에 입력할 법한 자연스러운 한국어 검색 쿼리를 하나씩 생성하세요.
+
+생성 규칙:
+- 문서 제목을 그대로 복사하지 말 것 (다른 표현으로 바꿀 것)
+- 실무자가 궁금해할 내용을 구체적인 질문이나 핵심 키워드로 표현
+- 5~30자 이내의 짧고 명확한 표현
+- 한국어로만 작성
+
+문서 목록:
+{page_list}
+
+반드시 JSON 배열 형식으로만 응답하세요 (마크다운 코드블록, 설명 텍스트 없이):
+[{{"index": 1, "query": "..."}}, {{"index": 2, "query": "..."}}, ...]"""
+
+    try:
+        from google import genai
+        client = genai.Client(
+            project=os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
+            location=os.environ.get("VERTEX_AI_LOCATION", "us-east5"),
+            vertexai=True,
+        )
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
+        import json as _json
+        text = response.text.strip()
+        # 마크다운 코드 펜스 제거
+        if text.startswith("```"):
+            lines = text.split("\n")
+            text = "\n".join(lines[1:])
+        if text.endswith("```"):
+            text = "\n".join(text.split("\n")[:-1])
+        generated = _json.loads(text.strip())
+    except Exception as e:
+        return {"cases": [], "error": f"LLM 생성 실패: {e}"}
+
+    cases = []
+    for item in generated:
+        idx = int(item.get("index", 1)) - 1
+        if 0 <= idx < len(pages):
+            p = pages[idx]
+            cases.append({
+                "query":      item.get("query", "").strip(),
+                "expected":   [p["title"]],
+                "top_k":      5,
+                "notes":      f"자동생성 ← {p['title']}",
+                "title":      p["title"],
+                "notion_url": p.get("notion_url", ""),
+            })
+
+    return {"cases": cases}
+
+
 @app.get("/api/golden/history")
 def golden_history(dept: str = "strategic", limit: int = 10):
     conn = _pg_conn()
@@ -1070,16 +1151,51 @@ select {
 <!-- ═══════════════ 골든셋 탭 ═══════════════ -->
 <section class="tab-content" id="tab-golden">
 
-  <div class="row-flex" style="margin-bottom:16px;align-items:flex-end;gap:14px;flex-wrap:wrap">
+  <div class="row-flex" style="margin-bottom:16px;align-items:flex-end;gap:10px;flex-wrap:wrap">
     <div>
       <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">본부</label>
       <select id="golden-dept" onchange="loadGolden()"></select>
     </div>
-    <button class="btn btn-primary" onclick="toggleAddForm()">+ 케이스 추가</button>
+    <button class="btn" onclick="toggleAddForm()">+ 직접 추가</button>
+    <button class="btn" style="background:rgba(139,92,246,.12);border-color:rgba(139,92,246,.3);color:#a78bfa" onclick="toggleGenPanel()">🤖 자동 생성</button>
     <button class="btn" id="golden-run-btn" onclick="runGolden()" style="margin-left:auto">▶ 전체 실행</button>
   </div>
 
-  <!-- 추가 폼 (접이식) -->
+  <!-- 자동 생성 패널 -->
+  <div id="golden-gen-panel" style="display:none;background:var(--card);border:1px solid rgba(139,92,246,.3);border-radius:6px;padding:16px;margin-bottom:16px">
+    <div style="font-size:13px;font-weight:600;color:#a78bfa;margin-bottom:12px">🤖 골든셋 자동 생성</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:14px">
+      인제스트된 페이지를 무작위로 샘플링하여 Gemini가 각 문서에 대한 검색 쿼리를 생성합니다.<br>
+      생성 결과를 검토하고 원하는 케이스만 선택해 저장하세요.
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+      <label style="font-size:12px;color:var(--muted)">생성 개수</label>
+      <select id="gen-count" style="background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:5px 10px;font-size:13px">
+        <option value="3">3개</option>
+        <option value="5" selected>5개</option>
+        <option value="10">10개</option>
+        <option value="20">20개</option>
+      </select>
+      <button class="btn" id="gen-btn" onclick="generateGolden()"
+        style="background:rgba(139,92,246,.15);border-color:rgba(139,92,246,.4);color:#a78bfa">
+        🤖 생성하기
+      </button>
+      <button class="btn btn-sm" onclick="toggleGenPanel()">닫기</button>
+    </div>
+
+    <!-- 생성 결과 미리보기 -->
+    <div id="gen-preview" style="display:none">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span id="gen-preview-label" style="font-size:12px;color:var(--muted)"></span>
+        <button class="btn btn-sm" onclick="selectAllGen(true)">전체 선택</button>
+        <button class="btn btn-sm" onclick="selectAllGen(false)">전체 해제</button>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="saveGeneratedCases()">✅ 선택 항목 저장</button>
+      </div>
+      <div id="gen-list"></div>
+    </div>
+  </div>
+
+  <!-- 직접 추가 폼 (접이식) -->
   <div id="golden-add-form" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px;margin-bottom:16px">
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
       <div>
@@ -1515,8 +1631,102 @@ let _goldenItems = [];
 
 function toggleAddForm() {
   const f = document.getElementById('golden-add-form');
-  f.style.display = f.style.display === 'none' ? '' : 'none';
-  if (f.style.display !== 'none') document.getElementById('gf-query').focus();
+  const isOpen = f.style.display !== 'none';
+  f.style.display = isOpen ? 'none' : '';
+  // 자동생성 패널과 상호 배타
+  if (!isOpen) {
+    document.getElementById('golden-gen-panel').style.display = 'none';
+    document.getElementById('gf-query').focus();
+  }
+}
+
+function toggleGenPanel() {
+  const p = document.getElementById('golden-gen-panel');
+  const isOpen = p.style.display !== 'none';
+  p.style.display = isOpen ? 'none' : '';
+  // 직접 추가 폼과 상호 배타
+  if (!isOpen) document.getElementById('golden-add-form').style.display = 'none';
+}
+
+let _generatedCases = [];
+
+async function generateGolden() {
+  const dept  = document.getElementById('golden-dept').value || 'strategic';
+  const count = document.getElementById('gen-count').value;
+  const btn   = document.getElementById('gen-btn');
+
+  btn.disabled     = true;
+  btn.textContent  = '⏳ 생성 중...';
+  document.getElementById('gen-preview').style.display = 'none';
+
+  const d = await fetch(`/api/golden/generate?dept=${dept}&count=${count}`, {method: 'POST'})
+    .then(r => r.json()).catch(e => ({error: String(e)}));
+
+  btn.disabled    = false;
+  btn.textContent = '🤖 생성하기';
+
+  if (d.error) { alert('오류: ' + d.error); return; }
+
+  _generatedCases = (d.cases || []).filter(c => c.query);
+  if (!_generatedCases.length) { alert('생성된 케이스가 없습니다.'); return; }
+
+  document.getElementById('gen-preview-label').textContent = `${_generatedCases.length}개 생성됨 — 검토 후 저장하세요`;
+  document.getElementById('gen-list').innerHTML = _generatedCases.map((c, i) => `
+    <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;
+                background:var(--surface);border:1px solid var(--border);border-radius:5px;margin-bottom:6px">
+      <input type="checkbox" id="gen-chk-${i}" checked style="margin-top:4px;flex-shrink:0;accent-color:var(--blue)">
+      <div style="flex:1;min-width:0">
+        <div style="margin-bottom:6px">
+          <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:2px">쿼리 (수정 가능)</label>
+          <input type="text" id="gen-q-${i}" value="${escHtml(c.query)}"
+            style="width:100%;background:var(--card);border:1px solid var(--border);border-radius:3px;
+                   color:var(--text);padding:5px 8px;font-size:13px;font-family:inherit">
+        </div>
+        <div style="display:flex;gap:16px;font-size:11px;color:var(--muted)">
+          <span>기대 문서: <span style="color:#60a5fa">${escHtml(c.title || '')}</span></span>
+          <span>Top-K: ${c.top_k}</span>
+        </div>
+      </div>
+    </div>`).join('');
+  document.getElementById('gen-preview').style.display = '';
+}
+
+function selectAllGen(val) {
+  _generatedCases.forEach((_, i) => {
+    const el = document.getElementById(`gen-chk-${i}`);
+    if (el) el.checked = val;
+  });
+}
+
+async function saveGeneratedCases() {
+  const dept     = document.getElementById('golden-dept').value || 'strategic';
+  const selected = _generatedCases
+    .map((c, i) => ({
+      ...c,
+      query:   (document.getElementById(`gen-q-${i}`)?.value || '').trim(),
+      checked: document.getElementById(`gen-chk-${i}`)?.checked ?? false,
+    }))
+    .filter(c => c.checked && c.query);
+
+  if (!selected.length) { alert('저장할 케이스를 선택하세요.'); return; }
+
+  const btn = document.querySelector('#gen-preview .btn-primary');
+  if (btn) { btn.disabled = true; btn.textContent = '저장 중...'; }
+
+  for (const c of selected) {
+    await fetch('/api/golden', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dept, query: c.query, expected: c.expected, top_k: c.top_k, notes: c.notes}),
+    });
+  }
+
+  if (btn) { btn.disabled = false; btn.textContent = '✅ 선택 항목 저장'; }
+  document.getElementById('golden-gen-panel').style.display = 'none';
+  document.getElementById('gen-preview').style.display = 'none';
+  _generatedCases = [];
+  loadGolden();
+  alert(`${selected.length}개 저장 완료`);
 }
 
 async function loadGolden() {
