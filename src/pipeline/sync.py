@@ -594,17 +594,21 @@ def sync_page(
             if k in pred:
                 props[k] = pred[k]
         try:
-            graph.create_relationship(
-                start_node_id=sid, end_node_id=oid,
-                rel_type="REL", properties=props,
+            # create_relationship() SDK 메서드는 버전에 따라 동작이 다름 →
+            # Cypher 직접 실행으로 대체 (node id 기반, 안정적)
+            set_clauses = ", ".join(f"r.{k} = ${k}" for k in props)
+            graph.query(
+                f"MATCH (s), (o) WHERE id(s) = $sid AND id(o) = $oid "
+                f"CREATE (s)-[r:REL]->(o) SET {set_clauses}",
+                {"sid": sid, "oid": oid, **props},
             )
             edges_created += 1
 
             # 의사결정 트리플이면 :Decision 노드로도 기록
             if is_decision_triplet(t):
                 record_decision_node(graph, t, source_url)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"    ⚠️  엣지 생성 실패 ({t['subject']['name']} → {t['object']['name']}): {e}")
 
     result["new_triplets"] = edges_created
     print(f"     그래프: {len(node_cache)}개 노드 / {edges_created}개 엣지")
