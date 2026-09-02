@@ -423,6 +423,210 @@ def search_test(req: SearchRequest):
         return {"error": str(e), "results": []}
 
 
+# ─── 골든셋 ──────────────────────────────────────────────────────────────────
+class GoldenItem(BaseModel):
+    dept:     str
+    query:    str
+    expected: list[str]          # 기대 문서 제목 목록
+    top_k:    int = 5
+    notes:    str = ""
+
+
+@app.get("/api/golden")
+def golden_list(dept: str = "strategic"):
+    conn = _pg_conn()
+    if not conn:
+        return {"error": "PostgreSQL 없음", "items": []}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, dept, query, expected, top_k, notes, created_at "
+                "FROM search_golden_set WHERE dept=%s ORDER BY id",
+                (dept,),
+            )
+            rows = _rows(cur)
+        conn.close()
+        return {"items": rows}
+    except Exception as e:
+        conn.close()
+        return {"error": str(e), "items": []}
+
+
+@app.post("/api/golden")
+def golden_create(item: GoldenItem):
+    conn = _pg_conn()
+    if not conn:
+        raise HTTPException(503, "PostgreSQL 없음")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO search_golden_set (dept, query, expected, top_k, notes) "
+                "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (item.dept, item.query, item.expected, item.top_k, item.notes or None),
+            )
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return {"id": new_id}
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(500, str(e)) from e
+
+
+@app.delete("/api/golden/{item_id}")
+def golden_delete(item_id: int):
+    conn = _pg_conn()
+    if not conn:
+        raise HTTPException(503, "PostgreSQL 없음")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM search_golden_set WHERE id=%s", (item_id,))
+        conn.commit()
+        conn.close()
+        return {"deleted": item_id}
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(500, str(e)) from e
+
+
+def _embed_query(query: str) -> list[float]:
+    from google import genai
+    client = genai.Client(
+        project=os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
+        location=os.environ.get("VERTEX_AI_LOCATION", "us-east5"),
+        vertexai=True,
+    )
+    res = client.models.embed_content(
+        model="text-multilingual-embedding-002", contents=[query]
+    )
+    return list(res.embeddings[0].values)
+
+
+def _qdrant_search(collection: str, vec: list[float], top_k: int):
+    from qdrant_client import QdrantClient
+    return QdrantClient(url=QDRANT_URL).search(
+        collection_name=collection,
+        query_vector=vec,
+        limit=top_k,
+        with_payload=True,
+    )
+
+
+@app.post("/api/golden/run")
+def golden_run(dept: str = "strategic"):
+    conn = _pg_conn()
+    if not conn:
+        raise HTTPException(503, "PostgreSQL 없음")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, query, expected, top_k FROM search_golden_set WHERE dept=%s ORDER BY id",
+                (dept,),
+            )
+            items = cur.fetchall()
+    except Exception as e:
+        conn.close()
+        raise HTTPException(500, str(e)) from e
+
+    if not items:
+        conn.close()
+        return {"total": 0, "passed": 0, "failed": 0, "avg_score": None, "detail": []}
+
+    try:
+        from dept_config import load_dept
+        collection = load_dept(dept)["qdrant_collection"]
+    except Exception as e:
+        conn.close()
+        raise HTTPException(500, f"dept_config 오류: {e}") from e
+
+    detail = []
+    scores = []
+    for (gid, query, expected, top_k) in items:
+        try:
+            vec  = _embed_query(query)
+            hits = _qdrant_search(collection, vec, top_k)
+            result_titles = [h.payload.get("title", "") for h in hits]
+            result_scores = [round(h.score, 4) for h in hits]
+
+            # 기대 제목 중 하나라도 결과 제목에 포함되면 Pass (부분 매칭)
+            matched = [
+                exp for exp in expected
+                if any(exp.lower() in rt.lower() or rt.lower() in exp.lower()
+                       for rt in result_titles)
+            ]
+            passed      = len(matched) > 0
+            best_score  = result_scores[0] if result_scores else 0.0
+            scores.append(best_score)
+            detail.append({
+                "golden_id": gid,
+                "query":     query,
+                "passed":    passed,
+                "score":     best_score,
+                "matched":   matched,
+                "expected":  expected,
+                "results":   [
+                    {"title": t, "score": s}
+                    for t, s in zip(result_titles, result_scores)
+                ],
+            })
+        except Exception as ex:
+            detail.append({
+                "golden_id": gid,
+                "query":     query,
+                "passed":    False,
+                "score":     0.0,
+                "matched":   [],
+                "expected":  expected,
+                "error":     str(ex),
+                "results":   [],
+            })
+
+    total  = len(detail)
+    passed = sum(1 for d in detail if d["passed"])
+    failed = total - passed
+    avg_score = round(sum(scores) / len(scores), 4) if scores else None
+
+    # 실행 이력 저장
+    try:
+        import json as _json
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO golden_run_log (dept, total, passed, failed, avg_score, detail) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (dept, total, passed, failed, avg_score, _json.dumps(detail, ensure_ascii=False)),
+            )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+    return {"total": total, "passed": passed, "failed": failed,
+            "avg_score": avg_score, "detail": detail}
+
+
+@app.get("/api/golden/history")
+def golden_history(dept: str = "strategic", limit: int = 10):
+    conn = _pg_conn()
+    if not conn:
+        return {"error": "PostgreSQL 없음", "logs": []}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, dept, total, passed, failed, avg_score, created_at "
+                "FROM golden_run_log WHERE dept=%s ORDER BY created_at DESC LIMIT %s",
+                (dept, limit),
+            )
+            logs = _rows(cur)
+        conn.close()
+        return {"logs": logs}
+    except Exception as e:
+        conn.close()
+        return {"error": str(e), "logs": []}
+
+
 # ─── HTML ─────────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -662,6 +866,7 @@ select {
   <button class="tab-btn active" onclick="showTab('dashboard')">📊 현황</button>
   <button class="tab-btn"       onclick="showTab('batch')">⚡ 배치 실행</button>
   <button class="tab-btn"       onclick="showTab('search')">🔍 검색 테스트</button>
+  <button class="tab-btn"       onclick="showTab('golden')">🎯 골든셋</button>
 </nav>
 
 <!-- ═══════════════ 현황 탭 ═══════════════ -->
@@ -813,6 +1018,78 @@ select {
   <div id="search-results"></div>
 </section>
 
+<!-- ═══════════════ 골든셋 탭 ═══════════════ -->
+<section class="tab-content" id="tab-golden">
+
+  <div class="row-flex" style="margin-bottom:16px;align-items:flex-end;gap:14px;flex-wrap:wrap">
+    <div>
+      <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">본부</label>
+      <select id="golden-dept" onchange="loadGolden()"></select>
+    </div>
+    <button class="btn btn-primary" onclick="toggleAddForm()">+ 케이스 추가</button>
+    <button class="btn" id="golden-run-btn" onclick="runGolden()" style="margin-left:auto">▶ 전체 실행</button>
+  </div>
+
+  <!-- 추가 폼 (접이식) -->
+  <div id="golden-add-form" style="display:none;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:16px;margin-bottom:16px">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">테스트 쿼리 *</label>
+        <input type="text" id="gf-query" placeholder="예: 점검 프로세스 담당자"
+          style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:7px 10px;font-size:13px;font-family:inherit">
+      </div>
+      <div>
+        <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">Top-K</label>
+        <select id="gf-topk" style="background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:7px 10px;font-size:13px">
+          <option value="3">3</option>
+          <option value="5" selected>5</option>
+          <option value="10">10</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">기대 문서 제목 * (한 줄에 하나, 부분 매칭)</label>
+      <textarea id="gf-expected" rows="3" placeholder="점검 가이드 v2&#10;서버 점검 정책"
+        style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:7px 10px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px">메모 (선택)</label>
+      <input type="text" id="gf-notes" placeholder="예: 신규 점검 정책 적용 후 테스트"
+        style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:7px 10px;font-size:13px;font-family:inherit">
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-primary" onclick="saveGolden()">저장</button>
+      <button class="btn" onclick="toggleAddForm()">취소</button>
+    </div>
+  </div>
+
+  <!-- 케이스 목록 -->
+  <div class="table-wrap" style="margin-bottom:20px">
+    <table>
+      <thead><tr><th>#</th><th>쿼리</th><th>기대 문서</th><th>Top-K</th><th>메모</th><th></th></tr></thead>
+      <tbody id="golden-tbody"><tr><td colspan="6" class="empty">로딩 중...</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- 실행 결과 -->
+  <div id="golden-result" style="display:none">
+    <div class="section-title">실행 결과</div>
+    <div id="golden-summary" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px"></div>
+    <div id="golden-detail"></div>
+  </div>
+
+  <!-- 실행 이력 -->
+  <div style="margin-top:20px">
+    <div class="section-title">실행 이력</div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>시각</th><th>총</th><th>Pass</th><th>Fail</th><th>avg score</th></tr></thead>
+        <tbody id="golden-history-tbody"><tr><td colspan="5" class="empty">이력 없음</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
 <script>
 // ── 상태 ─────────────────────────────────────────────────────────────────────
 let currentJobId = null;
@@ -828,6 +1105,7 @@ function showTab(name) {
   if (name === 'dashboard') loadDashboard();
   if (name === 'batch')     { loadDepts('batch-dept'); loadJobs(); }
   if (name === 'search')    loadDepts('search-dept');
+  if (name === 'golden')    { loadDepts('golden-dept').then(() => loadGolden()); }
 }
 
 // ── 본부 목록 로드 ────────────────────────────────────────────────────────────
@@ -1098,6 +1376,142 @@ function colorize(line) {
   if (line.includes('⚠️') || line.includes('경고') || line.includes('건너뜀')) return `<span class="ln-warn">${line}</span>`;
   if (line.startsWith('  ') && !line.trim())                                  return `<span class="ln-dim">${line}</span>`;
   return line;
+}
+
+// ── 골든셋 ────────────────────────────────────────────────────────────────────
+let _goldenItems = [];
+
+function toggleAddForm() {
+  const f = document.getElementById('golden-add-form');
+  f.style.display = f.style.display === 'none' ? '' : 'none';
+  if (f.style.display !== 'none') document.getElementById('gf-query').focus();
+}
+
+async function loadGolden() {
+  const dept = document.getElementById('golden-dept').value || 'strategic';
+  const d = await fetch(`/api/golden?dept=${dept}`).then(r => r.json()).catch(() => ({items:[]}));
+  _goldenItems = d.items || [];
+  renderGoldenTable();
+  loadGoldenHistory();
+}
+
+function renderGoldenTable() {
+  const tb = document.getElementById('golden-tbody');
+  if (!_goldenItems.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="empty">케이스가 없습니다. + 케이스 추가를 눌러 시작하세요.</td></tr>';
+    return;
+  }
+  tb.innerHTML = _goldenItems.map(item => `<tr>
+    <td style="color:var(--muted)">${item.id}</td>
+    <td style="max-width:220px">${escHtml(item.query)}</td>
+    <td style="max-width:220px;color:var(--muted);font-size:11px">${(item.expected||[]).map(e=>`<span style="display:inline-block;background:rgba(59,130,246,.1);color:#60a5fa;padding:1px 6px;border-radius:3px;margin:1px">${escHtml(e)}</span>`).join(' ')}</td>
+    <td>${item.top_k}</td>
+    <td style="color:var(--muted);font-size:11px">${escHtml(item.notes||'')}</td>
+    <td><button class="btn btn-danger btn-sm" onclick="deleteGolden(${item.id})">🗑</button></td>
+  </tr>`).join('');
+}
+
+async function saveGolden() {
+  const dept     = document.getElementById('golden-dept').value || 'strategic';
+  const query    = document.getElementById('gf-query').value.trim();
+  const expected = document.getElementById('gf-expected').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const top_k    = parseInt(document.getElementById('gf-topk').value);
+  const notes    = document.getElementById('gf-notes').value.trim();
+
+  if (!query)           { alert('쿼리를 입력하세요.'); return; }
+  if (!expected.length) { alert('기대 문서 제목을 최소 1개 입력하세요.'); return; }
+
+  const resp = await fetch('/api/golden', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({dept, query, expected, top_k, notes}),
+  });
+  if (!resp.ok) { alert('저장 실패: ' + (await resp.text())); return; }
+
+  // 폼 초기화
+  document.getElementById('gf-query').value    = '';
+  document.getElementById('gf-expected').value = '';
+  document.getElementById('gf-notes').value    = '';
+  document.getElementById('golden-add-form').style.display = 'none';
+  loadGolden();
+}
+
+async function deleteGolden(id) {
+  if (!confirm(`케이스 #${id}를 삭제하시겠습니까?`)) return;
+  await fetch(`/api/golden/${id}`, {method: 'DELETE'});
+  loadGolden();
+}
+
+async function runGolden() {
+  const dept = document.getElementById('golden-dept').value || 'strategic';
+  if (!_goldenItems.length) { alert('테스트 케이스가 없습니다.'); return; }
+
+  const btn = document.getElementById('golden-run-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ 실행 중...';
+  document.getElementById('golden-result').style.display = 'none';
+
+  const d = await fetch(`/api/golden/run?dept=${dept}`, {method:'POST'})
+    .then(r => r.json()).catch(e => ({error: String(e)}));
+
+  btn.disabled = false;
+  btn.textContent = '▶ 전체 실행';
+
+  if (d.error) { alert('오류: ' + d.error); return; }
+
+  // 요약
+  const passRate = d.total > 0 ? Math.round(d.passed / d.total * 100) : 0;
+  document.getElementById('golden-summary').innerHTML = `
+    <div class="stat-card" style="min-width:110px;padding:12px 16px">
+      <div class="label">총 케이스</div><div class="value" style="font-size:22px">${d.total}</div>
+    </div>
+    <div class="stat-card" style="min-width:110px;padding:12px 16px;border-color:rgba(34,197,94,.3)">
+      <div class="label">Pass ✅</div><div class="value" style="font-size:22px;color:#4ade80">${d.passed}</div>
+    </div>
+    <div class="stat-card" style="min-width:110px;padding:12px 16px;border-color:rgba(239,68,68,.3)">
+      <div class="label">Fail ❌</div><div class="value" style="font-size:22px;color:#f87171">${d.failed}</div>
+    </div>
+    <div class="stat-card" style="min-width:110px;padding:12px 16px">
+      <div class="label">통과율</div><div class="value" style="font-size:22px">${passRate}%</div>
+    </div>
+    <div class="stat-card" style="min-width:110px;padding:12px 16px">
+      <div class="label">avg score</div><div class="value" style="font-size:22px">${d.avg_score != null ? (d.avg_score*100).toFixed(1)+'%' : '—'}</div>
+    </div>`;
+
+  // 상세
+  const det = document.getElementById('golden-detail');
+  det.innerHTML = (d.detail || []).map(item => `
+    <div style="background:var(--card);border:1px solid ${item.passed?'rgba(34,197,94,.25)':'rgba(239,68,68,.25)'};border-radius:6px;padding:14px 16px;margin-bottom:10px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+        <span style="font-size:18px">${item.passed?'✅':'❌'}</span>
+        <span style="font-weight:600;flex:1">${escHtml(item.query)}</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--blue)">${item.score != null ? (item.score*100).toFixed(1)+'%' : '—'}</span>
+      </div>
+      ${item.error ? `<div class="err-box" style="margin-bottom:8px">${escHtml(item.error)}</div>` : ''}
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px">
+        기대: ${(item.expected||[]).map(e=>`<span style="padding:1px 6px;border-radius:3px;background:${(item.matched||[]).includes(e)?'rgba(34,197,94,.15)':'rgba(239,68,68,.1)'};color:${(item.matched||[]).includes(e)?'#4ade80':'#f87171'}">${escHtml(e)}</span>`).join(' ')}
+      </div>
+      <div style="font-size:11px;color:var(--muted)">검색 결과:
+        ${(item.results||[]).slice(0,5).map((r,i)=>`<span style="margin-right:8px">${i+1}. ${escHtml(r.title)} <span style="color:var(--blue)">${(r.score*100).toFixed(1)}%</span></span>`).join('')}
+      </div>
+    </div>`).join('');
+
+  document.getElementById('golden-result').style.display = '';
+  loadGoldenHistory();
+}
+
+async function loadGoldenHistory() {
+  const dept = document.getElementById('golden-dept').value || 'strategic';
+  const d = await fetch(`/api/golden/history?dept=${dept}`).then(r=>r.json()).catch(()=>({logs:[]}));
+  const tb = document.getElementById('golden-history-tbody');
+  const logs = d.logs || [];
+  tb.innerHTML = logs.length ? logs.map(l => `<tr>
+    <td>${fmtDt(l.created_at)}</td>
+    <td>${l.total}</td>
+    <td style="color:#4ade80">${l.passed}</td>
+    <td style="color:#f87171">${l.failed}</td>
+    <td style="color:var(--blue)">${l.avg_score != null ? (parseFloat(l.avg_score)*100).toFixed(1)+'%' : '—'}</td>
+  </tr>`).join('') : '<tr><td colspan="5" class="empty">이력 없음</td></tr>';
 }
 
 // ── 초기화 ────────────────────────────────────────────────────────────────────
