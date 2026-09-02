@@ -177,8 +177,9 @@ def _semantica_extract(text: str) -> list:
     try:
         from semantica.semantic_extract import NamedEntityRecognizer, RelationExtractor
 
-        ner = NamedEntityRecognizer(confidence_threshold=0.4)
-        rel = RelationExtractor(confidence_threshold=0.4)
+        # 한국어 처리 시 영문 모델 오분류 빈도 높음 → 신뢰도 임계값 상향
+        ner = NamedEntityRecognizer(confidence_threshold=0.6)
+        rel = RelationExtractor(confidence_threshold=0.6)
 
         entities = ner.extract_entities(text[:3000])
         if not entities:
