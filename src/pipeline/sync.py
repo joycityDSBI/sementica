@@ -76,10 +76,11 @@ except Exception:
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
 GCP_PROJECT      = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION         = os.environ.get("VERTEX_AI_LOCATION", "us-central1")
+LOCATION         = os.environ.get("VERTEX_AI_LOCATION", "us-east5")    # 임베딩 리전
+ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")  # Claude LLM 리전
 EMBED_MODEL_NAME = "text-multilingual-embedding-002"
 EMBED_BATCH_SIZE = 50     # Vertex AI 배치 크기
-HAIKU_MODEL      = "claude-haiku-3-5@default"    # 트리플·이벤트 추출용
+HAIKU_MODEL      = "claude-haiku-4-5@20251001"   # 트리플·이벤트 추출용 (Vertex AI 형식)
 QDRANT_URL       = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST    = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT    = int(os.environ.get("FALKORDB_PORT", "6379"))
@@ -831,7 +832,7 @@ def main():
     qc           = QdrantClient(url=QDRANT_URL)
     db           = fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
     graph        = db.select_graph(graph_name)
-    llm_client   = AnthropicVertex(project_id=GCP_PROJECT, region=LOCATION)
+    llm_client   = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
     print("  ✅ 완료")
 
     # ── Reconcile 모드 (삭제 페이지 감지) ────────────────────────────────
