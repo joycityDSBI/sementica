@@ -685,22 +685,20 @@ def golden_generate(dept: str = "strategic", count: int = 5):
 [{{"index": 1, "query": "..."}}, {{"index": 2, "query": "..."}}, ...]"""
 
     try:
-        from google import genai
-        client = genai.Client(
-            project=os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
-            location=os.environ.get("VERTEX_AI_LOCATION", "us-east5"),
-            vertexai=True,
-        )
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-        )
+        import anthropic as _anthropic
         import json as _json
-        text = response.text.strip()
+
+        _model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+        ac = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+        msg = ac.messages.create(
+            model=_model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = msg.content[0].text.strip()
         # 마크다운 코드 펜스 제거
         if text.startswith("```"):
-            lines = text.split("\n")
-            text = "\n".join(lines[1:])
+            text = "\n".join(text.split("\n")[1:])
         if text.endswith("```"):
             text = "\n".join(text.split("\n")[:-1])
         generated = _json.loads(text.strip())
