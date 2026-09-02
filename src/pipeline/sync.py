@@ -193,6 +193,157 @@ def _make_chunks(text: str) -> list[str]:
     return chunks
 
 
+# ─── Notion 페이지 존재 여부 확인 ────────────────────────────────────────────
+def check_page_exists(client, token: str, page_id_nodash: str) -> bool:
+    """
+    Notion 페이지가 여전히 접근 가능한지 확인합니다.
+    - 404 → 삭제됨
+    - archived=true → 휴지통으로 이동 (삭제로 간주)
+    - 네트워크 오류 → True 반환 (안전 우선, 실수로 삭제 방지)
+    """
+    # 대시 없는 32자 UUID → Notion API 형식으로 변환
+    pid = page_id_nodash.replace("-", "")
+    notion_id = f"{pid[:8]}-{pid[8:12]}-{pid[12:16]}-{pid[16:20]}-{pid[20:]}"
+    try:
+        resp = client.get(
+            f"https://api.notion.com/v1/pages/{notion_id}",
+            headers=notion_headers(token),
+        )
+        time.sleep(RATE_LIMIT_DELAY)
+        if resp.status_code == 404:
+            return False
+        if resp.status_code == 200:
+            return not resp.json().get("archived", False)
+        return True   # 기타 상태 (403 권한 없음 등)는 존재하는 것으로 간주
+    except Exception:
+        return True   # 네트워크 오류 시 삭제로 처리하지 않음
+
+
+def _get_stored_pages(dept: str) -> list[dict]:
+    """notion_pages 테이블에서 인제스천된 페이지 목록 반환."""
+    pg_url = os.environ.get("POSTGRES_URL", "")
+    if not pg_url:
+        return []
+    try:
+        import psycopg2
+        conn = psycopg2.connect(pg_url)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT page_id, notion_url, title
+                       FROM notion_pages
+                       WHERE dept = %s AND status IN ('ok', 'skipped')
+                       ORDER BY last_ingested_at DESC""",
+                    (dept,),
+                )
+                return [{"page_id": r[0], "notion_url": r[1], "title": r[2] or r[0]}
+                        for r in cur.fetchall()]
+    except Exception as e:
+        print(f"  ⚠️  notion_pages 조회 실패: {e}")
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _mark_page_deleted(page_id: str, dept: str) -> None:
+    """notion_pages에서 해당 페이지를 deleted 상태로 마킹."""
+    pg_url = os.environ.get("POSTGRES_URL", "")
+    if not pg_url:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(pg_url)
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE notion_pages SET status='deleted' WHERE page_id=%s AND dept=%s",
+                    (page_id, dept),
+                )
+    except Exception as e:
+        print(f"  ⚠️  삭제 마킹 실패: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def delete_page_events(graph, source_url: str) -> int:
+    """:Event 노드 중 source_url 일치하는 것 삭제. 삭제된 수 반환."""
+    try:
+        res = graph.query(
+            "MATCH (e:Event {source_url: $url}) DETACH DELETE e RETURN count(e) AS cnt",
+            {"url": source_url},
+        )
+        return res.result_set[0][0] if res.result_set else 0
+    except Exception as e:
+        print(f"    ⚠️  Event 노드 삭제 실패: {e}")
+        return 0
+
+
+def reconcile_deleted_pages(
+    notion_client, token: str, dept: str,
+    qc, graph, collection_name: str,
+    dry_run: bool = False,
+) -> dict:
+    """
+    notion_pages 테이블 기준으로 Notion에서 삭제된 페이지를 감지하고
+    Qdrant·FalkorDB·PostgreSQL에서 해당 데이터를 정리합니다.
+
+    사용: sync.py --dept strategic --reconcile
+    권장 주기: 주 1회 (cron 일요일 새벽 3시)
+    """
+    print("\n" + "=" * 60)
+    print(f"🔍 [RECONCILE] Notion 삭제 페이지 감지 — {dept}")
+    print("=" * 60)
+
+    stored = _get_stored_pages(dept)
+    if not stored:
+        print("  ℹ️  notion_pages 테이블에 데이터 없음.")
+        print("      ingest.py 실행 후 재시도하세요.")
+        return {"checked": 0, "deleted": 0}
+
+    print(f"  📋 저장된 페이지 {len(stored)}개 확인 시작...")
+    if dry_run:
+        print("  [DRY-RUN] 실제 삭제는 수행하지 않습니다.")
+
+    deleted_pages = []
+    for i, page in enumerate(stored, 1):
+        page_id    = page["page_id"]
+        source_url = page["notion_url"]
+        title      = page["title"]
+
+        exists = check_page_exists(notion_client, token, page_id)
+
+        if not exists:
+            print(f"\n  🗑️  [{i:03d}/{len(stored):03d}] 삭제 감지: {title[:55]}")
+            print(f"       URL: {source_url}")
+
+            if not dry_run:
+                v_del  = delete_page_vectors(qc, collection_name, source_url)
+                e_del  = delete_page_edges(graph, source_url)
+                ev_del = delete_page_events(graph, source_url)
+                _mark_page_deleted(page_id, dept)
+                print(f"       → 벡터 {v_del}개 / 엣지 {e_del}개 / 이벤트 {ev_del}개 삭제 완료")
+            else:
+                print(f"       [DRY-RUN] 삭제 예정")
+
+            deleted_pages.append({"page_id": page_id, "title": title, "url": source_url})
+        else:
+            if i % 50 == 0:
+                print(f"  ✅ [{i:03d}/{len(stored):03d}] 확인 중...")
+
+    print(f"\n  결과: {len(stored)}개 확인 → {len(deleted_pages)}개 삭제됨")
+    if deleted_pages:
+        print("  삭제된 페이지:")
+        for p in deleted_pages:
+            print(f"    - {p['title']}")
+    return {"checked": len(stored), "deleted": len(deleted_pages)}
+
+
 # ─── Qdrant 벡터 삭제 (source_url 필터) ──────────────────────────────────────
 def delete_page_vectors(qc, collection_name: str, source_url: str) -> int:
     """source_url이 일치하는 벡터 전체 삭제. 삭제된 수 반환."""
@@ -607,7 +758,9 @@ def main():
     parser.add_argument("--full",    action="store_true", help="전체 재동기화 (last_sync_time 무시)")
     parser.add_argument("--limit",   type=int, default=0,
                         help="처리할 최대 페이지 수 (기본: 0 = 무제한). 예: --limit 50")
-    parser.add_argument("--dry-run", action="store_true", help="변경 내용 확인만 (저장 안 함)")
+    parser.add_argument("--dry-run",   action="store_true", help="변경 내용 확인만 (저장 안 함)")
+    parser.add_argument("--reconcile", action="store_true",
+                        help="Notion 삭제 페이지 감지 후 Qdrant·FalkorDB에서 데이터 정리 (주 1회 권장)")
     args = parser.parse_args()
 
     # ── 본부 설정 로드 ──────────────────────────────────────────────────────
@@ -649,6 +802,17 @@ def main():
     graph        = db.select_graph(graph_name)
     llm_client   = AnthropicVertex(project_id=GCP_PROJECT, region=LOCATION)
     print("  ✅ 완료")
+
+    # ── Reconcile 모드 (삭제 페이지 감지) ────────────────────────────────
+    if args.reconcile:
+        with httpx.Client(timeout=60) as notion_client:
+            reconcile_deleted_pages(
+                notion_client, token, args.dept,
+                qc, graph, collection_name,
+                dry_run=args.dry_run,
+            )
+        print("\n  ✅ Reconcile 완료")
+        return
 
     # ── 수정 페이지 조회 ───────────────────────────────────────────────────
     keyword = args.search.strip()
