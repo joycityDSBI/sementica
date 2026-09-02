@@ -26,6 +26,7 @@ import os
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -545,10 +546,27 @@ def sync_page(
     result["new_chunks"] = new_chunks
     print(f"     벡터 저장: {new_chunks}개 청크")
 
-    # 5. 트리플 추출 + FalkorDB 저장 (LLM 우선 → Semantica fallback)
-    triplets, triplet_src = extract_with_fallback(
-        lambda t: extract_triplets(llm_client, t), body
-    )
+    # 5+6. LLM 추출 — 트리플·이벤트 동시 실행 (순차 대비 ~40% 단축)
+    # DB 속성 먼저 확인 (API 없음, 즉시) → LLM 이벤트 추출 필요 여부 결정
+    db_props   = extract_db_properties(page_meta)
+    ev_from_db = _event_from_db_props(db_props, source_url, title) if db_props else None
+
+    with ThreadPoolExecutor(max_workers=2) as _pool:
+        ft = _pool.submit(
+            extract_with_fallback,
+            lambda t: extract_triplets(llm_client, t),
+            body,
+        )
+        # DB 속성에 이벤트가 없을 때만 LLM 이벤트 추출 병행
+        fe = (
+            _pool.submit(extract_events_from_text, llm_client, body)
+            if ev_from_db is None
+            else None
+        )
+        triplets, triplet_src = ft.result()
+        llm_events = fe.result() if fe is not None else []
+
+    # 5. 트리플 → FalkorDB 저장
     print(f"     트리플: {len(triplets)}개 추출 [{triplet_src}]")
     node_cache = {}
 
@@ -589,32 +607,28 @@ def sync_page(
     result["new_triplets"] = edges_created
     print(f"     그래프: {len(node_cache)}개 노드 / {edges_created}개 엣지")
 
-    # 6. 이벤트 추출 + FalkorDB :Event 노드 저장
-    # 6a. Notion DB 속성에서 직접 생성 (LLM 없음, 100% 정확)
-    ev_stored    = 0
-    skip_llm_ev  = False
-    db_props     = extract_db_properties(page_meta)
-    if db_props:
-        ev = _event_from_db_props(db_props, source_url, title)
-        if ev:
+    # 6. 이벤트 → FalkorDB :Event 노드 저장
+    ev_stored = 0
+    if ev_from_db:
+        # 6a. DB 속성에서 직접 생성 (LLM 없음, 100% 정확)
+        nid = upsert_event_node(graph, ev_from_db)
+        if nid >= 0:
+            ev_stored += 1
+        print(
+            f"     이벤트(DB속성): {ev_from_db['game']} / {ev_from_db['date']}"
+            f" / {ev_from_db['event_type'] or '유형미지정'}"
+            f" → {'저장' if nid >= 0 else '실패'}"
+        )
+    elif llm_events:
+        # 6b. LLM 추출 결과 저장 (트리플과 동시 실행 완료됨)
+        for ev in llm_events:
+            ev["source_url"] = source_url
             nid = upsert_event_node(graph, ev)
             if nid >= 0:
-                ev_stored   += 1
-                skip_llm_ev  = True
-            print(f"     이벤트(DB속성): {ev['game']} / {ev['date']} / {ev['event_type'] or '유형미지정'} → {'저장' if nid >= 0 else '실패'}")
-
-    # 6b. DB 속성에 이벤트 없으면 LLM 텍스트 추출
-    if not skip_llm_ev:
-        events = extract_events_from_text(llm_client, body)
-        if events:
-            for ev in events:
-                ev["source_url"] = source_url
-                nid = upsert_event_node(graph, ev)
-                if nid >= 0:
-                    ev_stored += 1
-            print(f"     이벤트(LLM): {ev_stored}/{len(events)}개 :Event 노드 저장")
-        else:
-            print("     이벤트: 없음")
+                ev_stored += 1
+        print(f"     이벤트(LLM): {ev_stored}/{len(llm_events)}개 :Event 노드 저장")
+    else:
+        print("     이벤트: 없음")
 
     result["new_events"] = ev_stored
 
