@@ -203,6 +203,8 @@ def init_qdrant(reset: bool = False):
             print(f"  ✅ Qdrant 컬렉션 생성: {COLLECTION_NAME}")
         except Exception as ce:
             if "already exists" in str(ce).lower() or "409" in str(ce):
+                # 기존 컬렉션 재사용 — 내부 상태 초기화를 위해 get_collection 호출
+                store.get_collection(COLLECTION_NAME)
                 print(f"  ✅ Qdrant 컬렉션 기존 사용: {COLLECTION_NAME}")
             else:
                 raise

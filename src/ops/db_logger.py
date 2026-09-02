@@ -211,14 +211,17 @@ def upsert_notion_page(
     conn = _get_conn()
     if conn is None:
         return
-    # last_edited_time 정규화
-    if isinstance(last_edited_time, str) and last_edited_time:
-        try:
-            last_edited_time = datetime.fromisoformat(
-                last_edited_time.replace("Z", "+00:00")
-            )
-        except Exception:
-            last_edited_time = None
+    # last_edited_time 정규화 — 빈 문자열 포함 모든 비정상값은 None으로
+    if isinstance(last_edited_time, str):
+        if last_edited_time.strip():
+            try:
+                last_edited_time = datetime.fromisoformat(
+                    last_edited_time.replace("Z", "+00:00")
+                )
+            except Exception:
+                last_edited_time = None
+        else:
+            last_edited_time = None   # 빈 문자열 → NULL
     try:
         with conn:
             with conn.cursor() as cur:
