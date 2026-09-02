@@ -187,18 +187,20 @@ def log_sync_result(
 
 # ─── Notion 페이지 레지스트리 ─────────────────────────────────────────────────
 
-def get_pages_edit_times(dept: str) -> dict:
+def get_pages_edit_times(dept: str) -> "dict | None":
     """
     notion_pages 테이블에서 부서별 페이지 수정 시각을 반환합니다.
     증분 동기화 시 Notion API 결과와 per-page 비교에 사용합니다.
 
     Returns:
         {page_id: "2026-09-01T03:16:00+00:00", ...}
-        PostgreSQL 미연결 시 빈 dict 반환.
+          - 테이블이 비어있으면 {} (연결됨 + 데이터 없음)
+        None
+          - PostgreSQL 미연결 또는 쿼리 실패 → 호출자가 fallback 처리
     """
     conn = _get_conn()
     if conn is None:
-        return {}
+        return None   # 미연결: 호출자가 sync_state.json 등 fallback 사용
     try:
         with conn, conn.cursor() as cur:
             cur.execute(
@@ -211,10 +213,10 @@ def get_pages_edit_times(dept: str) -> dict:
                     result[page_id] = last_edited_time.isoformat()
                 else:
                     result[page_id] = ""
-            return result
+            return result   # {} 이면 "연결됨 + 신규 부서" 의미
     except Exception as e:
         print(f"  [DB] get_pages_edit_times 실패: {e}")
-        return {}
+        return None
     finally:
         conn.close()
 

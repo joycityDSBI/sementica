@@ -72,7 +72,7 @@ try:
 except Exception:
     def log_sync_result(*a, **kw): pass
     def _upsert_notion_page(*a, **kw): pass
-    def _get_pages_edit_times(*a, **kw): return {}
+    def _get_pages_edit_times(*a, **kw): return None  # import 실패 → PG 미연결로 간주
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
 GCP_PROJECT      = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
@@ -808,12 +808,34 @@ def main():
     start_time = time.time()
     now_iso    = datetime.now(UTC).isoformat()
     state      = load_sync_state(state_path)
-    since_iso  = "1970-01-01T00:00:00.000Z" if args.full else state["last_sync_time"]
+
+    # ── since_iso 및 PostgreSQL 사전 확인 ──────────────────────────────────
+    # stored_edit_times:
+    #   None  → PostgreSQL 미연결 또는 오류 → sync_state.json 기준 유지
+    #   {}    → 연결됨 + 신규 부서(데이터 없음) → 전체 조회, 모두 신규 처리
+    #   {...} → 연결됨 + 기존 데이터 있음 → 전체 조회 후 per-page 비교
+    stored_edit_times = None
+    if args.full:
+        since_iso = "1970-01-01T00:00:00.000Z"
+    else:
+        stored_edit_times = _get_pages_edit_times(args.dept)
+        if stored_edit_times is not None:
+            # PostgreSQL 연결됨 → 전체 페이지 조회, DB가 필터링 담당
+            # (신규 연동된 오래된 페이지도 table에 없으므로 자동 수집)
+            since_iso = "1970-01-01T00:00:00.000Z"
+        else:
+            # PostgreSQL 미연결 → sync_state.json 기준 (기존 동작)
+            since_iso = state["last_sync_time"]
 
     print("=" * 60)
     print(f"🔄 증분 동기화 — {dept_cfg['name']} ({args.dept})")
     print(f"   컬렉션: {collection_name}  그래프: {graph_name}")
-    print(f"   기준:   {since_iso[:19]} 이후 수정된 페이지")
+    if args.full:
+        print(f"   기준:   전체 재동기화 (--full)")
+    elif stored_edit_times is not None:
+        print(f"   기준:   PostgreSQL per-page 비교 ({len(stored_edit_times)}개 기존 기록)")
+    else:
+        print(f"   기준:   {since_iso[:19]} 이후 수정된 페이지 (sync_state.json)")
     print(f"   시작:   {now_iso[:19]}")
     if args.dry_run:
         print("   [DRY-RUN 모드]")
@@ -860,27 +882,36 @@ def main():
         print(f"  📋 Notion API 반환: {len(modified_pages)}개")
 
         # ── Per-page 필터링: PostgreSQL notion_pages.last_edited_time 기준 ──
-        # sync_state.json 의 단일 시각 대신, 페이지별 수정 시각과 직접 비교합니다.
-        # PostgreSQL 미연결 시 빈 dict → Notion API 결과 전체 처리 (기존 동작 유지).
-        if not args.full:
-            stored_edit_times = _get_pages_edit_times(args.dept)
-            if stored_edit_times:
-                before = len(modified_pages)
-                truly_modified = []
-                already_synced = 0
-                for page in modified_pages:
-                    pid          = page.get("id", "").replace("-", "")
-                    notion_time  = page.get("last_edited_time", "")
-                    stored_time  = stored_edit_times.get(pid, "")
-                    # 저장된 시각이 없거나(신규 페이지) Notion 수정 시각이 더 최신이면 처리
-                    if not stored_time or notion_time > stored_time:
-                        truly_modified.append(page)
-                    else:
-                        already_synced += 1
-                modified_pages = truly_modified
-                print(f"  🔍 Per-page 비교: {before}개 중 {already_synced}개 이미 최신 → {len(modified_pages)}개 처리 대상")
-            else:
-                print("  ℹ️  PostgreSQL 미연결 또는 notion_pages 데이터 없음 → Notion API 결과 전체 처리")
+        # stored_edit_times 는 Notion API 호출 전에 이미 조회됨 (since_iso 결정용).
+        # None  → PostgreSQL 미연결 → Notion API 결과 전체 처리 (기존 동작 유지)
+        # {}    → 연결됨 + 신규 부서 → 모두 신규 처리
+        # {...} → 연결됨 → table에 없는 신규 페이지 + 수정된 페이지만 처리
+        if not args.full and stored_edit_times is not None:
+            before = len(modified_pages)
+            truly_modified = []
+            already_synced = 0
+            new_pages      = 0
+            for page in modified_pages:
+                pid          = page.get("id", "").replace("-", "")
+                notion_time  = page.get("last_edited_time", "")
+                stored_time  = stored_edit_times.get(pid, "")
+                if not stored_time:
+                    # table에 없는 신규 페이지 → 무조건 처리
+                    truly_modified.append(page)
+                    new_pages += 1
+                elif notion_time > stored_time:
+                    # 수정된 페이지
+                    truly_modified.append(page)
+                else:
+                    already_synced += 1
+            modified_pages = truly_modified
+            print(
+                f"  🔍 Per-page 비교: {before}개 → "
+                f"신규 {new_pages}개 + 수정 {len(modified_pages) - new_pages}개 처리, "
+                f"{already_synced}개 스킵"
+            )
+        elif not args.full:
+            print("  ℹ️  PostgreSQL 미연결 → Notion API 결과 전체 처리")
 
         # --limit 적용
         if args.limit and len(modified_pages) > args.limit:
