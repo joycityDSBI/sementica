@@ -435,9 +435,10 @@ def extract_events_from_text(llm_client, text: str) -> list[dict]:
 
 
 def extract_triplets(llm_client, text: str) -> list:
+    raw = ""
     try:
         resp = llm_client.messages.create(
-            model=HAIKU_MODEL,   # Sonnet → Haiku (3~5배 빠름)
+            model=HAIKU_MODEL,
             max_tokens=2048,
             messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=text[:3000])}],
         )
@@ -446,7 +447,7 @@ def extract_triplets(llm_client, text: str) -> list:
             parts = raw.split("```")
             raw = parts[1][4:] if len(parts) > 1 else raw
         parsed = json.loads(raw.strip())
-        return [
+        result = [
             {
                 "subject":   _norm_node(t.get("subject", "")),
                 "predicate": _norm_pred(t.get("predicate", "")),
@@ -454,7 +455,14 @@ def extract_triplets(llm_client, text: str) -> list:
             }
             for t in parsed if isinstance(t, dict)
         ]
-    except Exception:
+        if not result:
+            print(f"    [LLM] 트리플 없음 (LLM 응답: {raw[:120]!r})")
+        return result
+    except json.JSONDecodeError as e:
+        print(f"    ⚠️  LLM 응답 JSON 파싱 실패: {e} | 응답: {raw[:200]!r}")
+        return []
+    except Exception as e:
+        print(f"    ⚠️  LLM 트리플 추출 실패 (API 오류): {type(e).__name__}: {e}")
         return []
 
 
