@@ -198,7 +198,14 @@ def init_qdrant(reset: bool = False):
             except Exception:
                 pass
 
-        store.create_collection(COLLECTION_NAME, vector_size=EMBED_DIM, distance="Cosine")
+        try:
+            store.create_collection(COLLECTION_NAME, vector_size=EMBED_DIM, distance="Cosine")
+            print(f"  ✅ Qdrant 컬렉션 생성: {COLLECTION_NAME}")
+        except Exception as ce:
+            if "already exists" in str(ce).lower() or "409" in str(ce):
+                print(f"  ✅ Qdrant 컬렉션 기존 사용: {COLLECTION_NAME}")
+            else:
+                raise
         _qdrant_store = store
         print(f"  ✅ Qdrant 연결 완료 — 컬렉션: {COLLECTION_NAME}")
         return True
