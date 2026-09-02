@@ -28,6 +28,7 @@ Semantica 프레임워크 통합 헬퍼
   pip install semantica[graph-falkordb]   # NER/RE fallback 사용 시
 """
 
+import contextlib
 import re
 import uuid
 from datetime import UTC, datetime
@@ -113,9 +114,36 @@ def _semantica_extract(text: str) -> list:
     """
     Semantica NER + RelationExtractor 로 트리플 추출.
     한국어 미지원 시 빈 리스트 반환.
+
+    RelationExtractor가 dict 또는 Relation 객체를 반환하는 버전 모두 지원.
     """
     if not _SEM_AVAILABLE:
         return []
+
+    def _attr(obj, *keys):
+        """dict 또는 Relation 객체에서 값 추출 (여러 키 시도)."""
+        for key in keys:
+            val = obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+            if val is not None:
+                return val
+        return {}
+
+    def _text(obj) -> str:
+        """Entity/Span/dict/str 어느 형태든 텍스트 추출."""
+        if not obj:
+            return ""
+        if isinstance(obj, str):
+            return obj
+        if isinstance(obj, dict):
+            return obj.get("text") or obj.get("name") or ""
+        # Relation 객체: text → name → str() 순서로 시도
+        return getattr(obj, "text", None) or getattr(obj, "name", None) or str(obj)
+
+    def _etype(obj) -> str:
+        """엔티티 타입 추출 (dict / 객체 모두 처리)."""
+        if isinstance(obj, dict):
+            return obj.get("type", "Entity") or "Entity"
+        return getattr(obj, "type", None) or getattr(obj, "label_", None) or "Entity"
 
     try:
         from semantica.semantic_extract import NamedEntityRecognizer, RelationExtractor
@@ -130,22 +158,22 @@ def _semantica_extract(text: str) -> list:
         relations = rel.extract_relations(text[:3000], entities=entities)
         triplets  = []
         for r in relations:
-            subj = r.get("subject") or r.get("head") or {}
-            obj  = r.get("object")  or r.get("tail") or {}
-            pred = r.get("predicate") or r.get("relation") or {}
+            # dict 또는 Relation 객체 모두 처리
+            subj_raw = _attr(r, "subject",   "head")
+            obj_raw  = _attr(r, "object",    "tail")
+            pred_raw = _attr(r, "predicate", "relation")
 
-            # 다양한 반환 형식 정규화
-            subj_name = subj.get("text") or subj.get("name") or str(subj)
-            obj_name  = obj.get("text")  or obj.get("name")  or str(obj)
-            pred_name = pred.get("text") or pred.get("name") or str(pred)
+            subj_name = _text(subj_raw)
+            obj_name  = _text(obj_raw)
+            pred_name = _text(pred_raw)
 
             if not subj_name or not obj_name or not pred_name:
                 continue
 
             triplets.append({
-                "subject":   {"name": subj_name, "type": subj.get("type", "Entity")},
+                "subject":   {"name": subj_name, "type": _etype(subj_raw)},
                 "predicate": {"name": pred_name},
-                "object":    {"name": obj_name,  "type": obj.get("type",  "Entity")},
+                "object":    {"name": obj_name,  "type": _etype(obj_raw)},
             })
         return triplets
 
@@ -263,7 +291,7 @@ def find_shortest_path(graph, start_name: str, end_name: str, max_hops: int = 6)
         return {"found": False, "start": start_name, "end": end_name, "error": str(e)}
 
 
-# ─── 4‑6. 의사결정 추적 (trace_decision_chain) ───────────────────────────────
+# ─── 4-6. 의사결정 추적 (trace_decision_chain) ───────────────────────────────
 
 # 의사결정을 나타내는 한국어 술어 키워드
 DECISION_KEYWORDS: frozenset = frozenset([
@@ -348,7 +376,7 @@ def record_decision_node(graph, triplet: dict, source_url: str) -> int:
         return -1
 
     # ── 인과 연결: 이전 결정의 outcome이 이 결정의 subject와 같으면 LED_TO 생성
-    try:
+    with contextlib.suppress(Exception):
         graph.query(
             "MATCH (prev:Decision) WHERE prev.outcome = $subject "
             "  AND prev.decision_id <> $did "
@@ -356,11 +384,9 @@ def record_decision_node(graph, triplet: dict, source_url: str) -> int:
             "MERGE (prev)-[:LED_TO]->(d)",
             {"subject": subj_name, "did": did},
         )
-    except Exception:
-        pass  # LED_TO 생성 실패는 치명적이지 않음
 
     # ── 인과 연결: 이 결정의 outcome이 이후 결정의 subject와 같으면 LED_TO 생성
-    try:
+    with contextlib.suppress(Exception):
         graph.query(
             "MATCH (next:Decision) WHERE next.subject = $outcome "
             "  AND next.decision_id <> $did "
@@ -368,8 +394,6 @@ def record_decision_node(graph, triplet: dict, source_url: str) -> int:
             "MERGE (d)-[:LED_TO]->(next)",
             {"outcome": obj_name, "did": did},
         )
-    except Exception:
-        pass
 
     return node_id
 
@@ -497,6 +521,8 @@ def trace_decision_chain(graph, entity_name: str, max_depth: int = 4) -> dict:
 EVENT_TYPES: frozenset = frozenset([
     "client_update", "server_update", "user_event",
     "season", "content_release", "maintenance", "incident", "kpi_milestone",
+    # UA 마케팅 이벤트 (ingest.py / sync.py EVENT_EXTRACT_PROMPT와 동기화)
+    "ua_budget", "ua_creative", "ua_channel", "ua_targeting", "ua_abtest",
 ])
 
 
@@ -564,7 +590,7 @@ def upsert_event_node(graph, event: dict) -> int:
         return -1
 
     try:
-        dt      = datetime.utcfromtimestamp(date_ts)
+        dt      = datetime.fromtimestamp(date_ts, tz=UTC)
         year    = dt.year
         month   = dt.month
         quarter = _month_to_quarter(month)
