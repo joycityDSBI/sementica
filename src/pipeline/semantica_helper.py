@@ -224,7 +224,13 @@ def _semantica_extract(text: str) -> list:
 
 def extract_with_fallback(llm_extractor_fn, text: str) -> tuple[list, str]:
     """
-    LLM 추출 우선 → 실패하거나 빈 결과면 Semantica NER/RE 로 fallback.
+    LLM 기반 트리플 추출. 실패하거나 빈 결과면 빈 리스트 반환.
+
+    Semantica NER/RE fallback 을 사용하지 않는 이유:
+      - RelationExtractor 가 의미 기반이 아닌 거리/의존성 기반으로 동작
+      - 한국어 업무 문서에서 모든 엔티티 쌍에 관계를 생성 → 노이즈 과다
+      - LLM 이 0개를 반환하는 것은 "추출할 관계가 없다"는 정확한 판단
+      - 노이즈 엣지가 graph_search 결과 품질을 저하
 
     Args:
         llm_extractor_fn: LLM 기반 추출 함수 (text → list)
@@ -232,35 +238,15 @@ def extract_with_fallback(llm_extractor_fn, text: str) -> tuple[list, str]:
 
     Returns:
         (triplets: list, source: str)
-        source = "llm" | "semantica" | "empty"
-
-    사용:
-        triplets, src = extract_with_fallback(
-            lambda t: extract_triplets(llm_client, t), body_text
-        )
+        source = "llm" | "empty"
     """
-    _check_semantica_once()
-
-    # 1차: LLM 추출
+    # LLM 추출
     try:
         result = llm_extractor_fn(text)
         if result:
             return result, "llm"
     except Exception as e:
         print(f"    ⚠️  LLM 추출 실패: {e}")
-
-    # 2차: Semantica fallback
-    if _SEM_AVAILABLE and _KOREAN_OK:
-        result = _semantica_extract(text)
-        if result:
-            print(f"    🔄  Semantica fallback 사용 ({len(result)}개 트리플)")
-            return result, "semantica"
-    elif _SEM_AVAILABLE and not _KOREAN_OK:
-        # 한국어 미지원이지만 영문 혼재 가능성 → 시도
-        result = _semantica_extract(text)
-        if result:
-            print(f"    🔄  Semantica fallback 사용 (영문, {len(result)}개 트리플)")
-            return result, "semantica"
 
     return [], "empty"
 
