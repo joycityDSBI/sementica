@@ -68,9 +68,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 try:
     from db_logger import log_sync_result
     from db_logger import upsert_notion_page as _upsert_notion_page
+    from db_logger import get_pages_edit_times as _get_pages_edit_times
 except Exception:
     def log_sync_result(*a, **kw): pass
     def _upsert_notion_page(*a, **kw): pass
+    def _get_pages_edit_times(*a, **kw): return {}
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
 GCP_PROJECT      = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
@@ -833,7 +835,30 @@ def main():
             modified_pages = fetch_modified_pages_by_keyword(notion_client, token, since_iso, keyword)
         else:
             modified_pages = fetch_modified_pages(notion_client, token, since_iso)
-        print(f"  📋 {len(modified_pages)}개 수정 페이지 발견")
+        print(f"  📋 Notion API 반환: {len(modified_pages)}개")
+
+        # ── Per-page 필터링: PostgreSQL notion_pages.last_edited_time 기준 ──
+        # sync_state.json 의 단일 시각 대신, 페이지별 수정 시각과 직접 비교합니다.
+        # PostgreSQL 미연결 시 빈 dict → Notion API 결과 전체 처리 (기존 동작 유지).
+        if not args.full:
+            stored_edit_times = _get_pages_edit_times(args.dept)
+            if stored_edit_times:
+                before = len(modified_pages)
+                truly_modified = []
+                already_synced = 0
+                for page in modified_pages:
+                    pid          = page.get("id", "").replace("-", "")
+                    notion_time  = page.get("last_edited_time", "")
+                    stored_time  = stored_edit_times.get(pid, "")
+                    # 저장된 시각이 없거나(신규 페이지) Notion 수정 시각이 더 최신이면 처리
+                    if not stored_time or notion_time > stored_time:
+                        truly_modified.append(page)
+                    else:
+                        already_synced += 1
+                modified_pages = truly_modified
+                print(f"  🔍 Per-page 비교: {before}개 중 {already_synced}개 이미 최신 → {len(modified_pages)}개 처리 대상")
+            else:
+                print("  ℹ️  PostgreSQL 미연결 또는 notion_pages 데이터 없음 → Notion API 결과 전체 처리")
 
         # --limit 적용
         if args.limit and len(modified_pages) > args.limit:

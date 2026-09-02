@@ -187,6 +187,38 @@ def log_sync_result(
 
 # ─── Notion 페이지 레지스트리 ─────────────────────────────────────────────────
 
+def get_pages_edit_times(dept: str) -> dict:
+    """
+    notion_pages 테이블에서 부서별 페이지 수정 시각을 반환합니다.
+    증분 동기화 시 Notion API 결과와 per-page 비교에 사용합니다.
+
+    Returns:
+        {page_id: "2026-09-01T03:16:00+00:00", ...}
+        PostgreSQL 미연결 시 빈 dict 반환.
+    """
+    conn = _get_conn()
+    if conn is None:
+        return {}
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT page_id, last_edited_time FROM notion_pages WHERE dept = %s",
+                (dept,),
+            )
+            result = {}
+            for page_id, last_edited_time in cur.fetchall():
+                if last_edited_time is not None:
+                    result[page_id] = last_edited_time.isoformat()
+                else:
+                    result[page_id] = ""
+            return result
+    except Exception as e:
+        print(f"  [DB] get_pages_edit_times 실패: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
 def upsert_notion_page(
     page_id: str,
     dept: str,
