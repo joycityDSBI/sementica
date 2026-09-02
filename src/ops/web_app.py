@@ -125,44 +125,80 @@ def api_status():
 
 # ─── 페이지 현황 ──────────────────────────────────────────────────────────────
 @app.get("/api/pages")
-def api_pages(dept: str = "strategic", limit: int = 200):
+def api_pages(
+    dept:     str = "strategic",
+    page:     int = 1,
+    per_page: int = 200,
+    search:   str = "",
+):
     conn = _pg_conn()
     if not conn:
-        return {"error": "PostgreSQL 없음", "pages": [], "stats": {}, "totals": {}}
+        return {"error": "PostgreSQL 없음", "pages": [], "stats": {}, "totals": {},
+                "total_count": 0, "page": page, "per_page": per_page}
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT page_id, title, notion_url, last_edited_time,
-                          last_ingested_at, word_count, chunk_count,
-                          triplet_count, event_count, is_db_item, status
-                   FROM notion_pages WHERE dept=%s
-                   ORDER BY last_ingested_at DESC LIMIT %s""",
-                (dept, limit),
-            )
-            pages = _rows(cur)
+        offset = (max(page, 1) - 1) * per_page
+        like   = f"%{search}%" if search else None
+
+        # 상태별 집계 (검색어 무관 — 전체 기준)
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT status, COUNT(*) FROM notion_pages WHERE dept=%s GROUP BY status",
                 (dept,),
             )
             stats = {r[0]: r[1] for r in cur.fetchall()}
+
+        # 청크 합계 (검색어 무관)
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT SUM(chunk_count), SUM(triplet_count), SUM(event_count)
-                   FROM notion_pages WHERE dept=%s AND status='ok'""",
+                "SELECT SUM(chunk_count), SUM(triplet_count), SUM(event_count) "
+                "FROM notion_pages WHERE dept=%s AND status='ok'",
                 (dept,),
             )
             row = cur.fetchone()
             totals = {
-                "chunks": int(row[0] or 0),
+                "chunks":   int(row[0] or 0),
                 "triplets": int(row[1] or 0),
-                "events": int(row[2] or 0),
+                "events":   int(row[2] or 0),
             }
+
+        # 검색 조건
+        if like:
+            where  = "dept=%s AND title ILIKE %s"
+            p_cnt  = (dept, like)
+            p_list = (dept, like, per_page, offset)
+        else:
+            where  = "dept=%s"
+            p_cnt  = (dept,)
+            p_list = (dept, per_page, offset)
+
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM notion_pages WHERE {where}", p_cnt)
+            total_count = cur.fetchone()[0]
+
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT page_id, title, notion_url, last_edited_time,
+                           last_ingested_at, word_count, chunk_count,
+                           triplet_count, event_count, is_db_item, status
+                    FROM notion_pages WHERE {where}
+                    ORDER BY last_ingested_at DESC LIMIT %s OFFSET %s""",
+                p_list,
+            )
+            pages = _rows(cur)
+
         conn.close()
-        return {"pages": pages, "stats": stats, "totals": totals}
+        return {
+            "pages":       pages,
+            "stats":       stats,
+            "totals":      totals,
+            "total_count": total_count,
+            "page":        page,
+            "per_page":    per_page,
+        }
     except Exception as e:
         conn.close()
-        return {"error": str(e), "pages": [], "stats": {}, "totals": {}}
+        return {"error": str(e), "pages": [], "stats": {}, "totals": {},
+                "total_count": 0, "page": page, "per_page": per_page}
 
 
 # ─── sync 이력 ────────────────────────────────────────────────────────────────
@@ -920,13 +956,26 @@ select {
     </div>
   </div>
 
-  <div class="section-title">인제스트 페이지 목록</div>
-  <div class="table-wrap">
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap">
+    <div class="section-title" style="margin-bottom:0">인제스트 페이지 목록</div>
+    <div style="position:relative;flex:1;min-width:200px;max-width:360px">
+      <input type="text" id="page-search" placeholder="제목 검색 (LIKE)..."
+        oninput="debouncedPageSearch()"
+        style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:4px;
+               color:var(--text);padding:6px 30px 6px 10px;font-size:13px;font-family:inherit">
+      <span id="page-search-clear" onclick="clearPageSearch()"
+        style="display:none;position:absolute;right:8px;top:50%;transform:translateY(-50%);
+               cursor:pointer;color:var(--muted);font-size:14px">✕</span>
+    </div>
+    <span id="page-count-label" style="font-size:12px;color:var(--muted);white-space:nowrap"></span>
+  </div>
+  <div class="table-wrap" style="margin-bottom:8px">
     <table>
       <thead><tr><th>제목</th><th>단어</th><th>청크</th><th>트리플</th><th>이벤트</th><th>마지막수정</th><th>상태</th></tr></thead>
       <tbody id="pages-tbody"><tr><td colspan="7" class="empty">로딩 중...</td></tr></tbody>
     </table>
   </div>
+  <div id="pages-pagination" style="display:flex;align-items:center;gap:6px;justify-content:center;margin-bottom:24px;flex-wrap:wrap"></div>
 </section>
 
 <!-- ═══════════════ 배치 탭 ═══════════════ -->
@@ -1131,13 +1180,22 @@ async function loadStatus() {
 }
 
 // ── 대시보드 로드 ─────────────────────────────────────────────────────────────
+let _pageCurrent = 1;
+let _pageSearch  = '';
+let _pageDebounceTimer = null;
+
 async function loadDashboard() {
   const dept = document.getElementById('dash-dept').value || 'strategic';
   loadStatus();
   loadDepts('dash-dept');
 
+  _pageCurrent = 1;
+  _pageSearch  = '';
+  document.getElementById('page-search').value = '';
+  document.getElementById('page-search-clear').style.display = 'none';
+
   const [pages, syncLog, mcpLog, qdrant, graph] = await Promise.all([
-    fetch(`/api/pages?dept=${dept}&limit=200`).then(r => r.json()).catch(() => ({})),
+    fetch(`/api/pages?dept=${dept}&page=1&per_page=200`).then(r => r.json()).catch(() => ({})),
     fetch(`/api/sync-log?dept=${dept}&limit=10`).then(r => r.json()).catch(() => ({})),
     fetch(`/api/mcp-log?dept=${dept}`).then(r => r.json()).catch(() => ({})),
     fetch('/api/qdrant-stats').then(r => r.json()).catch(() => ({})),
@@ -1145,7 +1203,7 @@ async function loadDashboard() {
   ]);
 
   // 통계 카드
-  const stats = pages.stats || {};
+  const stats  = pages.stats || {};
   const totals = pages.totals || {};
   const totalPages = Object.values(stats).reduce((a, b) => a + b, 0);
   document.getElementById('s-pages').textContent  = totalPages;
@@ -1164,7 +1222,7 @@ async function loadDashboard() {
   });
 
   // sync 이력
-  const sb = document.getElementById('sync-tbody');
+  const sb   = document.getElementById('sync-tbody');
   const logs = syncLog.logs || [];
   sb.innerHTML = logs.length ? logs.map(l => `<tr>
     <td>${fmtDt(l.created_at)}</td>
@@ -1176,14 +1234,14 @@ async function loadDashboard() {
   </tr>`).join('') : '<tr><td colspan="6" class="empty">이력 없음</td></tr>';
 
   // MCP 통계
-  const mb = document.getElementById('mcp-tbody');
+  const mb     = document.getElementById('mcp-tbody');
   const mstats = mcpLog.stats || [];
   mb.innerHTML = mstats.length ? mstats.map(s => `<tr>
     <td>${s.tool}</td><td>${s.cnt}</td><td>${s.avg_ms ?? '—'}</td><td>${s.avg_results ?? '—'}</td>
   </tr>`).join('') : '<tr><td colspan="4" class="empty">MCP 사용 기록 없음</td></tr>';
 
   // Qdrant
-  const qi = document.getElementById('qdrant-info');
+  const qi   = document.getElementById('qdrant-info');
   const cols = qdrant.collections || [];
   qi.innerHTML = cols.length ? cols.map(c => `
     <div style="display:flex;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
@@ -1192,9 +1250,53 @@ async function loadDashboard() {
       <span style="color:var(--muted);font-size:11px">points</span>
     </div>`).join('') : '<div class="empty">컬렉션 없음</div>';
 
-  // 페이지 목록
+  // 페이지 목록 (첫 로드)
+  renderPageRows(pages);
+}
+
+// 검색 디바운스 (300ms)
+function debouncedPageSearch() {
+  clearTimeout(_pageDebounceTimer);
+  _pageDebounceTimer = setTimeout(() => {
+    _pageCurrent = 1;
+    _pageSearch  = document.getElementById('page-search').value.trim();
+    document.getElementById('page-search-clear').style.display = _pageSearch ? '' : 'none';
+    loadPages();
+  }, 300);
+}
+
+function clearPageSearch() {
+  document.getElementById('page-search').value = '';
+  document.getElementById('page-search-clear').style.display = 'none';
+  _pageSearch  = '';
+  _pageCurrent = 1;
+  loadPages();
+}
+
+async function loadPages(page) {
+  if (page !== undefined) _pageCurrent = page;
+  const dept = document.getElementById('dash-dept').value || 'strategic';
+  const url  = `/api/pages?dept=${dept}&page=${_pageCurrent}&per_page=200`
+             + (_pageSearch ? `&search=${encodeURIComponent(_pageSearch)}` : '');
+  const data = await fetch(url).then(r => r.json()).catch(() => ({}));
+  renderPageRows(data);
+}
+
+function renderPageRows(data) {
+  const pg          = data.pages || [];
+  const totalCount  = data.total_count ?? pg.length;
+  const perPage     = data.per_page    ?? 200;
+  const curPage     = data.page        ?? 1;
+  const totalPages  = Math.max(1, Math.ceil(totalCount / perPage));
+
+  // 카운트 레이블
+  const from  = (curPage - 1) * perPage + 1;
+  const to    = Math.min(curPage * perPage, totalCount);
+  const label = totalCount > 0 ? `${from}–${to} / ${totalCount}개` : '0개';
+  document.getElementById('page-count-label').textContent = label;
+
+  // 행 렌더링
   const pb = document.getElementById('pages-tbody');
-  const pg = pages.pages || [];
   pb.innerHTML = pg.length ? pg.map(p => `<tr>
     <td><a href="${p.notion_url||'#'}" target="_blank" title="${escHtml(p.notion_url||'')}">${escHtml(p.title||p.page_id||'—')}</a></td>
     <td>${p.word_count ?? '—'}</td>
@@ -1203,7 +1305,37 @@ async function loadDashboard() {
     <td>${p.event_count ?? '—'}</td>
     <td>${fmtDt(p.last_edited_time)}</td>
     <td><span class="badge badge-${p.status}">${p.status}</span></td>
-  </tr>`).join('') : '<tr><td colspan="7" class="empty">페이지 없음 (ingest를 실행하세요)</td></tr>';
+  </tr>`).join('')
+  : `<tr><td colspan="7" class="empty">${_pageSearch ? '검색 결과 없음' : '페이지 없음 (ingest를 실행하세요)'}</td></tr>`;
+
+  // 페이지네이션
+  renderPagination(curPage, totalPages);
+}
+
+function renderPagination(cur, total) {
+  const el = document.getElementById('pages-pagination');
+  if (total <= 1) { el.innerHTML = ''; return; }
+
+  // 표시할 페이지 번호 범위 계산 (최대 7개)
+  let start = Math.max(1, cur - 3);
+  let end   = Math.min(total, start + 6);
+  if (end - start < 6) start = Math.max(1, end - 6);
+
+  const btn = (label, pg, disabled = false, active = false) =>
+    `<button class="btn btn-sm${active?' btn-primary':''}"
+      style="min-width:32px;${active?'':''}padding:4px 9px"
+      onclick="loadPages(${pg})"
+      ${disabled?'disabled':''}>
+      ${label}
+    </button>`;
+
+  let html = btn('‹', cur - 1, cur === 1) + ' ';
+  if (start > 1) html += btn('1', 1) + (start > 2 ? '<span style="color:var(--muted);padding:0 4px">…</span>' : '');
+  for (let p = start; p <= end; p++) html += btn(p, p, false, p === cur);
+  if (end < total) html += (end < total - 1 ? '<span style="color:var(--muted);padding:0 4px">…</span>' : '') + btn(total, total);
+  html += ' ' + btn('›', cur + 1, cur === total);
+
+  el.innerHTML = html;
 }
 
 // ── 배치 실행 ─────────────────────────────────────────────────────────────────
