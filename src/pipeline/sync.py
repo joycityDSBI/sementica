@@ -161,14 +161,23 @@ def _event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | 
 # ─── 트리플 추출 프롬프트 ──────────────────────────────────────────────────────
 EXTRACT_PROMPT = """\
 다음 텍스트에서 엔티티-관계-엔티티 트리플을 추출하세요.
-담당자, 팀, 업무, 정책, 프로젝트, 시스템 간의 명시적 관계를 추출합니다.
+아래 모든 문서 유형에서 관계를 추출합니다:
+  • 업무 프로세스·조직도: 담당자/팀/역할 간 관계
+  • 업무 요청서·문의서: 요청자 → 요청대상 시스템/팀, 시스템 간 연동·적재 관계
+  • 정책·규정 문서: 승인 체계, 조건부 관계
+  • 회의록·결정사항: 결정 주체 → 결정 내용
 
-각 트리플은 아래 형식으로 추출하세요:
-- subject / object: name(이름)과 type(엔티티 종류)을 포함
-- predicate: name(관계 동사), 그리고 알 수 있다면 condition(조건), order(순서, 정수), duration(소요시간)
+엔티티 type:
+  Person(사람/담당자), Team(팀/본부), System(시스템/DB/플랫폼),
+  Process(프로세스/업무), Policy(정책/규정), Document(문서/보고서), Role(역할)
 
-엔티티 type 예시: Person(사람), Team(팀), Process(프로세스/업무), System(시스템), Policy(정책/규정), Document(문서), Role(역할)
-관계 name 예시: 담당, 소속, 승인, 운영, 참여, 협업, 보고, 관리, 포함, 사용
+관계 name 예시:
+  소속, 담당, 요청, 활용, 적재, 연동, 승인, 운영, 협업, 보고, 관리, 생성, 분석, 참조
+
+추출 기준:
+  - 사람·팀·시스템·프로세스 이름이 명확히 등장하는 경우 추출
+  - 날짜·숫자·컬럼명·조건어는 엔티티로 추출하지 않음
+  - 관계가 암묵적이더라도 문맥상 명확하면 추출 (예: "DI팀 유현상이 빅쿼리 적재를 요청" → 유현상 → 요청 → 빅쿼리)
 
 텍스트:
 {text}
@@ -176,9 +185,9 @@ EXTRACT_PROMPT = """\
 JSON 배열로만 응답하세요 (설명 없이):
 [
   {{
-    "subject":   {{"name": "엔티티A", "type": "Team"}},
-    "predicate": {{"name": "담당", "condition": "점검일 한정", "order": 1}},
-    "object":    {{"name": "엔티티B", "type": "Process"}}
+    "subject":   {{"name": "엔티티A", "type": "Person"}},
+    "predicate": {{"name": "요청", "condition": "매일 갱신"}},
+    "object":    {{"name": "엔티티B", "type": "System"}}
   }}
 ]
 

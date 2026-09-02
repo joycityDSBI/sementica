@@ -110,12 +110,42 @@ def merge_node(graph, entity_name: str, entity_type: str, source_url: str) -> in
 
 # ─── 2. LLM 추출 실패 시 Semantica NER/RE fallback ───────────────────────────
 
+# 의미있는 엔티티 타입만 허용 (날짜·숫자·컬럼명 제외)
+_VALID_NER_TYPES: frozenset = frozenset({
+    "PERSON", "ORG", "PRODUCT", "FAC", "WORK_OF_ART", "EVENT", "NORP",
+    "Entity",          # Semantica 기본 타입
+    "Team", "System", "Process", "Policy", "Document", "Role",  # 커스텀 온톨로지 타입
+})
+_SKIP_NER_TYPES: frozenset = frozenset({
+    "DATE", "TIME", "CARDINAL", "ORDINAL", "PERCENT", "MONEY", "QUANTITY",
+    "LOC", "GPE",      # 지명·국가는 업무 온톨로지에서 불필요
+})
+# 날짜/숫자 패턴 엔티티 이름 제외
+_DATE_NUM_RE = re.compile(
+    r"^\d+$"                                      # 순수 숫자
+    r"|^\d{4}[-/.년]\d{1,2}"                      # YYYY-MM, YYYY년MM
+    r"|\d{1,2}시\s*\d{0,2}분?"                    # 시각 (오전 5시 15분)
+    r"|^20\d{2}"                                   # 연도 단독 (2026 등)
+)
+
+
+def _is_valid_entity(name: str, etype: str) -> bool:
+    """노이즈 엔티티 필터: 날짜·숫자·빈 문자열·너무 짧은 이름 제외."""
+    name = name.strip()
+    if not name or len(name) < 2:
+        return False
+    if etype in _SKIP_NER_TYPES:
+        return False
+    if _DATE_NUM_RE.search(name):
+        return False
+    return True
+
+
 def _semantica_extract(text: str) -> list:
     """
     Semantica NER + RelationExtractor 로 트리플 추출.
+    날짜·숫자·컬럼명 타입 엔티티는 필터링하여 노이즈 최소화.
     한국어 미지원 시 빈 리스트 반환.
-
-    RelationExtractor가 dict 또는 Relation 객체를 반환하는 버전 모두 지원.
     """
     if not _SEM_AVAILABLE:
         return []
@@ -136,7 +166,6 @@ def _semantica_extract(text: str) -> list:
             return obj
         if isinstance(obj, dict):
             return obj.get("text") or obj.get("name") or ""
-        # Relation 객체: text → name → str() 순서로 시도
         return getattr(obj, "text", None) or getattr(obj, "name", None) or str(obj)
 
     def _etype(obj) -> str:
@@ -158,7 +187,6 @@ def _semantica_extract(text: str) -> list:
         relations = rel.extract_relations(text[:3000], entities=entities)
         triplets  = []
         for r in relations:
-            # dict 또는 Relation 객체 모두 처리
             subj_raw = _attr(r, "subject",   "head")
             obj_raw  = _attr(r, "object",    "tail")
             pred_raw = _attr(r, "predicate", "relation")
@@ -166,15 +194,26 @@ def _semantica_extract(text: str) -> list:
             subj_name = _text(subj_raw)
             obj_name  = _text(obj_raw)
             pred_name = _text(pred_raw)
+            subj_type = _etype(subj_raw)
+            obj_type  = _etype(obj_raw)
 
             if not subj_name or not obj_name or not pred_name:
                 continue
 
+            # 노이즈 엔티티 제거: 날짜·숫자·너무 짧은 이름
+            if not _is_valid_entity(subj_name, subj_type):
+                continue
+            if not _is_valid_entity(obj_name, obj_type):
+                continue
+
             triplets.append({
-                "subject":   {"name": subj_name, "type": _etype(subj_raw)},
+                "subject":   {"name": subj_name, "type": subj_type},
                 "predicate": {"name": pred_name},
-                "object":    {"name": obj_name,  "type": _etype(obj_raw)},
+                "object":    {"name": obj_name,  "type": obj_type},
             })
+
+        before = len(relations) if hasattr(relations, "__len__") else "?"
+        print(f"    [Semantica] 관계 {before}개 → 필터 후 {len(triplets)}개 트리플")
         return triplets
 
     except Exception as e:
