@@ -25,6 +25,12 @@ semantica[graph-falkordb]
 # ── 운영 로그 (PostgreSQL) ────────────────────────────────────────────────────
 psycopg2-binary>=2.9.0
 
+# ── NLP / 엔티티 추출 ────────────────────────────────────────────────────────
+spacy>=3.7.0                      # Semantica NER/RE ML fallback 필수
+# spaCy 언어 모델은 pip install 후 아래 명령으로 별도 설치:
+#   python -m spacy download en_core_web_sm      # 영문
+#   python -m spacy download ko_core_news_sm     # 한국어
+
 # ── 유틸 ──────────────────────────────────────────────────────────────────────
 httpx>=0.24.0
 numpy>=1.24.0
