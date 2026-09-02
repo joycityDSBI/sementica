@@ -106,18 +106,30 @@ _COMPLEX_PATTERNS = frozenset([
     "이고", "이며", "하는", "이면서", "이자",
     "담당하는", "작성한", "소속된", "승인한", "결정한",
     "관련된", "연관된", "포함된", "연결된",
+    # 추가: 복합 조건을 표현하는 추가 한국어 패턴
+    "중에서", "기준으로", "에서의", "으로의",
+    "누가", "어느", "어떤 팀", "어떤 사람",
+    "기반으로", "따라서", "통해서",
 ])
 
 
 def _is_complex_query(query: str) -> bool:
-    """복합 쿼리 여부 휴리스틱 탐지 (15자+ AND 복합 패턴 OR 6단어+)"""
-    if len(query) >= 15 and any(p in query for p in _COMPLEX_PATTERNS):
+    """복합 쿼리 여부 휴리스틱 탐지 (12자+ AND 복합 패턴 OR 5단어+)
+    임계값 완화: 15→12자, 6→5단어 (복합 카테고리 감지율 향상)
+    """
+    if len(query) >= 12 and any(p in query for p in _COMPLEX_PATTERNS):
         return True
-    return len(query.split()) >= 6
+    return len(query.split()) >= 5
 
 
 def _decompose_query(query: str) -> list[str]:
-    """Claude Haiku로 복합 쿼리를 독립적 서브쿼리 2~3개로 분해"""
+    """Claude Haiku로 복합 쿼리를 독립적 서브쿼리 2~3개로 분해.
+
+    개선 사항:
+    - 사내 업무 문서 컨텍스트 명시 (담당자·팀·프로세스·정책·시스템)
+    - 구체적인 예시 few-shot 추가 → 분해 품질 향상
+    - max_tokens 300→400 (긴 서브쿼리 잘림 방지)
+    """
     try:
         import re as _re
 
@@ -125,12 +137,24 @@ def _decompose_query(query: str) -> list[str]:
         client = anthropic.Anthropic()
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=300,
+            max_tokens=400,
             messages=[{
                 "role": "user",
                 "content": (
-                    "다음 복합 질문을 독립적으로 검색 가능한 서브쿼리 2~3개로 분해하세요.\n"
-                    "JSON 배열만 반환하세요. 예: [\"서브쿼리1\", \"서브쿼리2\"]\n\n"
+                    "사내 업무 문서 검색 시스템입니다. "
+                    "문서에는 담당자·팀·프로세스·정책·시스템·게임 서비스 정보가 담겨 있습니다.\n\n"
+                    "다음 복합 질문을 독립적으로 검색 가능한 서브쿼리 2~3개로 분해하세요.\n\n"
+                    "규칙:\n"
+                    "- 각 서브쿼리는 단독으로 검색해도 유의미한 10~25자 한국어 표현\n"
+                    "- 원본 질문의 핵심 엔티티(사람·팀·프로세스·정책·게임)를 모두 포함\n"
+                    "- 서로 다른 관점(담당자 관점, 문서 관점, 관계 관점)으로 분해\n"
+                    "- JSON 배열만 반환 (설명·마크다운 없이)\n\n"
+                    "예시 1:\n"
+                    "Q: 운영팀에서 POTC 점검을 담당하는 사람이 작성한 배포 가이드는?\n"
+                    "A: [\"운영팀 POTC 점검 담당자\", \"POTC 배포 가이드 문서\", \"운영팀 작성 점검 절차\"]\n\n"
+                    "예시 2:\n"
+                    "Q: 전략사업본부 글로벌 게임 출시 승인 절차와 관련 팀은?\n"
+                    "A: [\"글로벌 게임 출시 승인 절차\", \"전략사업본부 출시 담당팀\", \"게임 출시 관련 정책\"]\n\n"
                     f"질문: {query}"
                 ),
             }],
@@ -178,7 +202,7 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
         graph = _get_falkordb()
         words = [w for w in sub_query.split() if len(w) >= 2]
         seen: set = set()
-        for word in words[:2]:
+        for word in words[:3]:   # 2→3: 서브쿼리당 더 많은 엔티티 탐색
             nodes = graph.query(
                 "MATCH (n) WHERE n.name CONTAINS $name RETURN n.name LIMIT 2",
                 {"name": word},
@@ -201,7 +225,8 @@ def _merge_semantic_results(results_per_query: list) -> list:
     """서브쿼리별 벡터 결과 URL 중복 제거 + coverage 가중 재랭킹
 
     여러 서브쿼리에서 공통으로 등장하는 문서일수록 높은 점수를 부여합니다.
-    부스트 공식: score * (1 + 0.15 * (coverage - 1))
+    부스트 공식: score * (1 + 0.20 * (coverage - 1))
+    0.15 → 0.20: 복합 카테고리에서 교차 문서 부스트 강화
     """
     url_counts: dict = {}
     url_best: dict = {}
@@ -222,7 +247,7 @@ def _merge_semantic_results(results_per_query: list) -> list:
         merged.append({
             **item,
             "coverage": coverage,
-            "score": round(item["score"] * (1 + 0.15 * (coverage - 1)), 4),
+            "score": round(item["score"] * (1 + 0.20 * (coverage - 1)), 4),
         })
 
     return sorted(merged, key=lambda x: x["score"], reverse=True)
@@ -459,22 +484,49 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
                 rel["source_url"] = row[5]
             relations.append(rel)
 
-        # 역방향 관계도 탐색 (누가 이 엔티티와 관계를 맺는지)
-        rev_query = (
+        # 역방향 관계 탐색 (누가 이 엔티티와 관계를 맺는지)
+        # depth=1: 직접 연결된 1홉 incoming
+        # depth=2: 1홉 + 2홉 indirect incoming (중복 제거)
+        incoming: list = []
+        seen_incoming: set = set()
+
+        # ── 1홉 incoming (depth=1·2 공통) ────────────────────────────────────
+        rev1_result = graph.query(
             "MATCH (m)-[r:REL]->(n {name: $name}) "
             "RETURN r.rel_name AS relation, m.name AS source, labels(m)[0] AS source_type, "
             "r.source_url AS source_url "
-            "LIMIT 10"
+            "LIMIT 10",
+            {"name": matched_name},
         )
-        rev_result = graph.query(rev_query, {"name": matched_name})
-        incoming = []
-        for row in rev_result.result_set:
-            incoming.append({
-                "relation":    row[0],
-                "source_name": row[1],
-                "source_type": row[2],
-                "source_url":  row[3] if len(row) > 3 else "",
-            })
+        for row in rev1_result.result_set:
+            src = row[1]
+            if src not in seen_incoming:
+                seen_incoming.add(src)
+                incoming.append({
+                    "relation":    row[0],
+                    "source_name": src,
+                    "source_type": row[2],
+                    "source_url":  row[3] if len(row) > 3 else "",
+                })
+
+        # ── 2홉 incoming (depth=2 전용 추가) ──────────────────────────────────
+        if depth == 2:
+            rev2_result = graph.query(
+                "MATCH (m)-[:REL]->(x)-[r:REL]->(n {name: $name}) "
+                "RETURN r.rel_name AS relation, m.name AS source, labels(m)[0] AS source_type "
+                "LIMIT 10",
+                {"name": matched_name},
+            )
+            for row in rev2_result.result_set:
+                src = row[1]
+                if src not in seen_incoming:
+                    seen_incoming.add(src)
+                    incoming.append({
+                        "relation":    f"{row[0]} (2홉)",
+                        "source_name": src,
+                        "source_type": row[2],
+                        "source_url":  "",
+                    })
 
         _result = {
             "entity":      matched_name,
@@ -496,7 +548,7 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
 
 
 @mcp.tool()
-def hybrid_search(query: str, limit: int = 5) -> dict[str, Any]:
+def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
     """
     벡터 검색(문서 내용) + 그래프 탐색(관계 구조)을 동시에 수행하는 통합 검색입니다.
     복합 질문을 자동으로 서브쿼리로 분해하여 각각 검색한 뒤 결과를 병합합니다.
@@ -534,7 +586,7 @@ def hybrid_search(query: str, limit: int = 5) -> dict[str, Any]:
     Args:
         query: 검색할 자연어 질문 (한국어 가능). 복합 질문도 그대로 입력하세요.
                AI가 자동으로 서브쿼리로 분해합니다.
-        limit: 벡터 검색 결과 수 (기본값: 5). 복합 질문이면 8~10 권장.
+        limit: 벡터 검색 결과 수 (기본값: 8). 더 넓은 탐색이 필요하면 12~15 권장.
 
     Returns:
         {
