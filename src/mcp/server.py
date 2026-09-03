@@ -901,6 +901,270 @@ def timeline_search(
         )
 
 
+# ─── REST API (Snowflake External Function 호환) ──────────────────────────────
+#
+# 기존 MCP 엔드포인트(/mcp)와 동일한 포트에서 REST JSON API를 추가로 제공합니다.
+#
+# 【엔드포인트 목록】
+#   GET  /rest/health              — 헬스 체크
+#   POST /rest/search              — 벡터 의미 검색
+#   POST /rest/graph               — 그래프 엔티티 탐색
+#   POST /rest/events              — 시계열 이벤트 이력
+#   POST /rest/hybrid              — 벡터 + 그래프 통합 검색
+#
+#   POST /snowflake/search         — Snowflake External Function 형식 (벡터)
+#   POST /snowflake/events         — Snowflake External Function 형식 (이벤트)
+#   POST /snowflake/hybrid         — Snowflake External Function 형식 (통합)
+#
+# 【인증】
+#   SNOWFLAKE_REST_TOKEN 환경변수 설정 시 Authorization: Bearer <token> 검증.
+#   미설정 시 인증 없이 동작 (개발/사내망 전용).
+#
+# 【Snowflake External Function 입출력 형식】
+#   요청: {"data": [[row_index, param1, param2, ...]]}
+#   응답: {"data": [[row_index, {결과 객체}]]}
+
+from starlette.requests import Request        # noqa: E402
+from starlette.responses import JSONResponse  # noqa: E402
+
+_REST_TOKEN = os.environ.get("SNOWFLAKE_REST_TOKEN", "")
+
+
+def _check_auth(request: Request) -> bool:
+    """Bearer 토큰 검증. 토큰 미설정 시 항상 통과."""
+    if not _REST_TOKEN:
+        return True
+    auth = request.headers.get("Authorization", "")
+    return auth == f"Bearer {_REST_TOKEN}"
+
+
+def _auth_error() -> JSONResponse:
+    return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+
+# ── GET /rest/health ───────────────────────────────────────────────────────────
+@mcp.custom_route("/rest/health", methods=["GET"])
+async def rest_health(request: Request) -> JSONResponse:
+    """서버 상태 및 설정 확인"""
+    return JSONResponse({
+        "status":     "ok",
+        "dept":       DEPT_NAME,
+        "collection": COLLECTION_NAME,
+        "graph":      GRAPH_NAME,
+    })
+
+
+# ── POST /rest/search ──────────────────────────────────────────────────────────
+@mcp.custom_route("/rest/search", methods=["POST"])
+async def rest_search(request: Request) -> JSONResponse:
+    """
+    벡터 의미 검색.
+
+    요청:
+        {"query": "POTC 마케팅 이력", "limit": 5}
+    응답:
+        {"results": [...], "count": 5}
+    """
+    if not _check_auth(request):
+        return _auth_error()
+    try:
+        body  = await request.json()
+        query = str(body.get("query", ""))
+        limit = int(body.get("limit", 5))
+        if not query:
+            return JSONResponse({"error": "query 파라미터가 필요합니다"}, status_code=400)
+        results = semantic_search(query=query, limit=limit)
+        return JSONResponse({"results": results, "count": len(results)})
+    except Exception as e:
+        return JSONResponse({"error": str(e), "results": [], "count": 0}, status_code=500)
+
+
+# ── POST /rest/graph ───────────────────────────────────────────────────────────
+@mcp.custom_route("/rest/graph", methods=["POST"])
+async def rest_graph(request: Request) -> JSONResponse:
+    """
+    그래프 엔티티 관계 탐색.
+
+    요청:
+        {"entity": "DI팀", "depth": 1}
+    응답:
+        {entity, type, found, outgoing:[...], incoming:[...]}
+    """
+    if not _check_auth(request):
+        return _auth_error()
+    try:
+        body   = await request.json()
+        entity = str(body.get("entity", ""))
+        depth  = int(body.get("depth", 1))
+        if not entity:
+            return JSONResponse({"error": "entity 파라미터가 필요합니다"}, status_code=400)
+        result = graph_search(entity=entity, depth=depth)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e), "found": False}, status_code=500)
+
+
+# ── POST /rest/events ──────────────────────────────────────────────────────────
+@mcp.custom_route("/rest/events", methods=["POST"])
+async def rest_events(request: Request) -> JSONResponse:
+    """
+    시계열 이벤트 이력 조회.
+
+    요청:
+        {
+          "game":       "POTC",
+          "event_type": "ua_budget",   // 생략 가능 (전체 유형)
+          "from_date":  "2026-08-01",  // 생략 가능
+          "to_date":    "2026-08-31",  // 생략 가능
+          "limit":      20
+        }
+    응답:
+        {game, total, events:[{date, event_type, title, description, manager, source_url}]}
+    """
+    if not _check_auth(request):
+        return _auth_error()
+    try:
+        body       = await request.json()
+        game       = str(body.get("game", ""))
+        event_type = str(body.get("event_type", ""))
+        from_date  = str(body.get("from_date",  ""))
+        to_date    = str(body.get("to_date",    ""))
+        limit      = int(body.get("limit", 20))
+        if not game:
+            return JSONResponse({"error": "game 파라미터가 필요합니다"}, status_code=400)
+        result = timeline_search(
+            game=game, event_type=event_type,
+            from_date=from_date, to_date=to_date, limit=limit,
+        )
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── POST /rest/hybrid ──────────────────────────────────────────────────────────
+@mcp.custom_route("/rest/hybrid", methods=["POST"])
+async def rest_hybrid(request: Request) -> JSONResponse:
+    """
+    벡터 + 그래프 통합 검색.
+
+    요청:
+        {"query": "DS 매출 감소 원인", "limit": 8}
+    응답:
+        {semantic_results:[...], graph_results:[...], sub_queries:[...]}
+    """
+    if not _check_auth(request):
+        return _auth_error()
+    try:
+        body  = await request.json()
+        query = str(body.get("query", ""))
+        limit = int(body.get("limit", 8))
+        if not query:
+            return JSONResponse({"error": "query 파라미터가 필요합니다"}, status_code=400)
+        result = hybrid_search(query=query, limit=limit)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── POST /snowflake/search ─────────────────────────────────────────────────────
+@mcp.custom_route("/snowflake/search", methods=["POST"])
+async def snowflake_search(request: Request) -> JSONResponse:
+    """
+    Snowflake External Function 형식 — 벡터 검색.
+
+    Snowflake SQL:
+        SELECT search_ontology(query, limit) FROM ...
+    요청: {"data": [[0, "POTC 마케팅 이력", 5], [1, "DS 업데이트", 5]]}
+    응답: {"data": [[0, {results:[...], count:5}], [1, {...}]]}
+    """
+    if not _check_auth(request):
+        return _auth_error()
+    try:
+        body = await request.json()
+        rows = body.get("data", [])
+        out  = []
+        for row in rows:
+            idx   = row[0]
+            query = str(row[1]) if len(row) > 1 else ""
+            limit = int(row[2]) if len(row) > 2 else 5
+            try:
+                results = semantic_search(query=query, limit=limit)
+                out.append([idx, {"results": results, "count": len(results)}])
+            except Exception as e:
+                out.append([idx, {"error": str(e), "results": [], "count": 0}])
+        return JSONResponse({"data": out})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── POST /snowflake/events ─────────────────────────────────────────────────────
+@mcp.custom_route("/snowflake/events", methods=["POST"])
+async def snowflake_events(request: Request) -> JSONResponse:
+    """
+    Snowflake External Function 형식 — 시계열 이벤트.
+
+    Snowflake SQL:
+        SELECT get_game_events(game, event_type, from_date, to_date, limit) FROM ...
+    요청: {"data": [[0, "POTC", "ua_budget", "2026-08-01", "2026-08-31", 20]]}
+    응답: {"data": [[0, {game, total, events:[...]}]]}
+    """
+    if not _check_auth(request):
+        return _auth_error()
+    try:
+        body = await request.json()
+        rows = body.get("data", [])
+        out  = []
+        for row in rows:
+            idx        = row[0]
+            game       = str(row[1]) if len(row) > 1 else ""
+            event_type = str(row[2]) if len(row) > 2 else ""
+            from_date  = str(row[3]) if len(row) > 3 else ""
+            to_date    = str(row[4]) if len(row) > 4 else ""
+            limit      = int(row[5]) if len(row) > 5 else 20
+            try:
+                result = timeline_search(
+                    game=game, event_type=event_type,
+                    from_date=from_date, to_date=to_date, limit=limit,
+                )
+                out.append([idx, result])
+            except Exception as e:
+                out.append([idx, {"error": str(e)}])
+        return JSONResponse({"data": out})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── POST /snowflake/hybrid ─────────────────────────────────────────────────────
+@mcp.custom_route("/snowflake/hybrid", methods=["POST"])
+async def snowflake_hybrid(request: Request) -> JSONResponse:
+    """
+    Snowflake External Function 형식 — 통합 검색.
+
+    Snowflake SQL:
+        SELECT search_ontology_hybrid(query, limit) FROM ...
+    요청: {"data": [[0, "DS 매출 감소 원인", 8]]}
+    응답: {"data": [[0, {semantic_results:[...], graph_results:[...]}]]}
+    """
+    if not _check_auth(request):
+        return _auth_error()
+    try:
+        body = await request.json()
+        rows = body.get("data", [])
+        out  = []
+        for row in rows:
+            idx   = row[0]
+            query = str(row[1]) if len(row) > 1 else ""
+            limit = int(row[2]) if len(row) > 2 else 8
+            try:
+                result = hybrid_search(query=query, limit=limit)
+                out.append([idx, result])
+            except Exception as e:
+                out.append([idx, {"error": str(e)}])
+        return JSONResponse({"data": out})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 # ─── 실행 ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="JoyCity Ontology MCP 서버")
@@ -930,8 +1194,15 @@ if __name__ == "__main__":
 
     if args.transport == "streamable-http":
         print(f"🚀 {DEPT_NAME} Ontology MCP 서버 시작 (Streamable HTTP)")
-        print(f"   주소: http://{args.host}:{args.port}/mcp")
+        print(f"   MCP:  http://{args.host}:{args.port}/mcp")
+        print(f"   REST: http://{args.host}:{args.port}/rest/health")
+        print(f"         http://{args.host}:{args.port}/rest/{{search|graph|events|hybrid}}")
+        print(f"   Snowflake: http://{args.host}:{args.port}/snowflake/{{search|events|hybrid}}")
         print(f"   Claude Code 등록: claude mcp add --transport http {args.dept or 'joycity'}-ontology http://<서버IP>:{args.port}/mcp")
+        if _REST_TOKEN:
+            print(f"   인증: Bearer 토큰 활성화 (SNOWFLAKE_REST_TOKEN)")
+        else:
+            print(f"   인증: 없음 (SNOWFLAKE_REST_TOKEN 미설정)")
         mcp.run(transport="streamable-http", host=args.host, port=args.port)
     elif args.transport == "sse":
         print(f"🚀 {DEPT_NAME} Ontology MCP 서버 시작 (SSE 레거시)")
