@@ -14,7 +14,8 @@ USE SCHEMA   PUBLIC;          -- ← 실제 스키마로 변경
 -- ngrok URL이 바뀌면 아래 세 UDF만 재생성하면 됩니다.
 
 -- ── 1) 벡터 의미 검색 ─────────────────────────────────────────────
--- 사용 예: SELECT sementica_search('POTC 마케팅 이력', 5);
+-- 사용 예: SELECT sementica_search('POTC 마케팅 이력', 3);
+-- Cortex Agent 권장 limit: 3 (속도 최적화)
 CREATE OR REPLACE FUNCTION sementica_search(query VARCHAR, lim NUMBER)
   RETURNS VARIANT
   LANGUAGE PYTHON
@@ -79,7 +80,9 @@ $$;
 
 
 -- ── 3) 벡터 + 그래프 통합 검색 ────────────────────────────────────
--- 사용 예: SELECT sementica_hybrid('DS 매출 감소 원인', 8);
+-- 사용 예: SELECT sementica_hybrid('DS 매출 감소 원인', 3);
+-- Cortex Agent에서는 엔티티 관계가 반드시 필요한 경우에만 사용 (sementica_search보다 느림)
+-- Cortex Agent 권장 limit: 3 (속도 최적화)
 CREATE OR REPLACE FUNCTION sementica_hybrid(query VARCHAR, lim NUMBER)
   RETURNS VARIANT
   LANGUAGE PYTHON
