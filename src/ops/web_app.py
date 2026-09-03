@@ -322,6 +322,43 @@ def api_qdrant_stats():
         return {"error": str(e), "collections": []}
 
 
+# ─── Qdrant page_id 청크 조회 ────────────────────────────────────────────────
+@app.get("/api/qdrant-chunks")
+def api_qdrant_chunks(page_id: str, dept: str = "strategic"):
+    """특정 page_id에 속한 모든 Qdrant 청크를 chunk_index 순으로 반환."""
+    try:
+        from dept_config import load_dept
+        collection = load_dept(dept)["qdrant_collection"]
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        qc = QdrantClient(url=QDRANT_URL, timeout=10)
+        results, _ = qc.scroll(
+            collection_name=collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]
+            ),
+            limit=200,
+            with_payload=True,
+            with_vectors=False,
+        )
+        chunks = []
+        for point in results:
+            p = point.payload or {}
+            chunks.append({
+                "id":          str(point.id),
+                "chunk_index": p.get("chunk_index", 0),
+                "chunk_total": p.get("chunk_total", 0),
+                "text":        p.get("text", ""),
+                "title":       p.get("title", ""),
+                "source_url":  p.get("source_url", ""),
+            })
+        chunks.sort(key=lambda x: x["chunk_index"])
+        return {"page_id": page_id, "collection": collection,
+                "count": len(chunks), "chunks": chunks}
+    except Exception as e:
+        return {"error": str(e), "chunks": []}
+
+
 # ─── FalkorDB 통계 ────────────────────────────────────────────────────────────
 @app.get("/api/graph-stats")
 def api_graph_stats(dept: str = "strategic"):
@@ -1009,6 +1046,42 @@ select {
 .err-box { background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.2); border-radius: 5px; padding: 10px 14px; color: #f87171; font-size: 12.5px; margin-bottom: 12px; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+
+/* ── Chunk Modal ── */
+.modal-overlay {
+  display: none; position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,.6); backdrop-filter: blur(3px);
+  align-items: flex-start; justify-content: center; padding: 40px 16px;
+}
+.modal-overlay.open { display: flex; }
+.modal-box {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; width: 100%; max-width: 860px;
+  max-height: calc(100vh - 80px); display: flex; flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0,0,0,.5);
+}
+.modal-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.modal-title { font-weight: 600; font-size: 14px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-meta  { font-size: 11px; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+.modal-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; padding: 2px 6px; border-radius: 4px; }
+.modal-close:hover { color: var(--text); background: var(--border); }
+.modal-body  { overflow-y: auto; padding: 14px 18px; flex: 1; }
+.chunk-card  {
+  border: 1px solid var(--border); border-radius: 6px;
+  margin-bottom: 12px; overflow: hidden;
+}
+.chunk-head  {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 12px; background: rgba(255,255,255,.03);
+  border-bottom: 1px solid var(--border); font-size: 11.5px;
+}
+.chunk-idx   { font-family: 'JetBrains Mono', monospace; color: var(--blue); font-weight: 600; }
+.chunk-id    { font-family: 'JetBrains Mono', monospace; color: var(--muted); font-size: 10px; flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.chunk-body  { padding: 10px 12px; font-size: 12.5px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; }
 </style>
 </head>
 <body>
@@ -1099,12 +1172,28 @@ select {
   </div>
   <div class="table-wrap" style="margin-bottom:8px">
     <table>
-      <thead><tr><th>제목</th><th>단어</th><th>청크</th><th>트리플</th><th>이벤트</th><th>마지막수정</th><th>상태</th></tr></thead>
-      <tbody id="pages-tbody"><tr><td colspan="7" class="empty">로딩 중...</td></tr></tbody>
+      <thead><tr><th>제목</th><th>단어</th><th>청크</th><th>트리플</th><th>이벤트</th><th>마지막수정</th><th>상태</th><th></th></tr></thead>
+      <tbody id="pages-tbody"><tr><td colspan="8" class="empty">로딩 중...</td></tr></tbody>
     </table>
   </div>
   <div id="pages-pagination" style="display:flex;align-items:center;gap:6px;justify-content:center;margin-bottom:24px;flex-wrap:wrap"></div>
 </section>
+
+<!-- ═══════════════ Chunk 모달 ═══════════════ -->
+<div class="modal-overlay" id="chunk-modal" onclick="closeChunkModal(event)">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title" id="chunk-modal-title">—</div>
+        <div class="modal-meta" id="chunk-modal-meta">—</div>
+      </div>
+      <button class="modal-close" onclick="closeChunkModal()">✕</button>
+    </div>
+    <div class="modal-body" id="chunk-modal-body">
+      <div class="empty">로딩 중...</div>
+    </div>
+  </div>
+</div>
 
 <!-- ═══════════════ 배치 탭 ═══════════════ -->
 <section class="tab-content" id="tab-batch">
@@ -1459,6 +1548,7 @@ function renderPageRows(data) {
   document.getElementById('page-count-label').textContent = label;
 
   // 행 렌더링
+  const dept = document.getElementById('dash-dept').value || 'strategic';
   const pb = document.getElementById('pages-tbody');
   pb.innerHTML = pg.length ? pg.map(p => `<tr>
     <td><a href="${p.notion_url||'#'}" target="_blank" title="${escHtml(p.notion_url||'')}">${escHtml(p.title||p.page_id||'—')}</a></td>
@@ -1468,8 +1558,10 @@ function renderPageRows(data) {
     <td>${p.event_count ?? '—'}</td>
     <td>${fmtDt(p.last_edited_time)}</td>
     <td><span class="badge badge-${p.status}">${p.status}</span></td>
+    <td>${p.status === 'ok' ? `<button class="btn btn-sm" style="padding:3px 8px;font-size:11px"
+        onclick="showChunks('${escHtml(p.page_id)}','${escHtml(p.title||p.page_id)}','${dept}')">🔍 청크</button>` : ''}</td>
   </tr>`).join('')
-  : `<tr><td colspan="7" class="empty">${_pageSearch ? '검색 결과 없음' : '페이지 없음 (ingest를 실행하세요)'}</td></tr>`;
+  : `<tr><td colspan="8" class="empty">${_pageSearch ? '검색 결과 없음' : '페이지 없음 (ingest를 실행하세요)'}</td></tr>`;
 
   // 페이지네이션
   renderPagination(curPage, totalPages);
@@ -1910,6 +2002,69 @@ async function loadGoldenHistory() {
   loadDashboard();
   setInterval(loadStatus, 30000);
 })();
+
+// ── Chunk 모달 ────────────────────────────────────────────────────────────────
+async function showChunks(pageId, title, dept) {
+  const modal = document.getElementById('chunk-modal');
+  const body  = document.getElementById('chunk-modal-body');
+  document.getElementById('chunk-modal-title').textContent = title || pageId;
+  document.getElementById('chunk-modal-meta').textContent  = 'page_id: ' + pageId;
+  body.innerHTML = '<div class="empty">⏳ Qdrant 조회 중...</div>';
+  modal.classList.add('open');
+
+  try {
+    const data = await fetch(
+      `/api/qdrant-chunks?page_id=${encodeURIComponent(pageId)}&dept=${encodeURIComponent(dept||'strategic')}`
+    ).then(r => r.json());
+
+    if (data.error) {
+      body.innerHTML = `<div class="err-box">오류: ${escHtml(data.error)}</div>`;
+      return;
+    }
+
+    const chunks = data.chunks || [];
+    if (!chunks.length) {
+      body.innerHTML = `<div class="empty">Qdrant에 저장된 청크가 없습니다.<br><small style="color:var(--muted)">컬렉션: ${escHtml(data.collection||'—')}</small></div>`;
+      return;
+    }
+
+    // 헤더 정보
+    const sourceUrl = chunks[0].source_url || '';
+    const notionLink = sourceUrl
+      ? `<a href="${escHtml(sourceUrl)}" target="_blank" style="color:var(--blue);text-decoration:none;font-size:11px">🔗 Notion 원본</a>`
+      : '';
+
+    let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+      <span style="font-size:12px;color:var(--muted)">컬렉션: <b style="color:var(--text)">${escHtml(data.collection)}</b></span>
+      <span style="font-size:12px;color:var(--muted)">총 <b style="color:var(--blue)">${chunks.length}</b>개 청크</span>
+      ${notionLink}
+    </div>`;
+
+    html += chunks.map(c => `
+      <div class="chunk-card">
+        <div class="chunk-head">
+          <span class="chunk-idx">chunk ${c.chunk_index + 1} / ${c.chunk_total || chunks.length}</span>
+          <span class="chunk-id">${escHtml(c.id)}</span>
+          <span style="font-size:11px;color:var(--muted)">${c.text.length}자</span>
+        </div>
+        <div class="chunk-body">${escHtml(c.text)}</div>
+      </div>`).join('');
+
+    body.innerHTML = html;
+  } catch (e) {
+    body.innerHTML = `<div class="err-box">요청 실패: ${escHtml(String(e))}</div>`;
+  }
+}
+
+function closeChunkModal(event) {
+  // overlay 클릭 시 닫기 (modal-box 클릭은 무시)
+  if (event && event.target !== document.getElementById('chunk-modal')) return;
+  document.getElementById('chunk-modal').classList.remove('open');
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') document.getElementById('chunk-modal').classList.remove('open');
+});
 </script>
 </body>
 </html>"""

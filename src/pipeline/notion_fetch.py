@@ -293,7 +293,14 @@ def safe_filename(title: str) -> str:
 
 
 # ─── 페이지 저장 ──────────────────────────────────────────────────────────────
-def save_page(client, token, page, idx, output_dir: Path) -> dict:
+def save_page(client, token, page, idx, output_dir: Path,
+              min_words: int = 30) -> dict:
+    """Notion 페이지를 .md 로 저장합니다.
+
+    Args:
+        min_words: 이 단어 수 미만인 페이지는 .md 파일을 저장하지 않고 건너뜁니다.
+                   기본값 30. --min-words CLI 인수로 조정 가능.
+    """
     page_id      = page["id"].replace("-", "")
     title        = page_title(page)
     url          = page.get("url", "")
@@ -308,6 +315,13 @@ def save_page(client, token, page, idx, output_dir: Path) -> dict:
     try:
         text       = fetch_blocks_recursive(client, token, page_id)
         word_count = len(text.split())
+
+        # ── 텍스트 부족 페이지는 저장하지 않고 건너뜀 ──────────────────────
+        if word_count < min_words:
+            print(f"        ⏭️  건너뜀: {word_count} 단어 (최소 {min_words} 단어 미만)")
+            return {"idx": idx, "title": title, "url": url, "page_id": page_id,
+                    "word_count": word_count, "file": None, "meaningful": False,
+                    "db_properties": db_props, "skip_reason": "텍스트 부족"}
 
         # frontmatter 구성 — DB 속성이 있으면 db_properties 줄 추가
         frontmatter = (
@@ -325,10 +339,9 @@ def save_page(client, token, page, idx, output_dir: Path) -> dict:
         out_path = output_dir / fname
         out_path.write_text(frontmatter + text, encoding="utf-8")
 
-        ok = word_count >= 30
-        print(f"        저장: {fname} ({word_count} 단어) {'✅' if ok else '⚠️ 텍스트 부족'}")
+        print(f"        저장: {fname} ({word_count} 단어) ✅")
         return {"idx": idx, "title": title, "url": url, "page_id": page_id,
-                "word_count": word_count, "file": str(out_path), "meaningful": ok,
+                "word_count": word_count, "file": str(out_path), "meaningful": True,
                 "db_properties": db_props}
     except Exception as e:
         print(f"        ❌ 오류: {e}")
@@ -347,6 +360,8 @@ def main():
                         help="사용 가능한 본부 목록 출력 후 종료")
     parser.add_argument("--limit",      type=int, default=0,
                         help="수집 최대 페이지 수 (0=무제한, 기본: 0)")
+    parser.add_argument("--min-words",  type=int, default=30,
+                        help="저장할 최소 단어 수 (기본: 30). 미만인 페이지는 .md 파일을 만들지 않음")
     args = parser.parse_args()
 
     # 본부 목록 출력
@@ -373,12 +388,13 @@ def main():
     print(f"   저장 경로: {output_dir}")
     print("=" * 60)
 
+    min_words = args.min_words
     results = []
     with httpx.Client(timeout=60) as client:
         if args.page_id:
             # 특정 페이지
             page = fetch_page_meta(client, token, args.page_id)
-            results.append(save_page(client, token, page, 1, output_dir))
+            results.append(save_page(client, token, page, 1, output_dir, min_words=min_words))
 
         elif args.search:
             # 검색어 수집
@@ -387,7 +403,7 @@ def main():
             print(f"   {len(pages)}개 발견\n")
             limit = args.limit or len(pages)
             for i, page in enumerate(pages[:limit], 1):
-                results.append(save_page(client, token, page, i, output_dir))
+                results.append(save_page(client, token, page, i, output_dir, min_words=min_words))
                 print()
 
         else:
@@ -399,17 +415,21 @@ def main():
             pages = fetch_all_pages(client, token, limit=args.limit)
             print(f"\n   총 {len(pages)}개 페이지 수집 완료\n")
             for i, page in enumerate(pages, 1):
-                results.append(save_page(client, token, page, i, output_dir))
+                results.append(save_page(client, token, page, i, output_dir, min_words=min_words))
                 print()
 
     # 결과 요약
-    meaningful = [r for r in results if r.get("meaningful")]
-    skipped    = [r for r in results if not r.get("meaningful")]
+    meaningful   = [r for r in results if r.get("meaningful")]
+    skipped_text = [r for r in results if r.get("skip_reason") == "텍스트 부족"]
+    errored      = [r for r in results if r.get("error")]
 
     print("\n" + "=" * 60)
     print(f"📊 수집 완료 — {dept_cfg['name']}")
-    print(f"   전체: {len(results)}개 / 유효: {len(meaningful)}개 / 건너뜀: {len(skipped)}개")
-    print(f"   저장: {output_dir}")
+    print(f"   전체: {len(results)}개")
+    print(f"   저장: {len(meaningful)}개 ✅")
+    print(f"   텍스트 부족 ({min_words}단어 미만): {len(skipped_text)}개 ⏭️  (파일 미생성)")
+    print(f"   오류: {len(errored)}개")
+    print(f"   저장 경로: {output_dir}")
     print("=" * 60)
 
     # 요약 저장

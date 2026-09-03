@@ -17,11 +17,13 @@ SELECT sementica_search('테스트', 1) AS health_check;
 -- ── 2) 벡터 검색 ─────────────────────────────────────────────────
 SELECT sementica_search('POTC 마케팅 이력', 5) AS result;
 
--- VARIANT 내부 파싱
+-- VARIANT 내부 파싱 (Parent Document Retrieval 적용 후 content 필드 사용)
 SELECT
-    value:title::VARCHAR  AS title,
-    value:score::FLOAT    AS score,
-    value:source::VARCHAR AS source
+    value:title::VARCHAR       AS title,
+    value:score::FLOAT         AS score,
+    value:source_url::VARCHAR  AS source_url,
+    value:content::VARCHAR     AS full_content,   -- 전체 페이지 본문 (최대 4000자)
+    value:chunk_count::INTEGER AS chunk_count
 FROM TABLE(FLATTEN(
     input => sementica_search('POTC 마케팅 이력', 5):results
 ));

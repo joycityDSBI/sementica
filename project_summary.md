@@ -124,10 +124,23 @@ AFFECTS, GENERATES, REFERENCES, RESOLVES, COMPETES_WITH
 - **포트**: 8765
 - **프로토콜**: Streamable HTTP (FastMCP 4.0.0)
 - **도구 (Tools)**:
-  - `semantic_search(query, limit)` — 벡터 유사도 검색
+  - `semantic_search(query, limit)` — 벡터 유사도 검색 + **Parent Document Retrieval**
   - `graph_search(entity, depth)` — 그래프 엔티티 탐색
   - `timeline_search(game, event_type, from_date, to_date, limit)` — 이벤트 이력
-  - `hybrid_search(query, limit)` — 벡터 + 그래프 통합
+  - `hybrid_search(query, limit)` — 벡터 + 그래프 통합 + **Parent Document Retrieval**
+
+**Parent Document Retrieval (2026-09-03 적용)**
+```
+벡터 유사도 → 상위 k 청크 → page_id 수집
+                                ↓
+          Qdrant scroll (page_id MatchAny 필터)
+                                ↓
+     같은 page_id의 모든 청크 → chunk_index 정렬 → 전체 본문 조합
+                                ↓
+     반환: {title, source_url, content(최대 4000자), chunk_count, score}
+```
+- 기존: `text_preview` (300자 미리보기) → 청크 단위 단편적 문맥
+- 개선: `content` (전체 페이지, 최대 4000자) → 완전한 문맥 해석
 - **실행**:
   ```bash
   python src/mcp/server.py --dept strategic

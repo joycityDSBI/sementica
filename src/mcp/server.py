@@ -172,26 +172,121 @@ def _decompose_query(query: str) -> list[str]:
     return [query]   # 분해 실패 시 원본 유지
 
 
+def _fetch_full_pages(
+    qc,
+    collection_name: str,
+    page_ids: list,
+    max_chars: int = 4000,
+) -> dict:
+    """
+    주어진 page_id 목록의 모든 청크를 Qdrant scroll로 조회해
+    청크 순서대로 조합한 전체 본문을 반환합니다.
+
+    Parent Document Retrieval 패턴:
+      벡터 유사도로 청크를 찾은 뒤, 같은 page_id를 가진 모든 청크를
+      chunk_index 순으로 이어붙여 문맥 손실 없이 전체 페이지를 반환합니다.
+
+    Returns:
+        {page_id: {"title", "source_url", "page_id", "content", "chunk_count"}}
+    """
+    if not page_ids:
+        return {}
+
+    from qdrant_client.models import Filter, FieldCondition, MatchAny
+
+    pages: dict = {}
+    offset = None
+
+    while True:
+        scroll_result, next_offset = qc.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="page_id",
+                        match=MatchAny(any=page_ids),
+                    )
+                ]
+            ),
+            limit=500,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        for point in scroll_result:
+            p = point.payload or {}
+            pid = p.get("page_id", "")
+            if not pid:
+                continue
+            if pid not in pages:
+                pages[pid] = {
+                    "title":      p.get("title", ""),
+                    "source_url": p.get("source_url", ""),
+                    "page_id":    pid,
+                    "chunks":     [],
+                }
+            pages[pid]["chunks"].append({
+                "index": p.get("chunk_index", 9999),
+                "text":  p.get("text", ""),
+            })
+
+        offset = next_offset
+        if offset is None:
+            break
+
+    assembled: dict = {}
+    for pid, page in pages.items():
+        sorted_chunks = sorted(page["chunks"], key=lambda c: c["index"])
+        full_text = "\n\n".join(c["text"] for c in sorted_chunks)
+        assembled[pid] = {
+            "title":       page["title"],
+            "source_url":  page["source_url"],
+            "page_id":     pid,
+            "content":     full_text[:max_chars],
+            "chunk_count": len(sorted_chunks),
+        }
+
+    return assembled
+
+
 def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
-    """서브쿼리 단위 벡터+그래프 검색 (내부 헬퍼)"""
-    # ─ 벡터 검색 ─
+    """서브쿼리 단위 벡터+그래프 검색 (내부 헬퍼)
+
+    Parent Document Retrieval 적용:
+    벡터 유사도로 top-k 청크를 찾은 뒤, 매칭된 page_id의 전체 청크를
+    조합해 완전한 페이지 본문을 반환합니다.
+    """
+    # ─ 벡터 검색 + Parent Document Retrieval ─
     sem: list = []
     try:
         vec = _embed(sub_query)
         qc = _get_qdrant()
-        result = qc.query_points(
+        hit = qc.query_points(
             collection_name=COLLECTION_NAME,
             query=vec,
             limit=limit,
             with_payload=True,
         )
-        for h in result.points:
+
+        # 매칭된 청크에서 page_id별 최고 유사도 점수 수집
+        page_scores: dict = {}
+        for h in hit.points:
             p = h.payload or {}
+            pid = p.get("page_id", "")
+            score = round(h.score, 4)
+            if pid and (pid not in page_scores or score > page_scores[pid]):
+                page_scores[pid] = score
+
+        # 해당 page_id의 모든 청크를 조합해 전체 페이지 본문 반환
+        full_pages = _fetch_full_pages(qc, COLLECTION_NAME, list(page_scores.keys()))
+        for pid, page in full_pages.items():
             sem.append({
-                "title":        p.get("title", ""),
-                "source_url":   p.get("source_url", ""),
-                "text_preview": p.get("text", "")[:300],
-                "score":        round(h.score, 4),
+                "title":       page["title"],
+                "source_url":  page["source_url"],
+                "content":     page["content"],
+                "chunk_count": page["chunk_count"],
+                "score":       page_scores.get(pid, 0.0),
             })
     except Exception:
         pass
@@ -344,11 +439,19 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
 
     Returns:
         list of {
-            title:        Notion 페이지 제목,
-            source_url:   Notion 원본 URL,
-            text_preview: 관련 본문 앞 300자,
-            score:        유사도 점수 (0~1, 높을수록 관련성 높음)
+            title:       Notion 페이지 제목,
+            source_url:  Notion 원본 URL (반드시 인용),
+            content:     페이지 전체 본문 (최대 4000자, chunk_index 순 조합),
+            chunk_count: 이 페이지의 총 청크 수,
+            score:       유사도 점수 (0~1, 높을수록 관련성 높음)
         }
+
+    Note:
+        Parent Document Retrieval 적용:
+        벡터 유사도로 top-k 청크를 찾은 뒤, 해당 청크와 같은 page_id를 가진
+        모든 청크를 chunk_index 순서대로 이어붙여 완전한 문맥을 반환합니다.
+        단순 청크 미리보기(text_preview) 대신 전체 본문을 제공하므로
+        문맥 손실 없이 정확한 해석이 가능합니다.
     """
     _t0 = time.time()
     _err = None
@@ -356,20 +459,35 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     try:
         vec = _embed(query)
         qc = _get_qdrant()
-        result = qc.query_points(
+        hit = qc.query_points(
             collection_name=COLLECTION_NAME,
             query=vec,
             limit=limit,
             with_payload=True,
         )
-        for h in result.points:
+
+        # 매칭된 청크에서 page_id별 최고 유사도 점수 수집
+        page_scores: dict = {}
+        for h in hit.points:
             p = h.payload or {}
+            pid = p.get("page_id", "")
+            score = round(h.score, 4)
+            if pid and (pid not in page_scores or score > page_scores[pid]):
+                page_scores[pid] = score
+
+        # Parent Document Retrieval: page_id의 전체 청크 조합
+        full_pages = _fetch_full_pages(qc, COLLECTION_NAME, list(page_scores.keys()))
+        for pid, page in full_pages.items():
             results.append({
-                "title":        p.get("title", ""),
-                "source_url":   p.get("source_url", ""),
-                "text_preview": p.get("text", "")[:300],
-                "score":        round(h.score, 4),
+                "title":       page["title"],
+                "source_url":  page["source_url"],
+                "content":     page["content"],
+                "chunk_count": page["chunk_count"],
+                "score":       page_scores.get(pid, 0.0),
             })
+
+        # 유사도 점수 기준 내림차순 정렬
+        results.sort(key=lambda x: x["score"], reverse=True)
         return results
     except Exception as e:
         _err = str(e)
@@ -590,7 +708,7 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
 
     Returns:
         {
-            semantic_results: 벡터 검색 결과 목록 [{title, source_url, text_preview, score, coverage}],
+            semantic_results: 벡터 검색 결과 목록 [{title, source_url, content, chunk_count, score, coverage}],
             graph_results:    그래프 탐색 결과 목록 [{entity, type, outgoing, incoming}],
             entity_summary:   관계 요약 문자열 목록 ["엔티티A → 관계 → 엔티티B", ...],
             decomposed:       복합 쿼리 분해 여부 (true/false),

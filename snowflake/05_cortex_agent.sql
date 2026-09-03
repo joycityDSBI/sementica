@@ -212,12 +212,14 @@ def run(session, question: str) -> dict:
             sem_result = call_semantica(question)
             output['ontology_used'] = True
 
-            # 의미 검색 결과 요약
+            # 의미 검색 결과 요약 (Parent Document Retrieval: 전체 본문 최대 800자)
             sem_parts = []
             for r in sem_result.get('semantic_results', [])[:5]:
-                title   = r.get('title', '')
-                content = r.get('content', r.get('text', ''))[:300]
-                sem_parts.append(f"• {title}: {content}")
+                title      = r.get('title', '')
+                source_url = r.get('source_url', '')
+                content    = r.get('content', r.get('text_preview', ''))[:800]
+                url_ref    = f" ({source_url})" if source_url else ''
+                sem_parts.append(f"• {title}{url_ref}\n  {content}")
 
             # 그래프 결과 요약
             for r in sem_result.get('graph_results', [])[:3]:
