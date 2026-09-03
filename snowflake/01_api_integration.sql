@@ -19,7 +19,7 @@ USE ROLE ACCOUNTADMIN;
 -- NGROK_URL 자리에 실제 ngrok 주소 입력 (슬래시로 끝내야 함)
 CREATE OR REPLACE API INTEGRATION semantica_api_integration
   API_PROVIDER        = generic_public
-  API_ALLOWED_PREFIXES = ('https://NGROK_URL_HERE/')   -- ← 여기 수정
+  API_ALLOWED_PREFIXES = ('https://agility-unadvised-constrain.ngrok-free.dev/')
   ENABLED             = TRUE;
 
 -- 생성 확인

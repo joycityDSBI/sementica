@@ -29,7 +29,7 @@ CREATE OR REPLACE EXTERNAL FUNCTION sementica_search(
 )
   RETURNS VARIANT
   API_INTEGRATION = semantica_api_integration
-  AS 'https://NGROK_URL_HERE/snowflake/search';   -- ← 수정
+  AS 'https://agility-unadvised-constrain.ngrok-free.dev/snowflake/search';
 
 
 -- ── 2) 시계열 이벤트 이력 조회 ──────────────────────────────────
@@ -45,7 +45,7 @@ CREATE OR REPLACE EXTERNAL FUNCTION sementica_events(
 )
   RETURNS VARIANT
   API_INTEGRATION = semantica_api_integration
-  AS 'https://NGROK_URL_HERE/snowflake/events';   -- ← 수정
+  AS 'https://agility-unadvised-constrain.ngrok-free.dev/snowflake/events';
 
 
 -- ── 3) 벡터 + 그래프 통합 검색 ──────────────────────────────────
@@ -58,7 +58,7 @@ CREATE OR REPLACE EXTERNAL FUNCTION sementica_hybrid(
 )
   RETURNS VARIANT
   API_INTEGRATION = semantica_api_integration
-  AS 'https://NGROK_URL_HERE/snowflake/hybrid';   -- ← 수정
+  AS 'https://agility-unadvised-constrain.ngrok-free.dev/snowflake/hybrid';
 
 
 -- ── 생성 확인 ──────────────────────────────────────────────────
