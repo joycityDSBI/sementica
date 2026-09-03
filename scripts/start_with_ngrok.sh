@@ -28,6 +28,9 @@ REST_PORT="${SNOWFLAKE_REST_PORT:-8766}"
 
 cd "$PROJECT_ROOT"
 
+# ── logs 디렉토리 생성 ─────────────────────────────────────────
+mkdir -p logs
+
 echo "================================================"
 echo "  Semantica REST API + ngrok 시작"
 echo "  본부: $DEPT  포트: $REST_PORT"
