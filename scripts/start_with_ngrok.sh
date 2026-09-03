@@ -19,8 +19,6 @@
 #   snowflake/02_external_functions.sql — NGROK_URL_HERE 교체
 # ================================================================
 
-set -e
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DEPT="${DEPT:-strategic}"
@@ -48,7 +46,7 @@ nohup python src/mcp/rest_api.py --dept "$DEPT" --port "$REST_PORT" \
     > logs/rest_api.log 2>&1 &
 REST_PID=$!
 echo "  PID: $REST_PID"
-sleep 2
+sleep 5
 
 # 헬스 체크
 if curl -s "http://localhost:$REST_PORT/rest/health" | grep -q '"ok"'; then
