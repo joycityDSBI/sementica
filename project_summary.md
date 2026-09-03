@@ -1,7 +1,7 @@
 # Semantica — 프로젝트 전체 요약
 
 > JoyCity 전략사업본부 Notion 기반 온톨로지 검색 솔루션  
-> 최종 업데이트: 2026-09-03
+> 최종 업데이트: 2026-09-03 (Parent Document Retrieval, 대시보드 청크 뷰어, notion_fetch 개선)
 
 ---
 
@@ -68,16 +68,50 @@ Notion 문서 → 전처리·임베딩 → Qdrant(벡터) + FalkorDB(그래프)
 
 ## 4. 데이터 파이프라인
 
-### 4-1. 전체 수집 (Full Ingest)
+### 4-1. Notion 페이지 수집 (`notion_fetch.py`)
+```bash
+python src/pipeline/notion_fetch.py --dept strategic
+python src/pipeline/notion_fetch.py --dept strategic --min-words 50   # 최소 단어 수 지정
+```
+- Notion API에서 전체 페이지 메타 + 본문 수집
+- `.md` 파일로 `data/strategic/notion_pages/` 에 저장
+- **`--min-words` 옵션 (기본 30)**: 단어 수 미만 페이지는 `.md` 파일 **미생성** (저장 전 필터링)
+  - 기존: 저장 후 `⚠️ 텍스트 부족` 표시 → ingest 단계에서 건너뜀
+  - 개선: 수집 단계에서 미리 제외 → 불필요한 파일 생성 없음
+
+### 4-2. 전체 인제스트 (Full Ingest)
 ```bash
 python src/pipeline/ingest.py --dept strategic
 ```
-- Notion API에서 전체 페이지 수집
-- 텍스트 청크 분할 → 임베딩 → Qdrant 저장
+- `.md` 파일 읽기 → 텍스트 청크 분할 → 임베딩 → Qdrant 저장
 - LLM으로 트리플(주어-관계-목적어) 추출 → FalkorDB 저장
 - PostgreSQL `notion_pages` 테이블 UPSERT
+- `--reset`: Qdrant 컬렉션 + FalkorDB 그래프 삭제 후 재구축
 
-### 4-2. 증분 동기화 (Incremental Sync)
+### 4-3. 완전 초기화 후 재인제스트
+```bash
+# Step 1: Notion 재수집
+python src/pipeline/notion_fetch.py --dept strategic
+
+# Step 2: Qdrant + FalkorDB 수동 초기화
+#   (ingest.py --reset 의 FalkorDB 삭제가 묵음 실패할 수 있으므로 수동 삭제)
+python3 -c "
+from qdrant_client import QdrantClient
+import falkordb
+QdrantClient(url='http://localhost:6333').delete_collection('strategic_pages')
+falkordb.FalkorDB(host='localhost', port=6379).select_graph('strategic_kg').delete()
+print('초기화 완료')
+"
+
+# Step 3: 재인제스트
+python src/pipeline/ingest.py --dept strategic
+```
+
+> ⚠️ **주의**: PostgreSQL `notion_pages` 테이블은 `--reset`으로 초기화되지 않음.
+> ingest가 UPSERT로 덮어쓰므로 실제 데이터 정합성에는 문제 없음.
+> 대시보드의 "전체 페이지" 수치는 PostgreSQL 누적 기록이며 Qdrant 실제 벡터 수와 다를 수 있음.
+
+### 4-4. 증분 동기화 (Incremental Sync)
 ```bash
 python src/pipeline/sync.py --dept strategic
 ```
@@ -88,7 +122,7 @@ python src/pipeline/sync.py --dept strategic
   - 동일하면 skip
 - 처리 결과를 `sync_log`에 기록
 
-### 4-3. 노드/엣지 구조 (FalkorDB)
+### 4-5. 노드/엣지 구조 (FalkorDB)
 
 **엔티티 타입 (8종 고정)**
 | 타입 | 설명 | 예시 |
@@ -146,7 +180,42 @@ AFFECTS, GENERATES, REFERENCES, RESOLVES, COMPETES_WITH
   python src/mcp/server.py --dept strategic
   ```
 
-### 5-2. REST API 서버 (`src/mcp/rest_api.py`)
+### 5-2. 웹 운영 대시보드 (`src/ops/web_app.py`)
+- **포트**: 8080
+- **프레임워크**: FastAPI + uvicorn
+- **탭 구성**: 현황 / 배치 실행 / 검색 테스트 / 골든셋
+- **주요 API 엔드포인트**:
+
+  | 경로 | 설명 |
+  |------|------|
+  | `GET /api/pages` | PostgreSQL `notion_pages` 페이지 목록 (dept 필터, 제목 검색) |
+  | `GET /api/qdrant-stats` | Qdrant 전체 컬렉션 통계 |
+  | `GET /api/qdrant-chunks` | **특정 `page_id`의 모든 청크 조회** (신규) |
+  | `GET /api/graph-stats` | FalkorDB 노드·엣지·이벤트 수 |
+  | `GET /api/sync-log` | 동기화 이력 |
+  | `POST /api/batch/run` | 배치 작업 실행 (fetch/ingest/sync 등) |
+
+- **`/api/qdrant-chunks` 기능 (2026-09-03 추가)**:
+  - 페이지 목록에서 status=ok 행마다 **🔍 청크** 버튼 표시
+  - 클릭 시 모달 팝업: 해당 page_id의 Qdrant 청크 전체를 `chunk_index` 순으로 표시
+  - 각 청크의 내용, 길이, UUID, Notion 원본 링크 확인 가능
+  - Parent Document Retrieval 조합 결과를 사전 검증하는 용도
+
+- **대시보드 수치 출처**:
+
+  | 카드 | 출처 | 비고 |
+  |------|------|------|
+  | 전체 페이지 | PostgreSQL `notion_pages` | 누적 기록 (reset 무관) |
+  | 벡터 청크 | PostgreSQL `SUM(chunk_count)` | Qdrant 실제 수와 다를 수 있음 |
+  | 그래프 노드/엣지 | FalkorDB | 현재 그래프 실제 수 |
+  | 이벤트 / 게임 | FalkorDB | `:Event` / `:Game` 노드 수 |
+
+- **실행**:
+  ```bash
+  nohup python src/ops/web_app.py > logs/web_app.log 2>&1 &
+  ```
+
+### 5-3. REST API 서버 (`src/mcp/rest_api.py`)
 - **포트**: 8766
 - **프레임워크**: Starlette + uvicorn
 - **인증**: `SNOWFLAKE_REST_TOKEN` Bearer 토큰 (미설정 시 인증 없음)
@@ -222,7 +291,9 @@ Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 �
 
 ---
 
-## 7. 운영 스크립트
+## 7. 운영 스크립트 및 재시작
+
+### 7-1. 스크립트 목록
 
 | 스크립트 | 용도 |
 |---------|------|
@@ -231,6 +302,44 @@ Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 �
 | `scripts/backup_to_gcs.sh` | GCS 백업 |
 | `scripts/create_indexes.py` | Qdrant 인덱스 생성 |
 | `scripts/test_mcp.py` | MCP 서버 테스트 |
+
+### 7-2. 서비스 재시작 (git pull 후)
+
+```bash
+git pull
+
+# 전체 재시작
+pkill -f rest_api.py; pkill -f ngrok; pkill -f web_app.py; pkill -f "server.py"
+sleep 2
+
+# REST API + ngrok (bash로 실행 — 파일시스템 noexec 우회)
+bash scripts/start_with_ngrok.sh
+
+# 웹 대시보드
+nohup python src/ops/web_app.py > logs/web_app.log 2>&1 &
+
+# MCP 서버
+nohup python src/mcp/server.py --dept strategic \
+  --transport streamable-http --port 8765 > logs/mcp.log 2>&1 &
+```
+
+> ⚠️ **`./scripts/start_with_ngrok.sh` Permission denied 발생 시**:  
+> `bash scripts/start_with_ngrok.sh` 으로 실행 (파일시스템 noexec 마운트 우회)
+
+### 7-3. FalkorDB 수동 초기화
+
+`ingest.py --reset` 의 FalkorDB 삭제는 예외를 묵음 처리하므로 실패해도 알 수 없음.
+완전 초기화가 필요할 때는 수동으로 삭제:
+
+```bash
+python3 -c "
+import falkordb
+falkordb.FalkorDB(host='localhost', port=6379).select_graph('strategic_kg').delete()
+print('FalkorDB 삭제 완료')
+"
+```
+
+> `delete_graph()` 메서드 없음 → `select_graph().delete()` 사용
 
 ---
 
@@ -246,11 +355,13 @@ Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 �
 | 6 | ngrok HTTPS 터널 | ✅ | `start_with_ngrok.sh` |
 | 7 | Snowflake External Network Access | ✅ | `01_network_access.sql` |
 | 8 | Snowflake Python UDF | ✅ | `02_python_udfs.sql`, 테스트 완료 |
-| 9 | Cortex Analyst YAML 모델 | 🔜 | Step 4 — KPI/매출 테이블 필요 |
-| 10 | Cortex Agent 도구 정의 | 🔜 | Step 5 |
-| 11 | End-to-End 통합 테스트 | 🔜 | Step 6 |
-| 12 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
-| 13 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
+| 9 | Parent Document Retrieval | ✅ | `server.py` `_fetch_full_pages()`, 2026-09-03 |
+| 10 | 웹 대시보드 Qdrant 청크 뷰어 | ✅ | `web_app.py` `/api/qdrant-chunks` + 모달 UI |
+| 11 | notion_fetch `--min-words` 필터 | ✅ | 수집 단계에서 텍스트 부족 페이지 제외 |
+| 12 | Cortex Analyst YAML 모델 | 🔜 | KPI/매출 테이블 시맨틱 모델 작성 필요 |
+| 13 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
+| 14 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
+| 15 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
 
 ---
 
@@ -286,5 +397,22 @@ SNOWFLAKE_REST_PORT=8766
 |------|------|
 | ngrok 무료 플랜 | 재시작 시 URL 변경 → Snowflake UDF 재생성 필요 |
 | HTTPS 미설정 | 현재 ngrok으로 우회 중, 프로덕션 시 고정 HTTPS 필요 |
+| FalkorDB `delete_graph()` 미지원 | `select_graph().delete()` 로 대체, `--reset` 묵음 실패 가능 |
+| 대시보드 벡터 청크 수치 | PostgreSQL SUM이므로 Qdrant 실제 벡터 수와 다를 수 있음 |
+| 스크립트 실행 권한 | 파일시스템 noexec 마운트 시 `bash script.sh` 로 우회 |
 | FalkorDB 시각화 | 공식 UI 없음, `redis-cli` 또는 커스텀 웹앱으로 조회 |
 | Snowflake 계정 | `SEONGIN-us-central1.gcp` |
+
+---
+
+## 11. 변경 이력
+
+| 날짜 | 내용 |
+|------|------|
+| 2026-09-03 | Parent Document Retrieval 적용 (server.py) — 청크 단위 → 페이지 전체 본문 반환 |
+| 2026-09-03 | 웹 대시보드 Qdrant 청크 뷰어 추가 (web_app.py) — 🔍 청크 버튼 + 모달 UI |
+| 2026-09-03 | notion_fetch `--min-words` 옵션 추가 — 수집 단계에서 텍스트 부족 페이지 제외 |
+| 2026-09-03 | Snowflake 05_cortex_agent.sql — content 필드 반영, source_url 인용 강화 |
+| 2026-09-03 | FalkorDB 초기화 방법 확인 — `delete_graph()` 없음, `select_graph().delete()` 사용 |
+| 2026-09-03 | ngrok HTTPS 터널 + REST API 서버 + 웹 대시보드 구성 완료 |
+| 2026-09-03 | Snowflake Python UDF 3종 (`sementica_search/events/hybrid`) 구현·테스트 완료 |
