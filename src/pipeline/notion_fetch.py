@@ -460,7 +460,7 @@ def save_page(client, token, page, idx, output_dir: Path,
         # ── 텍스트 부족 페이지는 저장하지 않고 건너뜀 ──────────────────────
         # DB 항목은 구조적 데이터 — 속성값이 하나라도 있으면 단어 수 기준 완화 (5단어)
         # 일반 페이지는 min_words(기본 30단어) 기준 유지
-        effective_min = 5 if db_props else min_words
+        effective_min = 1 if db_props else min_words
         if word_count < effective_min:
             print(f"        ⏭️  건너뜀: {word_count} 단어 (최소 {effective_min} 단어 미만)")
             return {"idx": idx, "title": title, "url": url, "page_id": page_id,

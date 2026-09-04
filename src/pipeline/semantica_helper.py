@@ -990,7 +990,7 @@ def classify_page(body: str, meta: dict, word_count: int) -> str:
     # DB row는 속성값을 합성한 body를 쓰므로 단어 수가 적어도 의미 있는 데이터.
     # 속성이 하나라도 있으면 core로 처리 (5단어 미만만 제외).
     if meta.get("db_properties"):
-        if word_count < 5:
+        if word_count < 1:
             return "excluded"
         return "core"
 
