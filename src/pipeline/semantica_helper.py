@@ -548,7 +548,98 @@ EVENT_TYPES: frozenset = frozenset([
     "season", "content_release", "maintenance", "incident", "kpi_milestone",
     # UA 마케팅 이벤트 (ingest.py / sync.py EVENT_EXTRACT_PROMPT와 동기화)
     "ua_budget", "ua_creative", "ua_channel", "ua_targeting", "ua_abtest",
+    # UA 변경 이력 (Notion DB '변경카테고리' 값)
+    "ua_campaign",
 ])
+
+# ─── DB 속성 키 별칭 ─────────────────────────────────────────────────────────
+# Notion DB 컬럼명은 자유롭게 설정되므로, 소문자 비교(case-insensitive)로 처리한다.
+# ingest.py / sync.py 에서 공통으로 사용하는 단일 정의.
+DB_DATE_KEYS    = {
+    "이벤트날짜", "날짜", "일자", "date", "event_date",
+    "시작일", "시작날짜", "변경일", "적용일",
+}
+DB_GAME_KEYS    = {
+    "게임명", "게임", "game", "product", "서비스명", "서비스",
+    "project",          # RESU UA 히스토리 등 영문 PROJECT 컬럼 지원
+}
+DB_TYPE_KEYS    = {
+    "이벤트유형", "유형", "event_type", "type", "종류",
+    "변경카테고리", "카테고리", "category", "change_type", "변경유형",
+}
+DB_MANAGER_KEYS = {
+    "담당자", "담당팀", "manager", "owner", "담당",
+    "생성자", "작성자", "creator",   # Notion DB 생성자·작성자 컬럼 지원
+}
+
+# 변경카테고리 원문 → EVENT_TYPES 정규값 매핑
+# 매핑에 없는 값은 그대로 event_type 으로 사용 (EVENT_TYPES 에 없으면 ua_campaign 으로 폴백)
+_CATEGORY_TO_EVENT_TYPE: dict[str, str] = {
+    "캠페인조정":  "ua_campaign",
+    "캠페인 조정": "ua_campaign",
+    "소재변경":    "ua_creative",
+    "소재 변경":   "ua_creative",
+    "예산변경":    "ua_budget",
+    "예산 변경":   "ua_budget",
+    "국가변경":    "ua_targeting",
+    "국가 변경":   "ua_targeting",
+    "타겟변경":    "ua_targeting",
+    "타겟 변경":   "ua_targeting",
+    "채널변경":    "ua_channel",
+    "채널 변경":   "ua_channel",
+    "ab테스트":    "ua_abtest",
+    "a/b테스트":   "ua_abtest",
+}
+
+
+def event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | None:
+    """
+    Notion DB 속성 딕셔너리에서 :Event 노드 dict를 생성합니다.
+    LLM 없이 100% 정확하게 처리됩니다.
+
+    조건:
+        날짜 필드가 있어야 Event로 변환합니다 (게임명이 없으면 "기타"로 처리).
+
+    지원 컬럼명:
+        날짜   : 날짜, date, 이벤트날짜, 변경일, 적용일 …
+        게임/프로젝트: 게임명, game, PROJECT, product …
+        유형   : 이벤트유형, 변경카테고리, category …
+        담당자 : 담당자, 생성자, creator …
+
+    컬럼명 매칭은 대소문자 무관(case-insensitive)으로 처리됩니다.
+    """
+    # 소문자 키 매핑으로 case-insensitive 비교
+    lower = {k.lower(): v for k, v in db_props.items()}
+
+    def _first(keys: set) -> str | None:
+        for k in keys:
+            v = lower.get(k.lower())
+            if v is not None:
+                return ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
+        return None
+
+    date = _first(DB_DATE_KEYS)
+    if not date:
+        return None  # 날짜 없으면 이벤트 아님
+
+    game     = _first(DB_GAME_KEYS) or "기타"
+    raw_type = _first(DB_TYPE_KEYS) or ""
+    # 변경카테고리 → EVENT_TYPES 정규값 변환
+    event_type = _CATEGORY_TO_EVENT_TYPE.get(raw_type.strip(), raw_type.strip())
+    if event_type not in EVENT_TYPES:
+        event_type = "ua_campaign" if raw_type else "user_event"
+
+    manager_raw = _first(DB_MANAGER_KEYS) or ""
+
+    return {
+        "game":        game,
+        "event_type":  event_type,
+        "date":        date[:10],
+        "title":       title,
+        "description": "",
+        "manager":     manager_raw,
+        "source_url":  source_url,
+    }
 
 
 def _date_to_ts(date_str: str) -> int:

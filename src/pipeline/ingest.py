@@ -40,6 +40,7 @@ from semantica_helper import (
     classify_page,
     content_hash,
     detect_realization_status,
+    event_from_db_props,
     extract_with_fallback,
     find_evidence_chunk_id,
     is_decision_triplet,
@@ -353,39 +354,10 @@ def _norm_pred(val) -> dict:
 
 
 # DB 속성 키 별칭 — 다양한 한국어/영어 컬럼명을 통일
-_DATE_KEYS    = {"이벤트날짜", "날짜", "일자", "date", "event_date", "시작일", "시작날짜"}
-_GAME_KEYS    = {"게임명", "게임", "game", "product", "서비스명", "서비스"}
-_TYPE_KEYS    = {"이벤트유형", "유형", "event_type", "type", "종류"}
-_MANAGER_KEYS = {"담당자", "담당팀", "manager", "owner", "담당"}
-
-
-def _event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | None:
-    """
-    Notion DB 속성에서 이벤트 정보를 추출합니다.
-    날짜 + 게임명이 모두 있을 때만 Event 노드로 변환합니다.
-    LLM 없이 100% 정확하게 처리됩니다.
-    """
-    def _first(keys):
-        for k in keys:
-            if k in db_props:
-                v = db_props[k]
-                return ", ".join(v) if isinstance(v, list) else str(v)
-        return None
-
-    date = _first(_DATE_KEYS)
-    game = _first(_GAME_KEYS)
-    if not date or not game:
-        return None   # 필수 필드 없으면 이벤트 아님
-
-    return {
-        "game":        game,
-        "event_type":  _first(_TYPE_KEYS) or "user_event",
-        "date":        date[:10],
-        "title":       title,
-        "description": "",
-        "manager":     _first(_MANAGER_KEYS) or "",
-        "source_url":  source_url,
-    }
+# event_from_db_props: semantica_helper 에서 import (단일 정의)
+# - 대소문자 무관 컬럼명 매칭
+# - PROJECT, 변경카테고리, 생성자 등 커스텀 컬럼 지원
+# - 변경카테고리 → EVENT_TYPES 정규값 자동 변환
 
 
 def extract_events_from_text(text: str) -> list[dict]:
@@ -717,7 +689,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
 
         # 4a. Notion DB 속성에서 직접 생성 (LLM 없이, 정확도 100%)
         if db_props:
-            ev = _event_from_db_props(db_props, source_url, meta.get("title", ""))
+            ev = event_from_db_props(db_props, source_url, meta.get("title", ""))
             if ev:
                 with _falkordb_lock:
                     nid = upsert_event_node(_falkordb, ev)

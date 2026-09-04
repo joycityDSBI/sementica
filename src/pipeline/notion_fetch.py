@@ -353,10 +353,18 @@ def extract_db_properties(page: dict) -> dict:
 
 
 def page_title(page: dict) -> str:
+    """
+    Notion 페이지의 제목을 반환합니다.
+
+    Notion DB 항목은 title 속성의 컬럼 이름이 자유롭게 설정됩니다.
+    (예: "메모", "이름", "제목", "Name" 등)
+    따라서 이름이 아닌 type == "title" 인 속성을 찾아 반환합니다.
+    """
     props = page.get("properties", {})
-    for key in ("title", "Name", "이름", "제목"):
-        if key in props:
-            rt = props[key].get("title", [])
+    # type == "title" 인 속성 탐색 (컬럼명 무관)
+    for val in props.values():
+        if val.get("type") == "title":
+            rt = val.get("title", [])
             t  = "".join(t.get("plain_text", "") for t in rt).strip()
             if t:
                 return t

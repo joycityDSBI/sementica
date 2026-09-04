@@ -60,6 +60,7 @@ from semantica_helper import (  # noqa: E402
     classify_page,
     content_hash,
     detect_realization_status,
+    event_from_db_props,
     extract_with_fallback,
     find_evidence_chunk_id,
     is_decision_triplet,
@@ -130,40 +131,10 @@ EVENT_EXTRACT_PROMPT = """\
   }}
 ]"""
 
-# ─── DB 속성 키 별칭 ─────────────────────────────────────────────────────────
-_DATE_KEYS    = {"이벤트날짜", "날짜", "일자", "date", "event_date", "시작일", "시작날짜"}
-_GAME_KEYS    = {"게임명", "게임", "game", "product", "서비스명", "서비스"}
-_TYPE_KEYS    = {"이벤트유형", "유형", "event_type", "type", "종류"}
-_MANAGER_KEYS = {"담당자", "담당팀", "manager", "owner", "담당"}
-
-
-def _event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | None:
-    """
-    Notion DB 속성 딕셔너리에서 Event dict를 직접 생성합니다.
-    날짜와 게임명이 모두 있을 때만 반환, 없으면 None.
-    """
-    if not db_props:
-        return None
-
-    date_val = next((db_props[k] for k in _DATE_KEYS if k in db_props), None)
-    game_val = next((db_props[k] for k in _GAME_KEYS if k in db_props), None)
-    if not date_val or not game_val:
-        return None
-
-    type_val = next((db_props[k] for k in _TYPE_KEYS if k in db_props), "")
-    mgr_raw = next((db_props[k] for k in _MANAGER_KEYS if k in db_props), "")
-    mgr_val = ", ".join(mgr_raw) if isinstance(mgr_raw, list) else str(mgr_raw) if mgr_raw else ""
-
-    return {
-        "game":        str(game_val),
-        "date":        str(date_val)[:10],
-        "title":       title,
-        "event_type":  str(type_val),
-        "manager":     mgr_val,
-        "source_url":  source_url,
-        "description": "",
-        "target":      "",
-    }
+# DB 속성 키 별칭 · event_from_db_props: semantica_helper 에서 import (단일 정의)
+# - 대소문자 무관 컬럼명 매칭
+# - PROJECT, 변경카테고리, 생성자 등 커스텀 컬럼 지원
+# - 변경카테고리 → EVENT_TYPES 정규값 자동 변환
 
 
 # ─── 트리플 추출 프롬프트 ──────────────────────────────────────────────────────
@@ -690,7 +661,7 @@ def sync_page(
     # 5+6. LLM 추출 — 트리플·이벤트 동시 실행 (순차 대비 ~40% 단축)
     # db_props_meta: 위(DB 항목 텍스트 합성 단계)에서 이미 추출됨 — 재사용
     db_props   = db_props_meta
-    ev_from_db = _event_from_db_props(db_props, source_url, title) if db_props else None
+    ev_from_db = event_from_db_props(db_props, source_url, title) if db_props else None
 
     with ThreadPoolExecutor(max_workers=2) as _pool:
         ft = _pool.submit(
