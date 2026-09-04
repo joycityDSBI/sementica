@@ -6,8 +6,9 @@ MCP 서버 도구 검증 스크립트
 import argparse
 import json
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
+
 
 def call_mcp(url: str, session_id: str, method: str, params: dict, req_id: int) -> dict:
     body = json.dumps({
@@ -29,8 +30,8 @@ def call_mcp(url: str, session_id: str, method: str, params: dict, req_id: int) 
     with urllib.request.urlopen(req, timeout=30) as resp:
         raw = resp.read().decode()
     # SSE 형식("data: {...}") 또는 JSON 직접 응답 모두 처리
-    for line in raw.splitlines():
-        line = line.strip()
+    for raw_line in raw.splitlines():
+        line = raw_line.strip()
         if line.startswith("data:"):
             line = line[5:].strip()
         if line and line.startswith("{"):
@@ -65,8 +66,8 @@ def initialize(url: str) -> str:
 
     if not session_id:
         # 일부 구현은 응답 body에 session_id 포함
-        for line in raw.splitlines():
-            line = line.strip()
+        for raw_line in raw.splitlines():
+            line = raw_line.strip()
             if line.startswith("data:"):
                 line = line[5:].strip()
             if line and line.startswith("{"):
@@ -225,7 +226,7 @@ def main():
             if path_nodes:
                 print(f"    {' → '.join(str(p) for p in path_nodes)}")
             elif not found:
-                print(f"    (연결 경로 없음 — 엔티티명을 실제 데이터에 맞게 조정 필요)")
+                print("    (연결 경로 없음 — 엔티티명을 실제 데이터에 맞게 조정 필요)")
     else:
         print("  ⚠️  도구 없음")
 

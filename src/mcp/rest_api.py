@@ -57,10 +57,10 @@ import server as _srv  # noqa: E402 (경로 설정 후 import)
 _REST_TOKEN = os.environ.get("SNOWFLAKE_REST_TOKEN", "")
 
 # ─── Starlette (FastMCP 의존성으로 항상 설치됨) ───────────────────────────────
-from starlette.applications import Starlette   # noqa: E402
-from starlette.requests import Request         # noqa: E402
-from starlette.responses import JSONResponse   # noqa: E402
-from starlette.routing import Route            # noqa: E402
+from starlette.applications import Starlette  # noqa: E402
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import JSONResponse  # noqa: E402
+from starlette.routing import Route  # noqa: E402
 
 
 # ─── 인증 헬퍼 ────────────────────────────────────────────────────────────────
@@ -312,16 +312,16 @@ if __name__ == "__main__":
 
     base = f"http://{args.host}:{args.port}"
     print("=" * 56)
-    print(f"🌐 Semantica REST API 서버 시작")
+    print("🌐 Semantica REST API 서버 시작")
     print(f"   본부: {_srv.DEPT_NAME}  컬렉션: {_srv.COLLECTION_NAME}")
     print(f"   포트: {args.port}")
-    print(f"")
+    print("")
     print(f"   헬스:  GET  {base}/rest/health")
     print(f"   검색:  POST {base}/rest/search")
     print(f"   그래프: POST {base}/rest/graph")
     print(f"   이벤트: POST {base}/rest/events")
     print(f"   통합:  POST {base}/rest/hybrid")
-    print(f"")
+    print("")
     print(f"   Snowflake: POST {base}/snowflake/{{search|events|hybrid}}")
     print(f"   인증: {'Bearer 토큰 활성화' if _REST_TOKEN else '없음 (SNOWFLAKE_REST_TOKEN 미설정)'}")
     print("=" * 56)

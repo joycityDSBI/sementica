@@ -21,7 +21,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 # ─── 경로 설정 ────────────────────────────────────────────────────────────────
@@ -31,14 +31,14 @@ sys.path.insert(0, str(ROOT / "src"))
 # .env 로드
 _env = ROOT / ".env"
 if _env.exists():
-    for line in _env.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw_line in _env.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, _, v = line.partition("=")
             os.environ.setdefault(k.strip(), v.strip())
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
-import argparse as _argparse
+import argparse as _argparse  # noqa: E402
 
 GCP_PROJECT     = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 LOCATION        = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
@@ -155,10 +155,11 @@ else:
 
 # ─── 클라이언트 초기화 ────────────────────────────────────────────────────────
 def init_clients():
-    import falkordb as fdb
     from anthropic import AnthropicVertex
     from google import genai
     from qdrant_client import QdrantClient
+
+    import falkordb as fdb
 
     embed_client = genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
     qdrant = QdrantClient(url=QDRANT_URL)
@@ -232,9 +233,7 @@ def _is_complex_query(query: str) -> bool:
     """복합 쿼리 여부 휴리스틱 탐지 (15자+ AND 복합 패턴 OR 6단어+)"""
     if len(query) >= 15 and any(p in query for p in _COMPLEX_PATTERNS):
         return True
-    if len(query.split()) >= 6:
-        return True
-    return False
+    return len(query.split()) >= 6
 
 
 def _decompose_query(query: str, claude) -> list:
@@ -405,7 +404,7 @@ def run_evaluation():
     print("=" * 60)
     print(f"  본부: {DEPT_LABEL}")
     print(f"  컬렉션: {COLLECTION_NAME}  그래프: {GRAPH_NAME}")
-    print(f"  시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  시작: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  총 질문: {len(GOLDEN_SET)}개")
     if _GOLDEN_PATH:
         print(f"  골든셋:  {_GOLDEN_PATH}")
@@ -503,7 +502,7 @@ def run_evaluation():
             print(f"  {diff:<8}: {avg:.2f} ({len(d_scores)}문항)")
 
     # ─── 결과 저장 ────────────────────────────────────────────────────────────
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     out_dir = ROOT / "data" / "eval"
     out_dir.mkdir(parents=True, exist_ok=True)
 

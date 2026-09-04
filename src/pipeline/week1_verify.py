@@ -17,6 +17,7 @@ Premise 3 합격 기준:
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -25,8 +26,8 @@ from pathlib import Path
 # .env 로드
 _env_path = Path(__file__).parent.parent.parent / ".env"
 if _env_path.exists():
-    for line in _env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw_line in _env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
         if line and not line.startswith("#") and "=" in line:
             key, _, val = line.partition("=")
             os.environ.setdefault(key.strip(), val.strip())
@@ -111,10 +112,8 @@ def _normalize_pred(val) -> dict:
         if "condition" in val:
             pred["condition"] = str(val["condition"])
         if "order" in val:
-            try:
+            with contextlib.suppress(ValueError, TypeError):
                 pred["order"] = int(val["order"])
-            except (ValueError, TypeError):
-                pass
         if "duration" in val:
             pred["duration"] = str(val["duration"])
         return pred
@@ -283,8 +282,7 @@ def main():
 
         print(f"\n🔬 Week 1 Claude on Vertex AI 검증 — {len(md_files[:10])}개 파일")
         print("=" * 60)
-        for f in md_files[:10]:
-            results.append(verify_file(f))
+        results.extend(verify_file(f) for f in md_files[:10])
 
     # ─── 합격 판정 (10개 이상 파일 검증 시) ─────────────────────────────────
     total = len(results)

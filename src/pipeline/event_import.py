@@ -44,7 +44,7 @@ if _env_path.exists():
 
 # ─── 경로 설정 ────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
-from semantica_helper import EVENT_TYPES, get_event_chain, upsert_event_node
+from semantica_helper import EVENT_TYPES, get_event_chain, upsert_event_node  # noqa: E402
 
 ROOT_DIR  = Path(__file__).parent.parent.parent
 LOGS_DIR  = ROOT_DIR / "data" / "logs"

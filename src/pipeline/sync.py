@@ -66,9 +66,9 @@ from semantica_helper import (  # noqa: E402
 # DB 로거 (POSTGRES_URL 없으면 no-op)
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 try:
+    from db_logger import get_pages_edit_times as _get_pages_edit_times
     from db_logger import log_sync_result
     from db_logger import upsert_notion_page as _upsert_notion_page
-    from db_logger import get_pages_edit_times as _get_pages_edit_times
 except Exception:
     def log_sync_result(*a, **kw): pass
     def _upsert_notion_page(*a, **kw): pass
@@ -872,7 +872,7 @@ def main():
     print(f"🔄 증분 동기화 — {dept_cfg['name']} ({args.dept})")
     print(f"   컬렉션: {collection_name}  그래프: {graph_name}")
     if args.full:
-        print(f"   기준:   전체 재동기화 (--full)")
+        print("   기준:   전체 재동기화 (--full)")
     elif stored_edit_times is not None:
         print(f"   기준:   PostgreSQL per-page 비교 ({len(stored_edit_times)}개 기존 기록)")
     else:
@@ -886,10 +886,11 @@ def main():
 
     # ── 클라이언트 초기화 ──────────────────────────────────────────────────
     print("\n[1/4] 클라이언트 초기화")
-    import falkordb as fdb
     from anthropic import AnthropicVertex
     from google import genai
     from qdrant_client import QdrantClient
+
+    import falkordb as fdb
 
     embed_client = genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
     qc           = QdrantClient(url=QDRANT_URL)
@@ -952,7 +953,7 @@ def main():
                 f"{already_synced}개 스킵"
             )
         elif not args.full:
-            print("  ℹ️  PostgreSQL 미연결 → Notion API 결과 전체 처리")
+            print("  (i) PostgreSQL 미연결 → Notion API 결과 전체 처리")
 
         # --limit 적용
         if args.limit and len(modified_pages) > args.limit:

@@ -118,14 +118,16 @@ def _rows(cur) -> list[dict]:
     result = []
     for row in cur.fetchall():
         d = {}
-        for k, v in zip(cols, row):
-            if hasattr(v, "isoformat"):
-                v = v.isoformat()
-            elif hasattr(v, "__float__"):
+        for k, raw_v in zip(cols, row, strict=False):
+            if hasattr(raw_v, "isoformat"):
+                v = raw_v.isoformat()
+            elif hasattr(raw_v, "__float__"):
                 try:
-                    v = float(v)
+                    v = float(raw_v)
                 except Exception:
-                    v = str(v)
+                    v = str(raw_v)
+            else:
+                v = raw_v
             d[k] = v
         result.append(d)
     return result
@@ -330,7 +332,7 @@ def api_qdrant_chunks(page_id: str, dept: str = "strategic"):
         from dept_config import load_dept
         collection = load_dept(dept)["qdrant_collection"]
         from qdrant_client import QdrantClient
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
         qc = QdrantClient(url=QDRANT_URL, timeout=10)
         results, _ = qc.scroll(
             collection_name=collection,
@@ -422,7 +424,7 @@ def batch_run(req: BatchRequest):
     script, extra = _BATCH_CMDS[req.type]
     venv_py = ROOT / ".venv" / "bin" / "python"
     python  = str(venv_py) if venv_py.exists() else sys.executable
-    cmd     = [python, script, "--dept", req.dept] + extra
+    cmd     = [python, script, "--dept", req.dept, *extra]
 
     try:
         proc = subprocess.Popen(
@@ -690,7 +692,7 @@ def golden_run(dept: str = "strategic"):
                 "expected":  expected,
                 "results":   [
                     {"title": t, "score": s}
-                    for t, s in zip(result_titles, result_scores)
+                    for t, s in zip(result_titles, result_scores, strict=False)
                 ],
             })
         except Exception as ex:
@@ -771,8 +773,9 @@ def golden_generate(dept: str = "strategic", count: int = 5):
 [{{"index": 1, "query": "..."}}, {{"index": 2, "query": "..."}}, ...]"""
 
     try:
-        import anthropic as _anthropic
         import json as _json
+
+        import anthropic as _anthropic
 
         _model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
         ac = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
@@ -1544,7 +1547,7 @@ function renderPageRows(data) {
   // 카운트 레이블
   const from  = (curPage - 1) * perPage + 1;
   const to    = Math.min(curPage * perPage, totalCount);
-  const label = totalCount > 0 ? `${from}–${to} / ${totalCount}개` : '0개';
+  const label = totalCount > 0 ? `${from}–${to} / ${totalCount}개` : '0개'; // – = en dash
   document.getElementById('page-count-label').textContent = label;
 
   // 행 렌더링
@@ -1584,6 +1587,7 @@ function renderPagination(cur, total) {
       ${label}
     </button>`;
 
+  // ‹ / › = single angle quotation marks (pagination arrows)
   let html = btn('‹', cur - 1, cur === 1) + ' ';
   if (start > 1) html += btn('1', 1) + (start > 2 ? '<span style="color:var(--muted);padding:0 4px">…</span>' : '');
   for (let p = start; p <= end; p++) html += btn(p, p, false, p === cur);
@@ -2073,6 +2077,7 @@ document.addEventListener('keydown', e => {
 # ─── 엔트리포인트 ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
+
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Semantica 웹 운영 대시보드")

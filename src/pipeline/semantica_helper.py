@@ -136,9 +136,7 @@ def _is_valid_entity(name: str, etype: str) -> bool:
         return False
     if etype in _SKIP_NER_TYPES:
         return False
-    if _DATE_NUM_RE.search(name):
-        return False
-    return True
+    return not _DATE_NUM_RE.search(name)
 
 
 def _semantica_extract(text: str) -> list:
@@ -809,11 +807,10 @@ def get_event_chain(
                 "total": 0, "events": [], "timeline_summary": [],
             }
 
-        events = []
-        for row in r.result_set:
-            # row: [event_id, game, event_type, date, title, description,
-            #        target, source_url, prev_title, prev_date, next_title, next_date]
-            events.append({
+        # row: [event_id, game, event_type, date, title, description,
+        #       target, source_url, prev_title, prev_date, next_title, next_date]
+        events = [
+            {
                 "event_id":    row[0],
                 "game":        row[1],
                 "event_type":  row[2],
@@ -824,7 +821,9 @@ def get_event_chain(
                 "source_url":  row[7] or "",
                 "prev_event":  {"title": row[8],  "date": row[9]}  if row[8]  else None,
                 "next_event":  {"title": row[10], "date": row[11]} if row[10] else None,
-            })
+            }
+            for row in r.result_set
+        ]
 
         timeline_summary = [
             f"{e['date']}: [{e['event_type']}] {e['title']}"

@@ -54,7 +54,7 @@ def log_mcp_request(
     query: str,
     result_count: int = 0,
     duration_ms: int = 0,
-    error: str = None,
+    error: str | None = None,
 ) -> None:
     """MCP 도구 호출 1건을 mcp_request_log에 기록."""
     conn = _get_conn()
@@ -141,7 +141,7 @@ def log_sync_result(
     new_triplets: int,
     duration_sec: int,
     status: str,         # "success" | "partial" | "failed" | "dry_run"
-    error_detail: str = None,
+    error_detail: str | None = None,
 ) -> None:
     """동기화 작업 1회 결과를 sync_log에 기록."""
     conn = _get_conn()
@@ -233,7 +233,7 @@ def upsert_notion_page(
     event_count: int = 0,
     is_db_item: bool = False,
     status: str = "ok",      # "ok" | "skipped" | "error"
-    error_msg: str = None,
+    error_msg: str | None = None,
 ) -> None:
     """
     Notion 페이지 1건을 notion_pages 테이블에 UPSERT합니다.

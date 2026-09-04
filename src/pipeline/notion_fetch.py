@@ -210,6 +210,61 @@ def fetch_blocks_recursive(client, token, block_id, depth=0, max_depth=4) -> str
     return text
 
 
+# ── Notion DB 속성 핸들러 (type → extractor) ──────────────────────────────────
+# 각 함수는 val 딕셔너리를 받아 추출된 값 또는 None(미설정) 반환.
+# checkbox는 False도 의미 있는 값이므로 항상 반환.
+
+def _prop_select(val: dict):
+    sel = val.get("select")
+    return sel["name"] if sel else None
+
+def _prop_multi_select(val: dict):
+    items = val.get("multi_select", [])
+    return [s["name"] for s in items] or None
+
+def _prop_date(val: dict):
+    dt = val.get("date")
+    return dt["start"][:10] if dt and dt.get("start") else None  # YYYY-MM-DD
+
+def _prop_people(val: dict):
+    people = val.get("people", [])
+    names  = [p.get("name", "") for p in people if p.get("name")]
+    return names or None
+
+def _prop_rich_text(val: dict):
+    texts = val.get("rich_text", [])
+    return "".join(t.get("plain_text", "") for t in texts).strip() or None
+
+def _prop_number(val: dict):
+    return val.get("number")  # 0도 유효한 값; None이면 미설정
+
+def _prop_checkbox(val: dict):
+    return val.get("checkbox", False)  # False도 의미 있는 값
+
+def _prop_url(val: dict):
+    return val.get("url") or None
+
+def _prop_email(val: dict):
+    return val.get("email") or None
+
+def _prop_phone(val: dict):
+    return val.get("phone_number") or None
+
+# relation은 ID만 있어 이름이 없으므로 생략
+_PROP_EXTRACTORS: dict = {
+    "select":       _prop_select,
+    "multi_select": _prop_multi_select,
+    "date":         _prop_date,
+    "people":       _prop_people,
+    "rich_text":    _prop_rich_text,
+    "number":       _prop_number,
+    "checkbox":     _prop_checkbox,
+    "url":          _prop_url,
+    "email":        _prop_email,
+    "phone_number": _prop_phone,
+}
+
+
 def extract_db_properties(page: dict) -> dict:
     """
     Notion DB 항목의 속성을 평탄한 딕셔너리로 추출합니다.
@@ -228,49 +283,14 @@ def extract_db_properties(page: dict) -> dict:
     for key, val in props.items():
         ptype = val.get("type", "")
         if ptype == "title":
-            continue   # 제목은 page_title()에서 별도 처리
+            continue  # 제목은 page_title()에서 별도 처리
+        extractor = _PROP_EXTRACTORS.get(ptype)
+        if extractor is None:
+            continue  # 미지원 유형 (relation, formula 등)
         try:
-            if ptype == "select":
-                sel = val.get("select")
-                if sel:
-                    result[key] = sel["name"]
-            elif ptype == "multi_select":
-                items = val.get("multi_select", [])
-                if items:
-                    result[key] = [s["name"] for s in items]
-            elif ptype == "date":
-                dt = val.get("date")
-                if dt and dt.get("start"):
-                    result[key] = dt["start"][:10]   # YYYY-MM-DD 만
-            elif ptype == "people":
-                people = val.get("people", [])
-                names  = [p.get("name", "") for p in people if p.get("name")]
-                if names:
-                    result[key] = names
-            elif ptype == "rich_text":
-                texts = val.get("rich_text", [])
-                text  = "".join(t.get("plain_text", "") for t in texts).strip()
-                if text:
-                    result[key] = text
-            elif ptype == "number":
-                num = val.get("number")
-                if num is not None:
-                    result[key] = num
-            elif ptype == "checkbox":
-                result[key] = val.get("checkbox", False)
-            elif ptype == "url":
-                url = val.get("url")
-                if url:
-                    result[key] = url
-            elif ptype == "email":
-                email = val.get("email")
-                if email:
-                    result[key] = email
-            elif ptype == "phone_number":
-                phone = val.get("phone_number")
-                if phone:
-                    result[key] = phone
-            # relation은 ID만 있어 이름이 없으므로 생략
+            extracted = extractor(val)
+            if extracted is not None:
+                result[key] = extracted
         except Exception:
             continue
 

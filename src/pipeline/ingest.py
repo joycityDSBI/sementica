@@ -421,15 +421,15 @@ def extract_triplets(text: str) -> list:
         parsed = json.loads(raw)
         if not isinstance(parsed, list):
             return []
-        result = []
-        for t in parsed:
-            if isinstance(t, dict):
-                result.append({
-                    "subject":   _norm_node(t.get("subject", "")),
-                    "predicate": _norm_pred(t.get("predicate", "")),
-                    "object":    _norm_node(t.get("object", "")),
-                })
-        return result
+        return [
+            {
+                "subject":   _norm_node(t.get("subject", "")),
+                "predicate": _norm_pred(t.get("predicate", "")),
+                "object":    _norm_node(t.get("object", "")),
+            }
+            for t in parsed
+            if isinstance(t, dict)
+        ]
     except Exception:
         return []
 

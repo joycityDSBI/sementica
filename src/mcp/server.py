@@ -192,7 +192,7 @@ def _fetch_full_pages(
     if not page_ids:
         return {}
 
-    from qdrant_client.models import Filter, FieldCondition, MatchAny
+    from qdrant_client.models import FieldCondition, Filter, MatchAny
 
     pages: dict = {}
     offset = None
@@ -747,12 +747,11 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
                 graph_hits.append(g)
 
         # ── 5. 관계 요약 ────────────────────────────────────────────────────
-        entity_summary: list[str] = []
-        for g in graph_hits:
-            for rel in (g.get("outgoing") or [])[:3]:
-                entity_summary.append(
-                    f"{g['entity']} → {rel['relation']} → {rel['target_name']}"
-                )
+        entity_summary: list[str] = [
+            f"{g['entity']} → {rel['relation']} → {rel['target_name']}"
+            for g in graph_hits
+            for rel in (g.get("outgoing") or [])[:3]
+        ]
 
         _result = {
             "semantic_results": semantic,

@@ -474,7 +474,7 @@ def main():
         html_path.write_text(build_html(data), encoding="utf-8")
         print(f"✅ HTML 저장: {html_path}")
         print(f"   → 브라우저에서 열기: file://{html_path.resolve()}")
-        print(f"   → 서버 접근:         http://34.42.7.50:8080/... (정적 파일 서빙 필요)")
+        print("   → 서버 접근:         http://34.42.7.50:8080/... (정적 파일 서빙 필요)")
 
 
 if __name__ == "__main__":

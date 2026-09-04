@@ -21,7 +21,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from falkordb import FalkorDB  # type: ignore
-
 from src.pipeline.dept_config import list_depts
 
 # ── 생성할 인덱스 목록 (label, property) ──────────────────────────────────────

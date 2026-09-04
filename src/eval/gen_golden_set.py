@@ -18,7 +18,7 @@ import random
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 # ─── 경로 설정 ────────────────────────────────────────────────────────────────
@@ -27,8 +27,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 _env = ROOT / ".env"
 if _env.exists():
-    for line in _env.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+    for raw_line in _env.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, _, v = line.partition("=")
             os.environ.setdefault(k.strip(), v.strip())
@@ -78,7 +78,7 @@ if args.dept:
     DEPT_LABEL      = f"{_cfg['name']} ({args.dept})"
 
 OUT_PATH = args.out or str(
-    ROOT / "data" / "eval" / f"golden_set_{datetime.now().strftime('%Y%m%d')}.json"
+    ROOT / "data" / "eval" / f"golden_set_{datetime.now(UTC).strftime('%Y%m%d')}.json"
 )
 
 print("=" * 60)
@@ -93,10 +93,11 @@ print()
 
 # ─── 클라이언트 초기화 ────────────────────────────────────────────────────────
 print("🔌 클라이언트 초기화...")
-import falkordb as _fdb
-from anthropic import AnthropicVertex
-from google import genai as _genai
-from qdrant_client import QdrantClient
+from anthropic import AnthropicVertex  # noqa: E402
+from google import genai as _genai  # noqa: E402
+from qdrant_client import QdrantClient  # noqa: E402
+
+import falkordb as _fdb  # noqa: E402
 
 embed_client = _genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
 qdrant       = QdrantClient(url=QDRANT_URL)
@@ -145,15 +146,16 @@ try:
         "RETURN n.name, r.rel_name, m.name, r.condition, r.source_url "
         f"LIMIT {args.sample_rels}"
     )
-    relations = []
-    for row in rel_result.result_set:
-        relations.append({
+    relations = [
+        {
             "subject":   row[0] or "",
             "predicate": row[1] or "",
             "object":    row[2] or "",
             "condition": row[3] or "",
             "url":       row[4] or "",
-        })
+        }
+        for row in rel_result.result_set
+    ]
     random.shuffle(relations)
     print(f"  수집: {len(relations)}개 관계\n")
 except Exception as e:
@@ -329,7 +331,7 @@ print("🤖 페이지 기반 Q&A 생성 + 검증 중...")
 all_candidates = []
 
 # 카테고리별 현재 수집 현황 추적
-cat_counts = {c: 0 for c in CATEGORY_TARGETS}
+cat_counts = dict.fromkeys(CATEGORY_TARGETS, 0)
 
 for i, page in enumerate(pages):
     # 목표 달성 시 중단 (관계 제외)
@@ -487,7 +489,7 @@ print(f"\n  최종 선정: {len(final_set)}문항\n")
 # ─── 6. 저장 ──────────────────────────────────────────────────────────────────
 Path(OUT_PATH).parent.mkdir(parents=True, exist_ok=True)
 meta = {
-    "generated_at": datetime.now().isoformat(),
+    "generated_at": datetime.now(UTC).isoformat(),
     "dept":         args.dept,
     "collection":   COLLECTION_NAME,
     "graph":        GRAPH_NAME,

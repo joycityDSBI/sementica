@@ -10,24 +10,50 @@ select = [
     "W",     # pycodestyle warnings
     "UP",    # pyupgrade
     "B",     # flake8-bugbear
+    "C",     # mccabe complexity
     "SIM",   # flake8-simplify
     "RUF",   # ruff-specific
     "DTZ",   # flake8-datetimez
-    "FURB",  # refurb
+    "PERF",  # perflint
+    "PLC",   # pylint convention
+    "PLE",   # pylint error
+    "PLW",   # pylint warning
 ]
 ignore = [
     # 파이프라인 특성상 허용: 넓은 예외 처리 (한 페이지 실패가 전체를 막지 않도록)
-    "BLE001",  # blind exception: Exception — 파이프라인 resilience 패턴
-    "S110",    # try-except-pass — 연결 실패 시 no-op 처리 (DB 로거 등)
-    # 타입 힌트 일부 허용
-    "RUF013",  # implicit Optional — 기존 코드 스타일 유지
-    # 기타 허용
-    "E501",    # line too long — 프롬프트 문자열이 길어 예외
-    "UP007",   # X | Y → Optional[X] 미적용 (Python 3.9 이하 호환)
+    "BLE001",   # blind exception: Exception — 파이프라인 resilience 패턴
+    "S110",     # try-except-pass — 연결 실패 시 no-op 처리 (DB 로거 등)
+    # 타입 힌트
+    "RUF013",   # implicit Optional — 기존 코드 스타일 유지
+    "UP007",    # X | Y → Optional[X] 미적용 (Python 3.9 이하 호환)
+    # 줄 길이 — 프롬프트 문자열·SQL·HTML 인라인 블록이 길어 예외
+    "E501",
+    # 의도적 lazy-import 패턴:
+    #   선택적 의존성(qdrant, falkordb, psycopg2 등)을 첫 사용 시점에 가져와
+    #   설치되지 않은 환경에서도 임포트 오류 없이 시작할 수 있게 한다.
+    "PLC0415",
+    # 의도적 모듈 수준 singleton 패턴:
+    #   _qdrant, _falkordb, _embed_client 등을 None 으로 선언하고
+    #   최초 호출 시 초기화하는 lazy-init 싱글턴 구현이다.
+    "PLW0603",
 ]
 
+[tool.ruff.lint.mccabe]
+# 도메인 복잡도가 높은 함수 허용 (Notion 블록 파싱, 그래프 구축 등)
+# 이를 초과하는 함수는 별도 리팩토링 이슈로 추적한다.
+max-complexity = 25
+
+[tool.ruff.lint.per-file-ignores]
+# 테스트·검증 스크립트: 다수의 케이스를 순차 실행하는 구조상 복잡도가 높음
+"scripts/test_mcp.py" = ["C901"]
+# 웹 앱 HTML/JS 인라인 템플릿 안의 UI 특수문자 (–, ‹, › 등) 허용
+"src/ops/web_app.py"  = ["RUF001"]
+
 [tool.ruff.lint.isort]
-known-first-party = ["semantica", "semantica_helper", "dept_config", "notion_fetch", "db_logger"]
+known-first-party = [
+    "semantica", "semantica_helper", "dept_config",
+    "notion_fetch", "db_logger",
+]
 
 [tool.ruff.format]
 quote-style = "double"
