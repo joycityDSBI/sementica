@@ -56,6 +56,9 @@ from notion_fetch import (  # noqa: E402
     page_title,
 )
 from semantica_helper import (  # noqa: E402
+    classify_page,
+    content_hash,
+    detect_realization_status,
     extract_with_fallback,
     is_decision_triplet,
     merge_node,
@@ -66,6 +69,7 @@ from semantica_helper import (  # noqa: E402
 # DB 로거 (POSTGRES_URL 없으면 no-op)
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 try:
+    from db_logger import get_page_hashes as _get_page_hashes
     from db_logger import get_pages_edit_times as _get_pages_edit_times
     from db_logger import log_sync_result
     from db_logger import upsert_notion_page as _upsert_notion_page
@@ -73,6 +77,7 @@ except Exception:
     def log_sync_result(*a, **kw): pass
     def _upsert_notion_page(*a, **kw): pass
     def _get_pages_edit_times(*a, **kw): return None  # import 실패 → PG 미연결로 간주
+    def _get_page_hashes(*a, **kw): return None       # import 실패 → hash skip 없이 전체 처리
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
 GCP_PROJECT      = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
@@ -208,30 +213,40 @@ EXTRACT_PROMPT = """\
   ✗ 회사 전체 이름 ("조이시티" 단독 엔티티)
   ✗ 의미 없는 단어 (것, 내용, 사항, 경우)
 
-━━ 5. 추출 예시 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━ 5. evidence_quote (필수) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  각 트리플에는 반드시 원문에서 그대로 인용한 문구를 포함하세요.
+  • 원문 텍스트에 실제로 있는 문장·구절을 그대로 복사 (번역·요약 금지)
+  • 트리플 근거가 될 문구가 없으면 해당 트리플 전체를 제외
+  • evidence_quote 없는 트리플은 환각(hallucination)으로 간주해 필터링됩니다.
+
+━━ 6. 추출 예시 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   입력: "DI팀 유현상이 마케팅실 요청으로 BigQuery에 일별 유저 데이터를 적재한다."
   출력:
   [
     {{"subject": {{"name": "유현상", "type": "Person"}},
       "predicate": {{"name": "소속"}},
-      "object":   {{"name": "DI팀", "type": "Team"}}}},
+      "object":   {{"name": "DI팀", "type": "Team"}},
+      "evidence_quote": "DI팀 유현상이"}},
     {{"subject": {{"name": "마케팅실", "type": "Team"}},
       "predicate": {{"name": "요청"}},
-      "object":   {{"name": "유현상", "type": "Person"}}}},
+      "object":   {{"name": "유현상", "type": "Person"}},
+      "evidence_quote": "마케팅실 요청으로"}},
     {{"subject": {{"name": "유현상", "type": "Person"}},
       "predicate": {{"name": "적재"}},
-      "object":   {{"name": "BigQuery", "type": "System"}}}}
+      "object":   {{"name": "BigQuery", "type": "System"}},
+      "evidence_quote": "BigQuery에 일별 유저 데이터를 적재한다"}}
   ]
 
-━━ 6. 텍스트 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━ 7. 텍스트 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {text}
 
 JSON 배열로만 응답 (설명·마크다운 없이):
 [
   {{
-    "subject":   {{"name": "이름", "type": "타입"}},
-    "predicate": {{"name": "관계명"}},
-    "object":    {{"name": "이름", "type": "타입"}}
+    "subject":        {{"name": "이름", "type": "타입"}},
+    "predicate":      {{"name": "관계명"}},
+    "object":         {{"name": "이름", "type": "타입"}},
+    "evidence_quote": "원문에서 그대로 인용한 문구 (필수)"
   }}
 ]
 트리플이 없으면 [] 반환."""
@@ -489,14 +504,19 @@ def extract_triplets(llm_client, text: str) -> list:
             parts = raw.split("```")
             raw = parts[1][4:] if len(parts) > 1 else raw
         parsed = json.loads(raw.strip())
-        result = [
-            {
-                "subject":   _norm_node(t.get("subject", "")),
-                "predicate": _norm_pred(t.get("predicate", "")),
-                "object":    _norm_node(t.get("object", "")),
-            }
-            for t in parsed if isinstance(t, dict)
-        ]
+        result = []
+        for t in parsed:
+            if not isinstance(t, dict):
+                continue
+            eq = (t.get("evidence_quote") or "").strip()
+            if not eq:
+                continue   # evidence_quote 없는 트리플은 환각으로 간주, 제외
+            result.append({
+                "subject":        _norm_node(t.get("subject", "")),
+                "predicate":      _norm_pred(t.get("predicate", "")),
+                "object":         _norm_node(t.get("object", "")),
+                "evidence_quote": eq,
+            })
         if not result:
             print(f"    [LLM] 트리플 없음 (LLM 응답: {raw[:120]!r})")
         return result
@@ -513,6 +533,7 @@ def sync_page(
     notion_client, token: str, page_meta: dict,
     qc, embed_client, llm_client, graph,
     collection_name: str, dry_run: bool = False, dept: str = "",
+    stored_hashes: "dict | None" = None,
 ) -> dict:
     """
     단일 페이지를 Notion에서 가져와 Qdrant + FalkorDB 업데이트
@@ -547,16 +568,45 @@ def sync_page(
         result["error"] = str(e)
         return result
 
-    if len(body.split()) < 30:
-        print(f"     ⚠️  텍스트 부족 ({len(body.split())} 단어) — 건너뜀")
+    word_count = len(body.split())
+    body_hash  = content_hash(body)
+
+    # ── Phase 1-① 경로 분류 ───────────────────────────────────────────────
+    db_props_meta = extract_db_properties(page_meta)
+    route = classify_page(body, {
+        "title":         title,
+        "db_properties": db_props_meta or None,
+    }, word_count)
+
+    if route == "excluded":
+        print(f"     ⚠️  excluded 판정 ({word_count} 단어) — 건너뜀")
         result["skipped"] = True
         _upsert_notion_page(
             page_id=page_id, dept=dept,
             notion_url=source_url, title=title,
             last_edited_time=page_meta.get("last_edited_time"),
-            word_count=len(body.split()),
-            is_db_item=bool(extract_db_properties(page_meta)),
+            word_count=word_count,
+            is_db_item=bool(db_props_meta),
             status="skipped",
+            route="excluded",
+            content_hash=body_hash,
+        )
+        return result
+
+    # ── Phase 1-④ content_hash 중복 체크 ─────────────────────────────────
+    stored_hash = (stored_hashes or {}).get(page_id, "")
+    if stored_hash and stored_hash == body_hash:
+        print("     ↩️  내용 변경 없음 (hash 일치) — LLM 재처리 건너뜀")
+        result["hash_skip"] = True
+        _upsert_notion_page(
+            page_id=page_id, dept=dept,
+            notion_url=source_url, title=title,
+            last_edited_time=page_meta.get("last_edited_time"),
+            word_count=word_count,
+            is_db_item=bool(db_props_meta),
+            status="ok",
+            route=route,
+            content_hash=body_hash,
         )
         return result
 
@@ -607,6 +657,24 @@ def sync_page(
     result["new_chunks"] = new_chunks
     print(f"     벡터 저장: {new_chunks}개 청크")
 
+    # defer 경로: 벡터 임베딩까지만, LLM 추출 건너뜀
+    if route == "defer":
+        print("     ↩️  defer 경로 — LLM 추출 생략")
+        result["new_triplets"] = 0
+        result["new_events"]   = 0
+        _upsert_notion_page(
+            page_id=page_id, dept=dept,
+            notion_url=source_url, title=title,
+            last_edited_time=page_meta.get("last_edited_time"),
+            word_count=word_count,
+            chunk_count=new_chunks,
+            is_db_item=bool(db_props_meta),
+            status="ok",
+            route="defer",
+            content_hash=body_hash,
+        )
+        return result
+
     # 5+6. LLM 추출 — 트리플·이벤트 동시 실행 (순차 대비 ~40% 단축)
     # DB 속성 먼저 확인 (API 없음, 즉시) → LLM 이벤트 추출 필요 여부 결정
     db_props   = extract_db_properties(page_meta)
@@ -652,6 +720,11 @@ def sync_page(
         for k in ("condition", "order", "duration"):
             if k in pred:
                 props[k] = pred[k]
+        # v2: 근거 인용문 + 실현 상태
+        eq = (t.get("evidence_quote") or "").strip()
+        if eq:
+            props["evidence_quote"]     = eq
+            props["realization_status"] = detect_realization_status(eq)
         try:
             # create_relationship() SDK 메서드는 버전에 따라 동작이 다름 →
             # Cypher 직접 실행으로 대체 (node id 기반, 안정적)
@@ -704,12 +777,14 @@ def sync_page(
         notion_url=source_url,
         title=title,
         last_edited_time=page_meta.get("last_edited_time"),
-        word_count=len(body.split()),
+        word_count=word_count,
         chunk_count=result.get("new_chunks", 0),
         triplet_count=result.get("new_triplets", 0),
         event_count=ev_stored,
-        is_db_item=bool(extract_db_properties(page_meta)),
+        is_db_item=bool(db_props_meta),
         status="ok",
+        route=route,
+        content_hash=body_hash,
     )
 
     return result
@@ -968,6 +1043,11 @@ def main():
                 save_sync_state(state_path, state)
             return
 
+        # ── Phase 1-④ content_hash 캐시 로드 ───────────────────────────
+        _stored_hashes = _get_page_hashes(args.dept) or {}
+        if _stored_hashes:
+            print(f"  🔑 content_hash {len(_stored_hashes)}건 로드 (무변경 페이지 LLM 재처리 스킵)")
+
         # ── 동기화 실행 ─────────────────────────────────────────────────
         print("\n[3/4] 페이지 동기화 시작")
         results = []
@@ -977,6 +1057,7 @@ def main():
                 notion_client, token, page,
                 qc, embed_client, llm_client, graph,
                 collection_name, dry_run=args.dry_run, dept=args.dept,
+                stored_hashes=_stored_hashes,
             )
             results.append(r)
             time.sleep(0.5)

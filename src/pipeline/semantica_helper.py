@@ -29,6 +29,7 @@ Semantica 프레임워크 통합 헬퍼
 """
 
 import contextlib
+import hashlib
 import re
 import uuid
 from datetime import UTC, datetime
@@ -847,3 +848,132 @@ def get_event_chain(
             "timeline_summary": [],
             "error":            str(ex),
         }
+
+
+# ─── 9. 경로 분류 (classify_page) ────────────────────────────────────────────
+#
+# 페이지마다 LLM 추출 전에 호출해 처리 경로를 결정합니다.
+#   core     → 지식 추출 대상 (LLM 트리플·이벤트 파이프라인 전체 실행)
+#   defer    → 벡터 임베딩만, LLM 추출 건너뜀 (정보 밀도 낮음)
+#   excluded → 인제스천 완전 제외 (너무 짧거나 임시 문서)
+#
+# 결정론적 규칙 기반 — AI 호출 없음, 처리 비용 0.
+
+_CORE_TITLE_KEYWORDS: frozenset = frozenset([
+    "전략", "기획", "의사결정", "결정", "승인", "회의록", "회의", "미팅",
+    "ua", "마케팅", "예산", "목표", "kpi", "매출", "dau", "arpu",
+    "분석", "인사이트", "보고서", "계획", "방향", "로드맵", "okr",
+    "이슈", "리스크", "문제", "개선", "제안", "검토", "결론",
+])
+_CORE_BODY_KEYWORDS: frozenset = frozenset([
+    "의사결정", "결정함", "승인됨", "예산", "목표", "kpi", "전략",
+    "ua", "마케팅", "매출", "인사이트", "이슈", "리스크",
+])
+_DEFER_TITLE_SIGNALS: frozenset = frozenset([
+    "링크 모음", "참고 자료", "자료 모음", "업무 연락", "단순 안내",
+    "일정 공유", "todo", "체크리스트",
+])
+_EXCLUDED_TITLE_PATTERNS: frozenset = frozenset([
+    "테스트", "test", "임시", "draft", "삭제 예정", "미사용", "untitled",
+])
+
+
+def classify_page(body: str, meta: dict, word_count: int) -> str:
+    """
+    페이지를 'core' / 'defer' / 'excluded' 중 하나로 분류합니다.
+    결정론적 규칙 기반 — AI 호출 없음.
+
+    Args:
+        body:       페이지 본문 텍스트
+        meta:       페이지 메타 딕셔너리 (title, db_properties 등)
+        word_count: 본문 단어 수
+
+    Returns:
+        "core"     — LLM 트리플·이벤트 추출까지 전체 파이프라인 실행
+        "defer"    — 벡터 임베딩만, LLM 추출 건너뜀
+        "excluded" — 인제스천 완전 제외 (word_count < 30 포함)
+    """
+    title = (meta.get("title") or "").lower()
+
+    # 1. 완전 제외 조건
+    if word_count < 30:
+        return "excluded"
+    for pat in _EXCLUDED_TITLE_PATTERNS:
+        if pat in title:
+            return "excluded"
+
+    # 2. Notion DB 아이템 (게임·이벤트 관련 구조화 속성 있음) → 항상 core
+    if meta.get("db_properties"):
+        return "core"
+
+    # 3. 제목 키워드 우선 판정
+    for kw in _CORE_TITLE_KEYWORDS:
+        if kw in title:
+            return "core"
+    for sig in _DEFER_TITLE_SIGNALS:
+        if sig in title:
+            return "defer"
+
+    # 4. 본문 길이 기반 — 짧은 문서는 defer (LLM 대비 효용 낮음)
+    if word_count < 80:
+        return "defer"
+
+    # 5. 본문 앞 500자 키워드 확인
+    body_preview = body[:500].lower()
+    for kw in _CORE_BODY_KEYWORDS:
+        if kw in body_preview:
+            return "core"
+
+    # 6. 기본값 — 충분히 길면 core (나중에 재분류 가능)
+    return "core"
+
+
+# ─── 10. 본문 해시 (content_hash) ────────────────────────────────────────────
+
+def content_hash(text: str) -> str:
+    """
+    텍스트의 SHA-256 해시 앞 16자를 반환합니다.
+    sync.py가 이전 처리 결과와 비교해 내용 무변경 페이지를 건너뛸 때 사용합니다.
+
+    Returns:
+        16자 소문자 hex 문자열 (예: "a3f9e2c1b4d7e0f8")
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+# ─── 11. 실현 상태 판정 (detect_realization_status) ──────────────────────────
+
+_PLANNED_SIGNALS: frozenset = frozenset([
+    "예정", "할 예정", "진행 예정", "검토 중", "검토 예정", "계획",
+    "예정입니다", "할 계획", "가능성", "논의 중", "준비 중",
+    "예정으로", "검토하고", "진행할", "배포 예정", "오픈 예정",
+])
+_APPLIED_SIGNALS: frozenset = frozenset([
+    "완료", "적용됨", "배포됨", "출시", "오픈됨", "시행됨", "확정됨",
+    "실시됨", "반영됨", "실행됨", "시작됨", "완료되었", "됩니다",
+    "했습니다", "출시됨", "배포 완료", "오픈 완료", "적용 완료",
+])
+
+
+def detect_realization_status(evidence_text: str) -> str:
+    """
+    트리플의 근거 문구(evidence_quote)에서 계획/실현 신호어를 감지해
+    실현 상태를 반환합니다.
+
+    Args:
+        evidence_text: LLM이 선택한 원문 인용 문구
+
+    Returns:
+        "planned"     — 계획·예정 신호어 감지됨
+        "applied"     — 완료·적용 신호어 감지됨
+        "unconfirmed" — 신호어 없거나 혼재
+    """
+    t = evidence_text.lower()
+    has_planned = any(sig in t for sig in _PLANNED_SIGNALS)
+    has_applied = any(sig in t for sig in _APPLIED_SIGNALS)
+
+    if has_applied and not has_planned:
+        return "applied"
+    if has_planned and not has_applied:
+        return "planned"
+    return "unconfirmed"  # 혼재하거나 신호 없음

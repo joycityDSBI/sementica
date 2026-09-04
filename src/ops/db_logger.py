@@ -234,11 +234,17 @@ def upsert_notion_page(
     is_db_item: bool = False,
     status: str = "ok",      # "ok" | "skipped" | "error"
     error_msg: str | None = None,
+    route: str = "core",     # "core" | "defer" | "excluded"  (v2)
+    content_hash: str | None = None,  # SHA-256 앞 16자  (v2)
 ) -> None:
     """
     Notion 페이지 1건을 notion_pages 테이블에 UPSERT합니다.
     (page_id, dept) 조합이 이미 있으면 갱신, 없으면 삽입.
     PostgreSQL 연결 없으면 no-op.
+
+    v2 추가 필드:
+      route        — 페이지 분류 경로 (core / defer / excluded)
+      content_hash — 본문 SHA-256 앞 16자 (중복 처리 건너뜀 판단)
     """
     conn = _get_conn()
     if conn is None:
@@ -261,8 +267,9 @@ def upsert_notion_page(
                     INSERT INTO notion_pages
                         (page_id, dept, notion_url, title, last_edited_time,
                          last_ingested_at, word_count, chunk_count, triplet_count,
-                         event_count, is_db_item, status, error_msg)
-                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s)
+                         event_count, is_db_item, status, error_msg,
+                         route, content_hash)
+                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT ON CONSTRAINT uq_notion_pages_page_dept
                     DO UPDATE SET
                         notion_url       = EXCLUDED.notion_url,
@@ -275,7 +282,9 @@ def upsert_notion_page(
                         event_count      = EXCLUDED.event_count,
                         is_db_item       = EXCLUDED.is_db_item,
                         status           = EXCLUDED.status,
-                        error_msg        = EXCLUDED.error_msg
+                        error_msg        = EXCLUDED.error_msg,
+                        route            = EXCLUDED.route,
+                        content_hash     = COALESCE(EXCLUDED.content_hash, notion_pages.content_hash)
                     """,
                 (
                     page_id[:32] if page_id else "",
@@ -290,9 +299,41 @@ def upsert_notion_page(
                     is_db_item,
                     (status or "ok")[:20],
                     error_msg,
+                    (route or "core")[:20],
+                    content_hash[:16] if content_hash else None,
                 ),
             )
     except Exception as e:
         print(f"  [DB] notion_pages upsert 실패: {e}")
+    finally:
+        conn.close()
+
+
+def get_page_hashes(dept: str) -> "dict | None":
+    """
+    notion_pages 테이블에서 부서별 content_hash를 반환합니다.
+    sync.py가 내용 무변경 페이지의 LLM 재처리를 건너뛸 때 사용합니다.
+
+    Returns:
+        {page_id: content_hash, ...}
+          - content_hash가 NULL인 행은 포함하지 않음
+          - 테이블이 비어있으면 {} (연결됨, 데이터 없음)
+        None
+          - PostgreSQL 미연결 또는 쿼리 실패 → 호출자가 skip 없이 전체 처리
+    """
+    conn = _get_conn()
+    if conn is None:
+        return None
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT page_id, content_hash FROM notion_pages "
+                "WHERE dept = %s AND content_hash IS NOT NULL",
+                (dept,),
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+    except Exception as e:
+        print(f"  [DB] get_page_hashes 실패: {e}")
+        return None
     finally:
         conn.close()

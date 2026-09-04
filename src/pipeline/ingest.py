@@ -37,6 +37,9 @@ except Exception:
     def _upsert_notion_page(*a, **kw): pass   # PostgreSQL 없으면 no-op
 
 from semantica_helper import (
+    classify_page,
+    content_hash,
+    detect_realization_status,
     extract_with_fallback,
     is_decision_triplet,
     merge_node,
@@ -129,30 +132,40 @@ EXTRACT_PROMPT = """\
   ✗ 회사 전체 이름 ("조이시티" 단독 엔티티)
   ✗ 의미 없는 단어 (것, 내용, 사항, 경우)
 
-━━ 5. 추출 예시 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━ 5. evidence_quote (필수) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  각 트리플에는 반드시 원문에서 그대로 인용한 문구를 포함하세요.
+  • 원문 텍스트에 실제로 있는 문장·구절을 그대로 복사 (번역·요약 금지)
+  • 트리플 근거가 될 문구가 없으면 해당 트리플 전체를 제외
+  • evidence_quote 없는 트리플은 환각(hallucination)으로 간주해 필터링됩니다.
+
+━━ 6. 추출 예시 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   입력: "DI팀 유현상이 마케팅실 요청으로 BigQuery에 일별 유저 데이터를 적재한다."
   출력:
   [
     {{"subject": {{"name": "유현상", "type": "Person"}},
       "predicate": {{"name": "소속"}},
-      "object":   {{"name": "DI팀", "type": "Team"}}}},
+      "object":   {{"name": "DI팀", "type": "Team"}},
+      "evidence_quote": "DI팀 유현상이"}},
     {{"subject": {{"name": "마케팅실", "type": "Team"}},
       "predicate": {{"name": "요청"}},
-      "object":   {{"name": "유현상", "type": "Person"}}}},
+      "object":   {{"name": "유현상", "type": "Person"}},
+      "evidence_quote": "마케팅실 요청으로"}},
     {{"subject": {{"name": "유현상", "type": "Person"}},
       "predicate": {{"name": "적재"}},
-      "object":   {{"name": "BigQuery", "type": "System"}}}}
+      "object":   {{"name": "BigQuery", "type": "System"}},
+      "evidence_quote": "BigQuery에 일별 유저 데이터를 적재한다"}}
   ]
 
-━━ 6. 텍스트 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━ 7. 텍스트 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {text}
 
 JSON 배열로만 응답 (설명·마크다운 없이):
 [
   {{
-    "subject":   {{"name": "이름", "type": "타입"}},
-    "predicate": {{"name": "관계명"}},
-    "object":    {{"name": "이름", "type": "타입"}}
+    "subject":        {{"name": "이름", "type": "타입"}},
+    "predicate":      {{"name": "관계명"}},
+    "object":         {{"name": "이름", "type": "타입"}},
+    "evidence_quote": "원문에서 그대로 인용한 문구 (필수)"
   }}
 ]
 트리플이 없으면 [] 반환."""
@@ -421,15 +434,20 @@ def extract_triplets(text: str) -> list:
         parsed = json.loads(raw)
         if not isinstance(parsed, list):
             return []
-        return [
-            {
-                "subject":   _norm_node(t.get("subject", "")),
-                "predicate": _norm_pred(t.get("predicate", "")),
-                "object":    _norm_node(t.get("object", "")),
-            }
-            for t in parsed
-            if isinstance(t, dict)
-        ]
+        result = []
+        for t in parsed:
+            if not isinstance(t, dict):
+                continue
+            eq = (t.get("evidence_quote") or "").strip()
+            if not eq:
+                continue   # evidence_quote 없는 트리플은 환각으로 간주, 제외
+            result.append({
+                "subject":        _norm_node(t.get("subject", "")),
+                "predicate":      _norm_pred(t.get("predicate", "")),
+                "object":         _norm_node(t.get("object", "")),
+                "evidence_quote": eq,
+            })
+        return result
     except Exception:
         return []
 
@@ -555,6 +573,11 @@ def store_graph(triplets: list, source_url: str) -> dict:
         for k in ("condition", "order", "duration"):
             if k in pred:
                 rel_props[k] = pred[k]
+        # v2: 근거 인용문 + 실현 상태
+        eq = (t.get("evidence_quote") or "").strip()
+        if eq:
+            rel_props["evidence_quote"]      = eq
+            rel_props["realization_status"]  = detect_realization_status(eq)
 
         try:
             # rel_props 키를 파라미터명 충돌 없이 SET으로 처리
@@ -592,8 +615,13 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
     print(f"\n  📄 {path.name}  ({word_count} 단어)")
     print(f"     URL: {meta.get('notion_url', '-')}")
 
-    if word_count < 30:
-        print("     ⚠️  텍스트 부족 — 건너뜀")
+    # ── Phase 1-① 경로 분류 ─────────────────────────────────────────────────
+    route     = classify_page(body, meta, word_count)
+    body_hash = content_hash(body)
+    print(f"     경로: {route}")
+
+    if route == "excluded":
+        print("     ⚠️  excluded 판정 — 건너뜀")
         if not dry_run and meta.get("page_id"):
             _upsert_notion_page(
                 page_id=meta["page_id"], dept=dept,
@@ -603,8 +631,10 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
                 word_count=word_count,
                 is_db_item=bool(meta.get("db_properties")),
                 status="skipped",
+                route="excluded",
+                content_hash=body_hash,
             )
-        return {"file": str(path), "skipped": True, "reason": "텍스트 부족"}
+        return {"file": str(path), "skipped": True, "reason": "excluded"}
 
     result = {
         "file":       str(path),
@@ -615,13 +645,34 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
     }
 
     if not dry_run:
-        # 1. 벡터 저장 (청킹)
+        # 1. 벡터 저장 (청킹) — defer·core 모두 실행
         chunk_count = store_vector(page)
         result["vector_stored"] = chunk_count > 0
         result["chunk_count"]   = chunk_count
         print(f"     벡터: {'✅' if chunk_count > 0 else '❌'} {chunk_count}개 청크 저장")
 
-        # 2. 트리플 추출 (LLM 우선 → 실패 시 Semantica fallback) — API 호출, 락 불필요
+        if route == "defer":
+            # defer: 벡터만, LLM 추출 건너뜀
+            print("     ↩️  defer 경로 — LLM 추출 생략 (정보 밀도 낮음)")
+            result["triplet_count"] = 0
+            result["graph"]         = {"nodes": 0, "edges": 0}
+            result["event_count"]   = 0
+            if meta.get("page_id"):
+                _upsert_notion_page(
+                    page_id=meta["page_id"], dept=dept,
+                    notion_url=meta.get("notion_url", ""),
+                    title=meta.get("title", ""),
+                    last_edited_time=meta.get("last_edited_time"),
+                    word_count=word_count,
+                    chunk_count=chunk_count,
+                    is_db_item=bool(meta.get("db_properties")),
+                    status="ok",
+                    route="defer",
+                    content_hash=body_hash,
+                )
+            return result
+
+        # 2. 트리플 추출 (LLM 우선 → 실패 시 Semantica fallback) — core만
         triplets, src = extract_with_fallback(extract_triplets, body)
         result["triplet_count"] = len(triplets)
         print(f"     트리플: {len(triplets)}개 추출 [{src}]")
@@ -684,6 +735,8 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
                 event_count=ev_stored,
                 is_db_item=bool(meta.get("db_properties")),
                 status="ok",
+                route=route,
+                content_hash=body_hash,
             )
     else:
         print("     [DRY-RUN] 저장 없이 확인만")
