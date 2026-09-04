@@ -126,6 +126,61 @@ def search_pages(client: httpx.Client, token: str, query: str) -> list:
     return resp.json().get("results", [])
 
 
+def query_database(
+    client: httpx.Client,
+    token: str,
+    database_id: str,
+    since_iso: str | None = None,
+) -> list:
+    """
+    Notion 데이터베이스의 모든 항목(row)을 직접 쿼리합니다.
+
+    /search API는 DB 항목을 누락할 수 있으므로
+    departments.yaml 에 등록된 DB는 이 함수로 직접 수집합니다.
+
+    Args:
+        database_id: 하이픈 포함/제외 모두 허용 (Notion API가 정규화)
+        since_iso:   ISO 8601 문자열. 지정 시 last_edited_time > since_iso 인 항목만 반환.
+
+    Returns:
+        Notion page 객체 목록 (각 항목은 page 객체, db_properties 포함)
+    """
+    items  = []
+    cursor = None
+    batch  = 1
+    # 하이픈 제거 — API는 양쪽 포맷을 허용하지만 일관성 유지
+    db_id = database_id.replace("-", "")
+
+    while True:
+        body: dict = {"page_size": 100}
+        if cursor:
+            body["start_cursor"] = cursor
+        if since_iso:
+            body["filter"] = {
+                "timestamp": "last_edited_time",
+                "last_edited_time": {"after": since_iso},
+            }
+        resp = client.post(
+            f"https://api.notion.com/v1/databases/{db_id}/query",
+            headers=notion_headers(token),
+            json=body,
+        )
+        resp.raise_for_status()
+        time.sleep(RATE_LIMIT_DELAY)
+        data = resp.json()
+
+        results = data.get("results", [])
+        items.extend(results)
+        print(f"    DB 배치 {batch:02d}: {len(results)}개 수집 (누적 {len(items)}개)")
+        batch += 1
+
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+
+    return items
+
+
 def fetch_blocks(client: httpx.Client, token: str, block_id: str) -> list:
     """블록 목록 페이지네이션 수집"""
     blocks = []
@@ -336,6 +391,17 @@ def save_page(client, token, page, idx, output_dir: Path,
         text       = fetch_blocks_recursive(client, token, page_id)
         word_count = len(text.split())
 
+        # ── DB 항목: page body가 비어있으면 속성값에서 텍스트 합성 ──────────
+        # Notion DB row는 속성(properties)만 채워지고 page body는 빈 경우가 많다.
+        # 이 경우 속성값을 줄글로 합성해 벡터 임베딩과 LLM 추출에 활용한다.
+        if db_props and word_count < min_words:
+            prop_lines = [f"{k}: {v}" for k, v in db_props.items()]
+            prop_text  = "\n".join(prop_lines)
+            text       = (prop_text + ("\n\n" + text if text.strip() else "")).strip()
+            word_count = len(text.split())
+            if word_count >= min_words:
+                print(f"        🔧 DB 속성에서 텍스트 합성 ({word_count} 단어)")
+
         # ── 텍스트 부족 페이지는 저장하지 않고 건너뜀 ──────────────────────
         if word_count < min_words:
             print(f"        ⏭️  건너뜀: {word_count} 단어 (최소 {min_words} 단어 미만)")
@@ -437,6 +503,29 @@ def main():
             for i, page in enumerate(pages, 1):
                 results.append(save_page(client, token, page, i, output_dir, min_words=min_words))
                 print()
+
+            # ── departments.yaml 에 등록된 Notion DB 직접 쿼리 ───────────────
+            # /search API는 DB 항목을 누락할 수 있으므로 명시적으로 DB를 쿼리한다.
+            notion_databases = dept_cfg.get("notion_databases", [])
+            if notion_databases:
+                print(f"\n📂 Notion DB 직접 쿼리 ({len(notion_databases)}개 DB)")
+                offset = len(results)
+                for db_entry in notion_databases:
+                    db_id   = db_entry["id"] if isinstance(db_entry, dict) else str(db_entry)
+                    db_name = db_entry.get("name", db_id) if isinstance(db_entry, dict) else db_id
+                    print(f"\n  🗄️  {db_name} ({db_id})")
+                    try:
+                        db_items = query_database(client, token, db_id)
+                        print(f"     총 {len(db_items)}개 항목")
+                        for j, item in enumerate(db_items, 1):
+                            results.append(
+                                save_page(client, token, item, offset + j,
+                                          output_dir, min_words=min_words)
+                            )
+                            print()
+                        offset += len(db_items)
+                    except Exception as e:
+                        print(f"     ❌ DB 쿼리 실패: {e}")
 
     # 결과 요약
     meaningful   = [r for r in results if r.get("meaningful")]

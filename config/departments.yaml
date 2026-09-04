@@ -12,6 +12,14 @@ departments:
     data_dir: "data/strategic"
     description: "전략사업본부 업무 문서 온톨로지 검색"
 
+    # ── Notion DB 직접 쿼리 설정 (선택) ─────────────────────────────────────────
+    # /search API는 DB 항목(row)을 누락할 수 있으므로
+    # 수집이 필요한 Notion 데이터베이스 ID를 명시적으로 등록합니다.
+    # ID는 Notion 페이지 URL에서 추출: app.notion.com/p/<워크스페이스>/<ID>?v=...
+    notion_databases:
+      - id: "2ffea67a568180c7ad48f2b9254e8754"
+        name: "UA 캠페인 DB"   # 식별용 레이블 (수집 대상 파악용, 실제 동작에는 무관)
+
   # ── 향후 본부 추가 예시 ──────────────────────────────────────────────────────
   # dev:
   #   name: "개발본부"

@@ -54,6 +54,7 @@ from notion_fetch import (  # noqa: E402
     fetch_blocks_recursive,
     notion_headers,
     page_title,
+    query_database,
 )
 from semantica_helper import (  # noqa: E402
     classify_page,
@@ -570,10 +571,20 @@ def sync_page(
         return result
 
     word_count = len(body.split())
+
+    # ── DB 항목: page body가 비어있으면 속성값에서 텍스트 합성 ───────────────
+    # Notion DB row는 속성(properties)만 채워지고 page body가 빈 경우가 많다.
+    # 이 경우 속성값을 줄글로 합성해 벡터 임베딩과 LLM 추출에 활용한다.
+    db_props_meta = extract_db_properties(page_meta)
+    if db_props_meta and word_count < 30:
+        prop_text  = "\n".join(f"{k}: {v}" for k, v in db_props_meta.items())
+        body       = (prop_text + ("\n\n" + body if body.strip() else "")).strip()
+        word_count = len(body.split())
+        print(f"     🔧 DB 속성에서 텍스트 합성 ({word_count} 단어)")
+
     body_hash  = content_hash(body)
 
     # ── Phase 1-① 경로 분류 ───────────────────────────────────────────────
-    db_props_meta = extract_db_properties(page_meta)
     route = classify_page(body, {
         "title":         title,
         "db_properties": db_props_meta or None,
@@ -677,8 +688,8 @@ def sync_page(
         return result
 
     # 5+6. LLM 추출 — 트리플·이벤트 동시 실행 (순차 대비 ~40% 단축)
-    # DB 속성 먼저 확인 (API 없음, 즉시) → LLM 이벤트 추출 필요 여부 결정
-    db_props   = extract_db_properties(page_meta)
+    # db_props_meta: 위(DB 항목 텍스트 합성 단계)에서 이미 추출됨 — 재사용
+    db_props   = db_props_meta
     ev_from_db = _event_from_db_props(db_props, source_url, title) if db_props else None
 
     with ThreadPoolExecutor(max_workers=2) as _pool:
@@ -857,6 +868,36 @@ def fetch_modified_pages(client, token: str, since_iso: str) -> list:
     return modified
 
 
+def fetch_modified_db_items(
+    client, token: str, since_iso: str, notion_databases: list
+) -> list:
+    """
+    departments.yaml 에 등록된 Notion DB에서 since_iso 이후 수정된 항목을 직접 쿼리합니다.
+
+    /search API는 DB 항목을 누락할 수 있으므로 이 함수로 보완합니다.
+    중복 수집 방지: 동일 page_id 가 이미 modified_pages 에 있으면 건너뜁니다.
+
+    Args:
+        notion_databases: departments.yaml 의 notion_databases 리스트
+                          [{"id": "...", "name": "..."}, ...] 또는 ["id", ...]
+
+    Returns:
+        Notion page 객체 목록 (last_edited_time > since_iso 인 DB 항목)
+    """
+    items = []
+    for db_entry in notion_databases:
+        db_id   = db_entry["id"] if isinstance(db_entry, dict) else str(db_entry)
+        db_name = db_entry.get("name", db_id) if isinstance(db_entry, dict) else db_id
+        print(f"  🗄️  DB 직접 쿼리: {db_name} ({db_id})")
+        try:
+            db_items = query_database(client, token, db_id, since_iso=since_iso)
+            print(f"     → {len(db_items)}개 수정된 항목")
+            items.extend(db_items)
+        except Exception as e:
+            print(f"     ❌ DB 쿼리 실패: {e}")
+    return items
+
+
 def fetch_modified_pages_by_keyword(client, token: str, since_iso: str, keyword: str) -> list:
     """Notion 검색 API로 keyword 포함 페이지만 조회 후 since_iso 이후 수정된 것만 반환"""
     modified = []
@@ -1003,6 +1044,23 @@ def main():
         else:
             modified_pages = fetch_modified_pages(notion_client, token, since_iso)
         print(f"  📋 Notion API 반환: {len(modified_pages)}개")
+
+        # ── departments.yaml 등록 DB 항목 직접 쿼리 (보완) ───────────────────
+        # /search API는 DB row를 누락할 수 있으므로 명시 등록된 DB를 직접 조회.
+        notion_databases = dept_cfg.get("notion_databases", [])
+        if notion_databases:
+            existing_ids = {p.get("id", "").replace("-", "") for p in modified_pages}
+            db_items = fetch_modified_db_items(
+                notion_client, token, since_iso, notion_databases
+            )
+            # 중복 제거: /search 로 이미 가져온 항목은 건너뜀
+            added = [item for item in db_items
+                     if item.get("id", "").replace("-", "") not in existing_ids]
+            if added:
+                print(f"  + DB 직접 쿼리로 {len(added)}개 추가 (중복 제외)")
+                modified_pages.extend(added)
+            else:
+                print("  ✅ DB 직접 쿼리 완료 (신규 없음)")
 
         # ── Per-page 필터링: PostgreSQL notion_pages.last_edited_time 기준 ──
         # stored_edit_times 는 Notion API 호출 전에 이미 조회됨 (since_iso 결정용).
