@@ -1,7 +1,7 @@
 # Semantica — 프로젝트 전체 요약
 
 > JoyCity 전략사업본부 Notion 기반 온톨로지 검색 솔루션  
-> 최종 업데이트: 2026-09-03 (Parent Document Retrieval, 대시보드 청크 뷰어, notion_fetch 개선)
+> 최종 업데이트: 2026-09-03 (Parent Document Retrieval, 대시보드 청크 뷰어, notion_fetch 개선, FalkorDB 쿼리/시각화, 방화벽 포트)
 
 ---
 
@@ -149,6 +149,62 @@ MEASURED_BY, TARGETS, USES, SUPPORTS, CONFLICTS_WITH,
 PRECEDES, FOLLOWS, PART_OF, REPORTS_TO, COLLABORATES_WITH,
 AFFECTS, GENERATES, REFERENCES, RESOLVES, COMPETES_WITH
 ```
+
+### 4-6. FalkorDB 그래프 조회 및 시각화
+
+**예시 쿼리 파일 (`falkordb/01_example_queries.cypher`)**
+
+| # | 쿼리 | 내용 |
+|---|------|------|
+| 0 | 기본 통계 | 노드/엣지 수, 라벨별·관계명별 집계 |
+| 1 | 특정 게임 연관 엔티티 | POTC와 연결된 팀·인물·전략·이벤트 (양방향) |
+| 2 | 특정 인물의 관계망 | 1홉·2홉, 역방향 포함 |
+| 3 | 게임별 이벤트 시계열 | `:Event` 노드 + `HAD_EVENT` 관계, 날짜 정렬 |
+| 4 | 원인-결과 체인 | `CAUSES → Issue → LEADS_TO/AFFECTS` 2홉 |
+| 5 | 팀 조직도 | `BELONGS_TO, MANAGES, TARGETS, REPORTS_TO` |
+| 6 | 두 엔티티 간 최단 경로 | `shortestPath((a)-[*1..5]-(b))` |
+| 전체 | 전체 그래프 조회 | from/relation/to 3열, HAD_EVENT 포함, CSV 내보내기용 |
+
+```bash
+# redis-cli로 직접 실행
+redis-cli -h localhost -p 6379
+> GRAPH.QUERY strategic_kg "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS cnt ORDER BY cnt DESC"
+```
+
+> ⚠️ FalkorDB 한국어 rel_type 미지원 → 모든 관계는 `:REL` 타입 고정.  
+> 실제 관계명은 `r.rel_name` 속성에 저장됨.
+
+**그래프 내보내기 + HTML 시각화 (`falkordb/export_graph.py`)**
+
+```bash
+# JSON 내보내기 (stdout)
+python falkordb/export_graph.py --dept strategic
+
+# 인터랙티브 HTML 생성
+python falkordb/export_graph.py --dept strategic --html graph.html
+
+# 직접 파일 지정
+python falkordb/export_graph.py --output graph.json --html graph.html
+```
+
+- FalkorDB에서 노드·엣지 전체를 조회해 JSON 구조로 반환
+- `--html`: Force-directed 레이아웃의 **자체 포함 인터랙티브 HTML** 생성
+  - Canvas 기반 렌더링 (300 스텝 시뮬레이션)
+  - 줌/패닝, 노드 클릭 → 사이드바 상세 정보
+  - 타입별 색상 구분, 노드 타입 필터 드롭다운, 이름 검색
+  - 외부 CDN 의존 없이 독립 실행 가능
+
+| 노드 타입 | 색상 |
+|---------|------|
+| Game | #3B82F6 (파랑) |
+| Team | #10B981 (초록) |
+| Person | #F59E0B (주황) |
+| Event | #EF4444 (빨강) |
+| Metric | #8B5CF6 (보라) |
+| Strategy | #06B6D4 (시안) |
+| Issue | #F97316 (오렌지) |
+| Insight | #EC4899 (핑크) |
+| Decision | #6B7280 (회색) |
 
 ---
 
@@ -341,6 +397,35 @@ print('FalkorDB 삭제 완료')
 
 > `delete_graph()` 메서드 없음 → `select_graph().delete()` 사용
 
+### 7-4. ngrok 상태 확인 및 재시작
+
+```bash
+# 현재 ngrok 터널 URL 확인 (ngrok 로컬 API)
+curl http://localhost:4040/api/tunnels
+
+# URL만 추출
+curl -s http://localhost:4040/api/tunnels | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for t in d['tunnels']:
+    print(t['public_url'])
+"
+
+# ngrok 프로세스 확인
+ps aux | grep ngrok
+
+# ngrok 재시작
+pkill -f ngrok; sleep 1
+nohup ngrok http 8766 > logs/ngrok.log 2>&1 &
+sleep 2
+
+# 새 URL 확인 후 Snowflake UDF에 반영
+curl http://localhost:4040/api/tunnels
+```
+
+> ⚠️ **ngrok 무료 플랜**: 재시작 시 URL 변경됨.  
+> URL 변경 후 `snowflake/01_network_access.sql` (Network Rule) 및 `snowflake/02_python_udfs.sql` (UDF 엔드포인트)를 새 URL로 재생성해야 함.
+
 ---
 
 ## 8. 구현 완료 / 예정
@@ -358,10 +443,12 @@ print('FalkorDB 삭제 완료')
 | 9 | Parent Document Retrieval | ✅ | `server.py` `_fetch_full_pages()`, 2026-09-03 |
 | 10 | 웹 대시보드 Qdrant 청크 뷰어 | ✅ | `web_app.py` `/api/qdrant-chunks` + 모달 UI |
 | 11 | notion_fetch `--min-words` 필터 | ✅ | 수집 단계에서 텍스트 부족 페이지 제외 |
-| 12 | Cortex Analyst YAML 모델 | 🔜 | KPI/매출 테이블 시맨틱 모델 작성 필요 |
-| 13 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
-| 14 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
-| 15 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
+| 12 | FalkorDB 예시 쿼리 (`falkordb/01_example_queries.cypher`) | ✅ | 6종 예시 쿼리 + 전체 그래프 조회 |
+| 13 | FalkorDB 그래프 내보내기 + HTML 시각화 (`falkordb/export_graph.py`) | ✅ | Force-directed 인터랙티브 HTML |
+| 14 | Cortex Analyst YAML 모델 | 🔜 | KPI/매출 테이블 시맨틱 모델 작성 필요 |
+| 15 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
+| 16 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
+| 17 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
 
 ---
 
@@ -405,14 +492,50 @@ SNOWFLAKE_REST_PORT=8766
 
 ---
 
-## 11. 변경 이력
+## 11. 방화벽 포트 목록
+
+방화벽 신청 시 개방 요청해야 하는 포트 목록 (GCP VM 기준).
+
+### 인바운드 (외부 → VM)
+
+| 포트 | 프로토콜 | 용도 | 접근 대상 |
+|------|---------|------|---------|
+| 22 | TCP | SSH 접속 | 개발자 IP |
+| 8080 | TCP | 웹 운영 대시보드 (`web_app.py`) | 개발자 IP |
+| 8765 | TCP | MCP 서버 (`server.py`) | Claude Desktop / Cursor (개발자 IP) |
+| 8766 | TCP | REST API 서버 (`rest_api.py`) | ngrok(내부), 개발자 IP |
+| 6333 | TCP | Qdrant 벡터 DB (HTTP REST + 대시보드) | 개발자 IP |
+| 6379 | TCP | FalkorDB (Redis 프로토콜) | 개발자 IP |
+| 4040 | TCP | ngrok 로컬 관리 UI | localhost only |
+
+> `6333` (Qdrant 대시보드: `http://<vm-ip>:6333/dashboard`) 및  
+> `6379` (FalkorDB, redis-cli 접속)는 개발자 IP에서 직접 접근 필요.
+
+### 아웃바운드 (VM → 외부)
+
+| 포트 | 프로토콜 | 목적지 | 용도 |
+|------|---------|-------|------|
+| 443 | TCP | `api.notion.com` | Notion API 페이지 수집 |
+| 443 | TCP | `us-east5-aiplatform.googleapis.com` | Vertex AI 임베딩 |
+| 443 | TCP | Anthropic / Claude API 엔드포인트 | LLM 트리플 추출 |
+| 443 | TCP | `ngrok.com`, `*.ngrok-free.dev` | ngrok HTTPS 터널 |
+| 443 | TCP | Snowflake (us-central1.gcp) | 쿼리 결과 수신 (Snowflake → Semantica 방향은 아웃바운드 불필요) |
+
+---
+
+## 12. 변경 이력
 
 | 날짜 | 내용 |
 |------|------|
-| 2026-09-03 | Parent Document Retrieval 적용 (server.py) — 청크 단위 → 페이지 전체 본문 반환 |
-| 2026-09-03 | 웹 대시보드 Qdrant 청크 뷰어 추가 (web_app.py) — 🔍 청크 버튼 + 모달 UI |
+| 2026-09-03 | Parent Document Retrieval 적용 (`server.py`) — 청크 단위 → 페이지 전체 본문(최대 4000자) 반환 |
+| 2026-09-03 | 웹 대시보드 Qdrant 청크 뷰어 추가 (`web_app.py`) — 🔍 청크 버튼 + 모달 UI |
 | 2026-09-03 | notion_fetch `--min-words` 옵션 추가 — 수집 단계에서 텍스트 부족 페이지 제외 |
-| 2026-09-03 | Snowflake 05_cortex_agent.sql — content 필드 반영, source_url 인용 강화 |
+| 2026-09-03 | Snowflake `05_cortex_agent.sql` — `content` 필드 반영, `source_url` 인용 강화 |
+| 2026-09-03 | Snowflake `03_test_queries.sql` — Parent Document Retrieval 적용 후 VARIANT 파싱 `content/chunk_count` 반영 |
+| 2026-09-03 | FalkorDB 예시 쿼리 추가 (`falkordb/01_example_queries.cypher`) — 6종 쿼리 + 전체 그래프 조회 |
+| 2026-09-03 | FalkorDB 그래프 내보내기 + HTML 시각화 추가 (`falkordb/export_graph.py`) — Force-directed 인터랙티브 HTML |
 | 2026-09-03 | FalkorDB 초기화 방법 확인 — `delete_graph()` 없음, `select_graph().delete()` 사용 |
+| 2026-09-03 | ngrok 상태 확인·재시작 방법 추가 — 로컬 API `localhost:4040`, URL 변경 시 Snowflake UDF 재생성 필요 |
+| 2026-09-03 | 방화벽 포트 목록 추가 — 인바운드 7종, 아웃바운드 5종 (6333 Qdrant, 6379 FalkorDB 포함) |
 | 2026-09-03 | ngrok HTTPS 터널 + REST API 서버 + 웹 대시보드 구성 완료 |
 | 2026-09-03 | Snowflake Python UDF 3종 (`sementica_search/events/hybrid`) 구현·테스트 완료 |
