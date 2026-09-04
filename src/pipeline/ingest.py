@@ -621,6 +621,17 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
     body = page["body"]
     word_count = len(body.split())
 
+    # ── DB 항목: page body가 비어있으면 속성값에서 텍스트 합성 ───────────────
+    # Notion DB row는 속성(properties)만 채워지고 page body가 빈 경우가 많다.
+    # .md 파일의 db_properties frontmatter를 읽어 body를 재합성한다.
+    db_props_meta = meta.get("db_properties", {})
+    if db_props_meta and word_count < 30:
+        prop_text  = "\n".join(f"{k}: {v}" for k, v in db_props_meta.items())
+        body       = (prop_text + ("\n\n" + body if body.strip() else "")).strip()
+        word_count = len(body.split())
+        if word_count > 0:
+            print(f"     🔧 DB 속성에서 텍스트 합성 ({word_count} 단어)")
+
     print(f"\n  📄 {path.name}  ({word_count} 단어)")
     print(f"     URL: {meta.get('notion_url', '-')}")
 

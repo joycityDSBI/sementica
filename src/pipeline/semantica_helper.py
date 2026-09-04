@@ -895,16 +895,20 @@ def classify_page(body: str, meta: dict, word_count: int) -> str:
     """
     title = (meta.get("title") or "").lower()
 
-    # 1. 완전 제외 조건
+    # 1. Notion DB 아이템 우선 처리 — 구조화 속성이 있으면 word_count 기준 완화
+    # DB row는 속성값을 합성한 body를 쓰므로 단어 수가 적어도 의미 있는 데이터.
+    # 속성이 하나라도 있으면 core로 처리 (5단어 미만만 제외).
+    if meta.get("db_properties"):
+        if word_count < 5:
+            return "excluded"
+        return "core"
+
+    # 2. 완전 제외 조건 (일반 페이지)
     if word_count < 30:
         return "excluded"
     for pat in _EXCLUDED_TITLE_PATTERNS:
         if pat in title:
             return "excluded"
-
-    # 2. Notion DB 아이템 (게임·이벤트 관련 구조화 속성 있음) → 항상 core
-    if meta.get("db_properties"):
-        return "core"
 
     # 3. 제목 키워드 우선 판정
     for kw in _CORE_TITLE_KEYWORDS:
