@@ -246,23 +246,70 @@ def blocks_to_text(blocks: list, depth: int = 0) -> str:
     return "\n".join(line for line in lines if line.strip() or not lines)
 
 
+def _table_to_md(client, token, table_block: dict) -> str:
+    """
+    Notion table 블록을 Markdown 테이블 문자열로 변환합니다.
+
+    table_row 자식을 즉시 가져와 인라인으로 배치합니다.
+    has_column_header == True 이면 첫 행 뒤에 구분선을 추가합니다.
+
+    예시 출력:
+        | 캠페인명          | 예산      | 담당자 |
+        | ---               | ---       | ---    |
+        | KR_And_UAC_tCPA   | 5,000,000 | 김린아  |
+    """
+    has_header = table_block.get("table", {}).get("has_column_header", False)
+    rows = fetch_blocks(client, token, table_block["id"])
+    if not rows:
+        return ""
+
+    lines = []
+    for i, row in enumerate(rows):
+        cells      = row.get("table_row", {}).get("cells", [])
+        cell_texts = [" ".join(t.get("plain_text", "") for t in cell) for cell in cells]
+        lines.append("| " + " | ".join(cell_texts) + " |")
+        # 헤더 행 다음 구분선 삽입
+        if i == 0 and has_header and cell_texts:
+            lines.append("| " + " | ".join(["---"] * len(cell_texts)) + " |")
+
+    return "\n".join(lines)
+
+
 def fetch_blocks_recursive(client, token, block_id, depth=0, max_depth=4) -> str:
-    """블록을 재귀적으로 가져와 텍스트로 변환"""
+    """
+    블록을 재귀적으로 가져와 텍스트로 변환합니다.
+
+    Notion 페이지 안의 table 블록은 인라인으로 처리합니다:
+      - 테이블이 문서 내 원래 위치에 삽입됨 (기존에는 맨 뒤에 붙었음)
+      - has_column_header 일 때 구분선 자동 추가
+    """
     if depth > max_depth:
         return ""
     blocks = fetch_blocks(client, token, block_id)
-    text   = blocks_to_text(blocks, depth)
 
-    child_parts = []
+    parts = []
     for block in blocks:
-        if block.get("has_children"):
+        btype = block.get("type", "")
+
+        # ── 테이블: 행을 즉시 가져와 인라인 Markdown 테이블로 변환 ─────────
+        if btype == "table":
+            md = _table_to_md(client, token, block)
+            if md:
+                parts.append(md)
+            continue  # table_row 자식은 이미 처리 완료
+
+        # ── 일반 블록 ────────────────────────────────────────────────────
+        block_text = blocks_to_text([block], depth)
+        if block_text.strip():
+            parts.append(block_text)
+
+        # 자식이 있는 블록 재귀 (table 제외 — 위에서 처리)
+        if block.get("has_children") and btype != "table":
             child = fetch_blocks_recursive(client, token, block["id"], depth + 1, max_depth)
             if child.strip():
-                child_parts.append(child)
+                parts.append(child)
 
-    if child_parts:
-        text = text + "\n" + "\n".join(child_parts)
-    return text
+    return "\n".join(part for part in parts if part.strip())
 
 
 # ── Notion DB 속성 핸들러 (type → extractor) ──────────────────────────────────
