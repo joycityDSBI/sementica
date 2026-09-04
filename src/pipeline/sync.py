@@ -26,7 +26,7 @@ import os
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -910,6 +910,8 @@ def main():
     parser.add_argument("--full",    action="store_true", help="전체 재동기화 (last_sync_time 무시)")
     parser.add_argument("--limit",   type=int, default=0,
                         help="처리할 최대 페이지 수 (기본: 0 = 무제한). 예: --limit 50")
+    parser.add_argument("--workers",   type=int, default=3,
+                        help="병렬 처리 워커 수 (기본: 3). Notion API 레이트 리밋을 고려해 5 이하 권장")
     parser.add_argument("--dry-run",   action="store_true", help="변경 내용 확인만 (저장 안 함)")
     parser.add_argument("--reconcile", action="store_true",
                         help="Notion 삭제 페이지 감지 후 Qdrant·FalkorDB에서 데이터 정리 (주 1회 권장)")
@@ -1052,18 +1054,46 @@ def main():
         if _stored_hashes:
             print(f"  🔑 content_hash {len(_stored_hashes)}건 로드 (무변경 페이지 LLM 재처리 스킵)")
 
-        # ── 동기화 실행 ─────────────────────────────────────────────────
-        print("\n[3/4] 페이지 동기화 시작")
-        results = []
-        for i, page in enumerate(modified_pages, 1):
-            print(f"\n  [{i:03d}/{len(modified_pages):03d}]")
-            r = sync_page(
-                notion_client, token, page,
-                qc, embed_client, llm_client, graph,
-                collection_name, dry_run=args.dry_run, dept=args.dept,
-                stored_hashes=_stored_hashes,
-            )
-            results.append(r)
+        # ── 동기화 실행 (병렬) ──────────────────────────────────────────
+        # 스레드 안전성:
+        #   - httpx.Client (Notion): 스레드 비안전 → 워커마다 신규 생성
+        #   - falkordb.Graph:        Redis 단일 연결 → 워커마다 신규 생성
+        #   - QdrantClient:          thread-safe (httpx pool) → 공유
+        #   - genai.Client / AnthropicVertex: thread-safe (HTTP) → 공유
+        #   - _stored_hashes: 읽기 전용 dict → 공유
+        n_workers = min(args.workers, len(modified_pages))
+        total_pages = len(modified_pages)
+        print(f"\n[3/4] 페이지 동기화 시작 (워커: {n_workers})")
+        results: list = []
+
+        def _sync_one(idx_page: tuple) -> dict:
+            """워커 함수 — 스레드 전용 클라이언트로 단일 페이지 동기화."""
+            idx, page_meta = idx_page
+            print(f"\n  [{idx:03d}/{total_pages:03d}]")
+            # 스레드 전용 FalkorDB 연결 (Graph 객체는 Redis 단일 연결로 비안전)
+            import falkordb as _fdb
+            _db    = _fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
+            _graph = _db.select_graph(graph_name)
+            # 스레드 전용 Notion httpx 클라이언트
+            with httpx.Client(timeout=60) as _nc:
+                return sync_page(
+                    _nc, token, page_meta,
+                    qc, embed_client, llm_client, _graph,
+                    collection_name, dry_run=args.dry_run, dept=args.dept,
+                    stored_hashes=_stored_hashes,
+                )
+
+        with ThreadPoolExecutor(max_workers=n_workers) as pool:
+            futures = {
+                pool.submit(_sync_one, (i, page)): i
+                for i, page in enumerate(modified_pages, 1)
+            }
+            for fut in as_completed(futures):
+                try:
+                    results.append(fut.result())
+                except Exception as e:
+                    print(f"  ⚠️  페이지 처리 실패: {e}")
+                    results.append({"error": str(e)})
             time.sleep(0.5)
 
     # ── 결과 요약 ─────────────────────────────────────────────────────────
