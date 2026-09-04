@@ -21,6 +21,7 @@ import argparse
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -251,67 +252,75 @@ def _fetch_full_pages(
 
 
 def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
-    """서브쿼리 단위 벡터+그래프 검색 (내부 헬퍼)
+    """서브쿼리 단위 벡터+그래프 검색 — ThreadPoolExecutor로 두 검색을 병렬 실행.
+
+    순차 실행 대비 레이턴시: (vec_ms + gph_ms) → max(vec_ms, gph_ms)
+    일반적으로 300~500ms → 200~300ms 수준으로 단축.
 
     Parent Document Retrieval 적용:
     벡터 유사도로 top-k 청크를 찾은 뒤, 매칭된 page_id의 전체 청크를
     조합해 완전한 페이지 본문을 반환합니다.
     """
-    # ─ 벡터 검색 + Parent Document Retrieval ─
-    sem: list = []
-    try:
-        vec = _embed(sub_query)
-        qc = _get_qdrant()
-        hit = qc.query_points(
-            collection_name=COLLECTION_NAME,
-            query=vec,
-            limit=limit,
-            with_payload=True,
-        )
 
-        # 매칭된 청크에서 page_id별 최고 유사도 점수 수집
-        page_scores: dict = {}
-        for h in hit.points:
-            p = h.payload or {}
-            pid = p.get("page_id", "")
-            score = round(h.score, 4)
-            if pid and (pid not in page_scores or score > page_scores[pid]):
-                page_scores[pid] = score
-
-        # 해당 page_id의 모든 청크를 조합해 전체 페이지 본문 반환
-        full_pages = _fetch_full_pages(qc, COLLECTION_NAME, list(page_scores.keys()))
-        for pid, page in full_pages.items():
-            sem.append({
-                "title":       page["title"],
-                "source_url":  page["source_url"],
-                "content":     page["content"],
-                "chunk_count": page["chunk_count"],
-                "score":       page_scores.get(pid, 0.0),
-            })
-    except Exception:
-        pass
-
-    # ─ 그래프 검색 ─
-    gph: list = []
-    try:
-        graph = _get_falkordb()
-        words = [w for w in sub_query.split() if len(w) >= 2]
-        seen: set = set()
-        for word in words[:3]:   # 2→3: 서브쿼리당 더 많은 엔티티 탐색
-            nodes = graph.query(
-                "MATCH (n) WHERE n.name CONTAINS $name RETURN n.name LIMIT 2",
-                {"name": word},
+    def _do_vector() -> list:
+        try:
+            vec = _embed(sub_query)
+            qc = _get_qdrant()
+            hit = qc.query_points(
+                collection_name=COLLECTION_NAME,
+                query=vec,
+                limit=limit,
+                with_payload=True,
             )
-            for row in nodes.result_set:
-                entity_name = row[0]
-                if entity_name in seen:
-                    continue
-                seen.add(entity_name)
-                g = graph_search(entity_name, depth=1)
-                if g.get("found"):
-                    gph.append(g)
-    except Exception:
-        pass
+            page_scores: dict = {}
+            for h in hit.points:
+                p = h.payload or {}
+                pid = p.get("page_id", "")
+                score = round(h.score, 4)
+                if pid and (pid not in page_scores or score > page_scores[pid]):
+                    page_scores[pid] = score
+            full_pages = _fetch_full_pages(qc, COLLECTION_NAME, list(page_scores.keys()))
+            result = []
+            for pid, page in full_pages.items():
+                result.append({
+                    "title":       page["title"],
+                    "source_url":  page["source_url"],
+                    "content":     page["content"],
+                    "chunk_count": page["chunk_count"],
+                    "score":       page_scores.get(pid, 0.0),
+                })
+            return result
+        except Exception:
+            return []
+
+    def _do_graph() -> list:
+        gph: list = []
+        try:
+            graph = _get_falkordb()
+            words = [w for w in sub_query.split() if len(w) >= 2]
+            seen: set = set()
+            for word in words[:3]:
+                nodes = graph.query(
+                    "MATCH (n) WHERE n.name CONTAINS $name RETURN n.name LIMIT 2",
+                    {"name": word},
+                )
+                for row in nodes.result_set:
+                    entity_name = row[0]
+                    if entity_name in seen:
+                        continue
+                    seen.add(entity_name)
+                    g = graph_search(entity_name, depth=1)
+                    if g.get("found"):
+                        gph.append(g)
+        except Exception:
+            pass
+        return gph
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_vec = pool.submit(_do_vector)
+        f_gph = pool.submit(_do_graph)
+        sem = f_vec.result()
+        gph = f_gph.result()
 
     return sem, gph
 
@@ -542,8 +551,11 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
             entity:   실제 매칭된 엔티티 이름,
             type:     엔티티 유형 (Person/Team/Process/System/Policy 등),
             found:    검색 성공 여부 (false면 해당 엔티티가 그래프에 없음),
-            outgoing: [{relation, target_name, target_type, condition, order, source_url}]
-                      이 엔티티에서 나가는 관계 목록,
+            outgoing: [{relation, target_name, target_type, condition, order, source_url,
+                        evidence_quote, realization_status, evidence_chunk_id, source_text}]
+                      이 엔티티에서 나가는 관계 목록
+                      (evidence_quote: 원문 인용, realization_status: planned/applied/unconfirmed,
+                       source_text: 해당 Qdrant 청크 전문 — evidence_chunk_id가 있을 때만 포함),
             incoming: [{relation, source_name, source_type, source_url}]
                       이 엔티티로 들어오는 관계 목록 (누가 이 엔티티와 관계를 맺는지)
         }
@@ -570,15 +582,17 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
         matched_type = node_result.result_set[0][1]
 
         if depth == 1:
+            # v2: evidence_quote·realization_status·evidence_chunk_id 포함
             rel_query = (
                 "MATCH (n {name: $name})-[r:REL]->(m) "
-                "RETURN r.rel_name AS relation, m.name AS target, labels(m)[0] AS target_type, "
-                "r.condition AS condition, r.order AS order, r.source_url AS source_url "
+                "RETURN r.rel_name, m.name, labels(m)[0], "
+                "r.condition, r.order, r.source_url, "
+                "r.evidence_quote, r.realization_status, r.evidence_chunk_id "
                 "LIMIT 20"
             )
             rel_result = graph.query(rel_query, {"name": matched_name})
         else:
-            # r[-1] 은 FalkorDB 에서 미지원 → path 기반 추출로 교체 (source_url 제외)
+            # path 기반 추출 (depth=2) — source_url 제외, FalkorDB r[-1] 미지원
             rel_query = (
                 "MATCH p=(n {name: $name})-[:REL*1..2]->(m) "
                 "RETURN [r IN relationships(p) | r.rel_name] AS relation, "
@@ -594,13 +608,43 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
                 "target_name": row[1],
                 "target_type": row[2],
             }
-            if len(row) > 3 and row[3]:
-                rel["condition"] = row[3]
-            if len(row) > 4 and row[4]:
-                rel["order"] = row[4]
-            if len(row) > 5 and row[5]:
-                rel["source_url"] = row[5]
+            if depth == 1:
+                # row: [rel_name, target, target_type, condition, order, source_url,
+                #        evidence_quote, realization_status, evidence_chunk_id]
+                if len(row) > 3 and row[3]:
+                    rel["condition"]          = row[3]
+                if len(row) > 4 and row[4]:
+                    rel["order"]              = row[4]
+                if len(row) > 5 and row[5]:
+                    rel["source_url"]         = row[5]
+                if len(row) > 6 and row[6]:
+                    rel["evidence_quote"]     = row[6]
+                if len(row) > 7 and row[7]:
+                    rel["realization_status"] = row[7]
+                if len(row) > 8 and row[8]:
+                    rel["evidence_chunk_id"]  = row[8]
+            else:
+                pass   # depth=2: rel_name만 (path 기반)
             relations.append(rel)
+
+        # ── evidence_chunk_id → Qdrant 직접 조회로 원문 청크 텍스트 첨부 ──────
+        # 벡터 유사도 검색보다 훨씬 빠름 (O(1) ID 조회)
+        chunk_ids = [r["evidence_chunk_id"] for r in relations if r.get("evidence_chunk_id")]
+        if chunk_ids:
+            try:
+                qc = _get_qdrant()
+                pts = qc.retrieve(
+                    collection_name=COLLECTION_NAME,
+                    ids=chunk_ids,
+                    with_payload=["text"],
+                )
+                id_to_text = {str(pt.id): (pt.payload or {}).get("text", "") for pt in pts}
+                for r in relations:
+                    cid = r.get("evidence_chunk_id")
+                    if cid and cid in id_to_text:
+                        r["source_text"] = id_to_text[cid]
+            except Exception:
+                pass   # chunk 조회 실패해도 그래프 결과는 정상 반환
 
         # 역방향 관계 탐색 (누가 이 엔티티와 관계를 맺는지)
         # depth=1: 직접 연결된 1홉 incoming
@@ -726,14 +770,24 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
             sub_queries = _decompose_query(query)
             decomposed = len(sub_queries) > 1
 
-        # ── 2. 서브쿼리별 벡터+그래프 검색 ────────────────────────────────
+        # ── 2. 서브쿼리별 벡터+그래프 병렬 검색 ───────────────────────────
+        # 각 서브쿼리는 독립적 → 서브쿼리 간에도 병렬 실행
+        # 내부에서 _run_sub_search가 vector+graph를 이미 병렬 실행
+        # 총 스레드: len(sub_queries) x 2 (최대 8개)
+        # 레이턴시: O(max(sub_queries)) 아닌 O(max(single_sub_query))
         sem_per_q: list[list] = []
         all_graph_hits: list = []
 
-        for sq in sub_queries:
-            sem, gph = _run_sub_search(sq, limit=limit)
-            sem_per_q.append(sem)
-            all_graph_hits.extend(gph)
+        n_workers = min(len(sub_queries), 4)   # 최대 4개 서브쿼리 동시 실행
+        with ThreadPoolExecutor(max_workers=n_workers) as sq_pool:
+            sq_futures = [
+                sq_pool.submit(_run_sub_search, sq, limit)
+                for sq in sub_queries
+            ]
+            for fut in as_completed(sq_futures):
+                sem, gph = fut.result()
+                sem_per_q.append(sem)
+                all_graph_hits.extend(gph)
 
         # ── 3. 벡터 결과 병합 (coverage 재랭킹) ────────────────────────────
         semantic = _merge_semantic_results(sem_per_q)

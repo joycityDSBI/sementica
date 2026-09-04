@@ -60,6 +60,7 @@ from semantica_helper import (  # noqa: E402
     content_hash,
     detect_realization_status,
     extract_with_fallback,
+    find_evidence_chunk_id,
     is_decision_triplet,
     merge_node,
     record_decision_node,
@@ -720,11 +721,14 @@ def sync_page(
         for k in ("condition", "order", "duration"):
             if k in pred:
                 props[k] = pred[k]
-        # v2: 근거 인용문 + 실현 상태
+        # v2: 근거 인용문 + 실현 상태 + 청크 직접 링크
         eq = (t.get("evidence_quote") or "").strip()
         if eq:
             props["evidence_quote"]     = eq
             props["realization_status"] = detect_realization_status(eq)
+            cid = find_evidence_chunk_id(eq, chunks, source_url)
+            if cid:
+                props["evidence_chunk_id"] = cid
         try:
             # create_relationship() SDK 메서드는 버전에 따라 동작이 다름 →
             # Cypher 직접 실행으로 대체 (node id 기반, 안정적)

@@ -48,6 +48,9 @@ max-complexity = 25
 "scripts/test_mcp.py" = ["C901"]
 # 웹 앱 HTML/JS 인라인 템플릿 안의 UI 특수문자 (–, ‹, › 등) 허용
 "src/ops/web_app.py"  = ["RUF001"]
+# sync_page: Notion 페이지 단위 전처리(분류·해시·임베딩·LLM·이벤트·DB)를 단일 함수에서
+# 순서대로 조율하는 조율자(orchestrator) 역할 — 도메인 필수 복잡도로 분리 리팩토링 불가
+"src/pipeline/sync.py" = ["C901"]
 
 [tool.ruff.lint.isort]
 known-first-party = [

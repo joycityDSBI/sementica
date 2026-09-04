@@ -41,6 +41,7 @@ from semantica_helper import (
     content_hash,
     detect_realization_status,
     extract_with_fallback,
+    find_evidence_chunk_id,
     is_decision_triplet,
     merge_node,
     record_decision_node,
@@ -541,7 +542,11 @@ def store_vector(page: dict) -> int:
 
 
 # ─── 그래프 저장 ─────────────────────────────────────────────────────────────
-def store_graph(triplets: list, source_url: str) -> dict:
+def store_graph(
+    triplets: list,
+    source_url: str,
+    chunks: "list[str] | None" = None,
+) -> dict:
     """타입 트리플 → FalkorDB 노드/엣지 저장"""
     nodes_created = 0
     edges_created = 0
@@ -573,11 +578,15 @@ def store_graph(triplets: list, source_url: str) -> dict:
         for k in ("condition", "order", "duration"):
             if k in pred:
                 rel_props[k] = pred[k]
-        # v2: 근거 인용문 + 실현 상태
+        # v2: 근거 인용문 + 실현 상태 + 청크 직접 링크
         eq = (t.get("evidence_quote") or "").strip()
         if eq:
-            rel_props["evidence_quote"]      = eq
-            rel_props["realization_status"]  = detect_realization_status(eq)
+            rel_props["evidence_quote"]     = eq
+            rel_props["realization_status"] = detect_realization_status(eq)
+            # evidence_chunk_id: Qdrant 청크 UUID → MCP graph_search에서 직접 조회 가능
+            cid = find_evidence_chunk_id(eq, chunks or [], source_url)
+            if cid:
+                rel_props["evidence_chunk_id"] = cid
 
         try:
             # rel_props 키를 파라미터명 충돌 없이 SET으로 처리
@@ -678,9 +687,11 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
         print(f"     트리플: {len(triplets)}개 추출 [{src}]")
 
         # 3. 그래프 저장 (FalkorDB 락으로 동시 쓰기 보호)
+        # evidence_chunk_id 연결을 위해 청크 목록 재계산 (store_vector 내부와 동일 로직, 저비용)
+        _chunks_for_graph = _make_chunks(body)
         if triplets:
             with _falkordb_lock:
-                stats = store_graph(triplets, meta.get("notion_url", ""))
+                stats = store_graph(triplets, meta.get("notion_url", ""), chunks=_chunks_for_graph)
             result["graph"] = stats
             print(f"     그래프: 노드 {stats['nodes']}개, 엣지 {stats['edges']}개 저장")
         else:

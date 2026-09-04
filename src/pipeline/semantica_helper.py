@@ -955,6 +955,38 @@ _APPLIED_SIGNALS: frozenset = frozenset([
 ])
 
 
+def find_evidence_chunk_id(
+    evidence_quote: str,
+    chunks: "list[str]",
+    source_url: str,
+) -> "str | None":
+    """
+    evidence_quote가 포함된 Qdrant 청크의 UUID를 반환합니다.
+
+    ingest / sync 시 FalkorDB 엣지에 `evidence_chunk_id`를 기록하면,
+    MCP graph_search가 해당 청크를 직접 Qdrant retrieve로 조회할 수 있습니다.
+    (벡터 유사도 검색보다 훨씬 빠름 — O(1) ID 조회)
+
+    Args:
+        evidence_quote: LLM이 추출한 원문 인용 문구
+        chunks:         store_vector에서 분할한 청크 리스트
+        source_url:     Notion 페이지 URL (UUID 네임스페이스로 사용)
+
+    Returns:
+        청크 UUID 문자열 (str) or None (매칭 청크 없음)
+    """
+    if not evidence_quote or not chunks:
+        return None
+    # 앞 40자로 검색 (LLM이 원문을 그대로 인용했다면 충분)
+    key = evidence_quote[:40].lower().strip()
+    if not key:
+        return None
+    for i, chunk in enumerate(chunks):
+        if key in chunk.lower():
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_url}#chunk{i}"))
+    return None
+
+
 def detect_realization_status(evidence_text: str) -> str:
     """
     트리플의 근거 문구(evidence_quote)에서 계획/실현 신호어를 감지해
