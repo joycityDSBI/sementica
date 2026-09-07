@@ -608,8 +608,9 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
     print(f"     URL: {meta.get('notion_url', '-')}")
 
     # ── Phase 1-① 경로 분류 ─────────────────────────────────────────────────
-    route     = classify_page(body, meta, word_count)
-    body_hash = content_hash(body)
+    route            = classify_page(body, meta, word_count)
+    body_hash        = content_hash(body)
+    has_html_attach  = "[첨부 HTML:" in body
     print(f"     경로: {route}")
 
     if route == "excluded":
@@ -622,6 +623,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
                 last_edited_time=meta.get("last_edited_time"),
                 word_count=word_count,
                 is_db_item=bool(meta.get("db_properties")),
+                has_html_attachment=has_html_attach,
                 status="skipped",
                 route="excluded",
                 content_hash=body_hash,
@@ -658,6 +660,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
                     word_count=word_count,
                     chunk_count=chunk_count,
                     is_db_item=bool(meta.get("db_properties")),
+                    has_html_attachment=has_html_attach,
                     status="ok",
                     route="defer",
                     content_hash=body_hash,
@@ -728,6 +731,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
                 triplet_count=result.get("triplet_count", 0),
                 event_count=ev_stored,
                 is_db_item=bool(meta.get("db_properties")),
+                has_html_attachment=has_html_attach,
                 status="ok",
                 route=route,
                 content_hash=body_hash,

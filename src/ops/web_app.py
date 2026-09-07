@@ -226,7 +226,8 @@ def api_pages(
             cur.execute(
                 f"""SELECT page_id, title, notion_url, last_edited_time,
                            last_ingested_at, word_count, chunk_count,
-                           triplet_count, event_count, is_db_item, status
+                           triplet_count, event_count, is_db_item,
+                           has_html_attachment, status
                     FROM notion_pages WHERE {where}
                     ORDER BY last_ingested_at DESC LIMIT %s OFFSET %s""",
                 p_list,
@@ -1175,8 +1176,8 @@ select {
   </div>
   <div class="table-wrap" style="margin-bottom:8px">
     <table>
-      <thead><tr><th>제목</th><th>단어</th><th>청크</th><th>트리플</th><th>이벤트</th><th>마지막수정</th><th>상태</th><th></th></tr></thead>
-      <tbody id="pages-tbody"><tr><td colspan="8" class="empty">로딩 중...</td></tr></tbody>
+      <thead><tr><th>제목</th><th>단어</th><th>청크</th><th>트리플</th><th>이벤트</th><th>HTML</th><th>마지막수정</th><th>상태</th><th></th></tr></thead>
+      <tbody id="pages-tbody"><tr><td colspan="9" class="empty">로딩 중...</td></tr></tbody>
     </table>
   </div>
   <div id="pages-pagination" style="display:flex;align-items:center;gap:6px;justify-content:center;margin-bottom:24px;flex-wrap:wrap"></div>
@@ -1559,12 +1560,13 @@ function renderPageRows(data) {
     <td>${p.chunk_count ?? '—'}</td>
     <td>${p.triplet_count ?? '—'}</td>
     <td>${p.event_count ?? '—'}</td>
+    <td style="text-align:center">${p.has_html_attachment ? '<span title="HTML 첨부 파일 있음" style="font-size:15px">📎</span>' : ''}</td>
     <td>${fmtDt(p.last_edited_time)}</td>
     <td><span class="badge badge-${p.status}">${p.status}</span></td>
     <td>${p.status === 'ok' ? `<button class="btn btn-sm" style="padding:3px 8px;font-size:11px"
         onclick="showChunks('${escHtml(p.page_id)}','${escHtml(p.title||p.page_id)}','${dept}')">🔍 청크</button>` : ''}</td>
   </tr>`).join('')
-  : `<tr><td colspan="8" class="empty">${_pageSearch ? '검색 결과 없음' : '페이지 없음 (ingest를 실행하세요)'}</td></tr>`;
+  : `<tr><td colspan="9" class="empty">${_pageSearch ? '검색 결과 없음' : '페이지 없음 (ingest를 실행하세요)'}</td></tr>`;
 
   // 페이지네이션
   renderPagination(curPage, totalPages);

@@ -553,7 +553,8 @@ def sync_page(
         word_count = len(body.split())
         print(f"     🔧 DB 속성에서 텍스트 합성 ({word_count} 단어)")
 
-    body_hash  = content_hash(body)
+    body_hash       = content_hash(body)
+    has_html_attach = "[첨부 HTML:" in body
 
     # ── Phase 1-① 경로 분류 ───────────────────────────────────────────────
     route = classify_page(body, {
@@ -570,6 +571,7 @@ def sync_page(
             last_edited_time=page_meta.get("last_edited_time"),
             word_count=word_count,
             is_db_item=bool(db_props_meta),
+            has_html_attachment=has_html_attach,
             status="skipped",
             route="excluded",
             content_hash=body_hash,
@@ -587,6 +589,7 @@ def sync_page(
             last_edited_time=page_meta.get("last_edited_time"),
             word_count=word_count,
             is_db_item=bool(db_props_meta),
+            has_html_attachment=has_html_attach,
             status="ok",
             route=route,
             content_hash=body_hash,
@@ -652,6 +655,7 @@ def sync_page(
             word_count=word_count,
             chunk_count=new_chunks,
             is_db_item=bool(db_props_meta),
+            has_html_attachment=has_html_attach,
             status="ok",
             route="defer",
             content_hash=body_hash,
@@ -768,6 +772,7 @@ def sync_page(
         triplet_count=result.get("new_triplets", 0),
         event_count=ev_stored,
         is_db_item=bool(db_props_meta),
+        has_html_attachment=has_html_attach,
         status="ok",
         route=route,
         content_hash=body_hash,

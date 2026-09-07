@@ -53,8 +53,9 @@ CREATE TABLE IF NOT EXISTS notion_pages (
     chunk_count      INT          DEFAULT 0,          -- Qdrant 저장 청크 수
     triplet_count    INT          DEFAULT 0,          -- FalkorDB 트리플 수
     event_count      INT          DEFAULT 0,          -- FalkorDB :Event 노드 수
-    is_db_item       BOOLEAN      DEFAULT FALSE,      -- Notion DB 항목 여부
-    status           VARCHAR(20)  DEFAULT 'ok',       -- ok / skipped / error
+    is_db_item           BOOLEAN      DEFAULT FALSE,      -- Notion DB 항목 여부
+    has_html_attachment  BOOLEAN      DEFAULT FALSE,      -- HTML 첨부 파일 포함 여부
+    status               VARCHAR(20)  DEFAULT 'ok',       -- ok / skipped / error
     error_msg        TEXT,                            -- 오류 메시지 (정상이면 NULL)
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -63,6 +64,9 @@ CREATE TABLE IF NOT EXISTS notion_pages (
 );
 
 -- 페이지 조회 인덱스
+-- 마이그레이션: 기존 DB에 컬럼 추가 (신규 설치 시 위 CREATE TABLE에 이미 포함됨)
+-- psql $POSTGRES_URL -c "ALTER TABLE notion_pages ADD COLUMN IF NOT EXISTS has_html_attachment BOOLEAN DEFAULT FALSE;"
+
 CREATE INDEX IF NOT EXISTS idx_np_dept          ON notion_pages (dept, last_ingested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_np_last_edited   ON notion_pages (last_edited_time DESC);
 CREATE INDEX IF NOT EXISTS idx_np_status        ON notion_pages (dept, status);

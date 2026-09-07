@@ -232,6 +232,7 @@ def upsert_notion_page(
     triplet_count: int = 0,
     event_count: int = 0,
     is_db_item: bool = False,
+    has_html_attachment: bool = False,  # HTML 첨부 파일 포함 여부  (v3)
     status: str = "ok",      # "ok" | "skipped" | "error"
     error_msg: str | None = None,
     route: str = "core",     # "core" | "defer" | "excluded"  (v2)
@@ -267,24 +268,25 @@ def upsert_notion_page(
                     INSERT INTO notion_pages
                         (page_id, dept, notion_url, title, last_edited_time,
                          last_ingested_at, word_count, chunk_count, triplet_count,
-                         event_count, is_db_item, status, error_msg,
+                         event_count, is_db_item, has_html_attachment, status, error_msg,
                          route, content_hash)
-                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT ON CONSTRAINT uq_notion_pages_page_dept
                     DO UPDATE SET
-                        notion_url       = EXCLUDED.notion_url,
-                        title            = EXCLUDED.title,
-                        last_edited_time = EXCLUDED.last_edited_time,
-                        last_ingested_at = NOW(),
-                        word_count       = EXCLUDED.word_count,
-                        chunk_count      = EXCLUDED.chunk_count,
-                        triplet_count    = EXCLUDED.triplet_count,
-                        event_count      = EXCLUDED.event_count,
-                        is_db_item       = EXCLUDED.is_db_item,
-                        status           = EXCLUDED.status,
-                        error_msg        = EXCLUDED.error_msg,
-                        route            = EXCLUDED.route,
-                        content_hash     = COALESCE(EXCLUDED.content_hash, notion_pages.content_hash)
+                        notion_url           = EXCLUDED.notion_url,
+                        title                = EXCLUDED.title,
+                        last_edited_time     = EXCLUDED.last_edited_time,
+                        last_ingested_at     = NOW(),
+                        word_count           = EXCLUDED.word_count,
+                        chunk_count          = EXCLUDED.chunk_count,
+                        triplet_count        = EXCLUDED.triplet_count,
+                        event_count          = EXCLUDED.event_count,
+                        is_db_item           = EXCLUDED.is_db_item,
+                        has_html_attachment  = EXCLUDED.has_html_attachment,
+                        status               = EXCLUDED.status,
+                        error_msg            = EXCLUDED.error_msg,
+                        route                = EXCLUDED.route,
+                        content_hash         = COALESCE(EXCLUDED.content_hash, notion_pages.content_hash)
                     """,
                 (
                     page_id[:32] if page_id else "",
@@ -297,6 +299,7 @@ def upsert_notion_page(
                     triplet_count,
                     event_count,
                     is_db_item,
+                    has_html_attachment,
                     (status or "ok")[:20],
                     error_msg,
                     (route or "core")[:20],
