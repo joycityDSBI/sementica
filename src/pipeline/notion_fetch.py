@@ -257,8 +257,11 @@ class _HTMLStripper(HTMLParser):
     블록 레벨 태그(p, div, h1~h6, tr, li …)에서 줄바꿈을 삽입합니다.
     """
 
+    # HTML void 요소(meta, link 등)는 닫는 태그가 없으므로 _SKIP_TAGS에 포함하면
+    # _skip_depth가 증가만 하고 감소하지 않아 이후 모든 body 내용이 스킵됩니다.
+    # → script/style/head/noscript/template만 스킵 (void 요소 제외)
     _SKIP_TAGS: ClassVar[set] = {
-        "script", "style", "head", "meta", "link", "noscript", "template",
+        "script", "style", "head", "noscript", "template",
     }
     _BLOCK_TAGS: ClassVar[set] = {
         "p", "div", "br", "tr", "li",
@@ -355,8 +358,6 @@ def _extract_attached_html(client, block: dict) -> str:
     is_html_by_name  = False
     is_notion_s3_emb = False
 
-    print(f"          [DBG] _extract_attached_html called: btype={btype!r}")
-
     if btype == "file":
         # file 블록: 파일명(name) 기반 HTML 판단
         # S3 서명 URL은 쿼리스트링만 있어 확장자 체크 불가 → name 필드 사용
@@ -372,11 +373,9 @@ def _extract_attached_html(client, block: dict) -> str:
         url_lower = url.lower()
         # Notion 내부 S3 embed: URL에 파일명 확장자 없음 → 다운로드 후 내용 확인
         is_s3 = _is_notion_s3_url(url)
-        print(f"          [DBG] embed url={url[:80]!r}, is_notion_s3={is_s3}")
         if is_s3:
             is_notion_s3_emb = True
         elif not (url_lower.endswith(".html") or url_lower.endswith(".htm")):
-            print(f"          [DBG] embed 건너뜀 (S3 아님, .html 아님)")
             return ""   # YouTube 등 일반 외부 embed — 건너뜀
     else:
         return ""
@@ -386,9 +385,6 @@ def _extract_attached_html(client, block: dict) -> str:
 
     try:
         resp = client.get(url, follow_redirects=True, timeout=30)
-        ctype_dbg = resp.headers.get("content-type", "")
-        print(f"          [DBG] GET status={resp.status_code} content-type={ctype_dbg!r} body_len={len(resp.text)}")
-        print(f"          [DBG] body_start={resp.text[:120]!r}")
         resp.raise_for_status()
 
         if is_html_by_name:
@@ -397,9 +393,7 @@ def _extract_attached_html(client, block: dict) -> str:
             pass
         elif is_notion_s3_emb:
             # Notion S3 embed: 실제 내용으로 HTML 여부 판단
-            is_html = _is_html_content(resp)
-            print(f"          [DBG] is_html_content={is_html}")
-            if not is_html:
+            if not _is_html_content(resp):
                 return ""   # 이미지·PDF·XML 오류 응답 등 — 건너뜀
         else:
             # 외부 .html URL embed
@@ -407,14 +401,11 @@ def _extract_attached_html(client, block: dict) -> str:
             if "html" not in ctype and not url.lower().endswith((".html", ".htm")):
                 return ""
 
-        extracted = _html_to_text(resp.text)
-        print(f"          [DBG] _html_to_text 결과: {len(extracted)} 자")
-        return extracted
+        return _html_to_text(resp.text)
 
     except Exception as e:
         disp = content.get("name", url[:60])
         print(f"        ⚠️  HTML 첨부 다운로드 실패 ({disp}): {e}")
-        import traceback; traceback.print_exc()
         return ""
 
 
@@ -474,10 +465,7 @@ def fetch_blocks_recursive(client, token, block_id, depth=0, max_depth=4) -> str
         # Notion에 올려둔 .html/.htm 파일을 다운로드해 텍스트로 변환합니다.
         # 서명된 S3 URL은 만료되므로 수집 시점에 즉시 처리합니다.
         if btype in ("file", "embed"):
-            _emb_url = block.get(btype, {}).get("url", "") or block.get(btype, {}).get("name", "")
-            print(f"        [DBG] {btype} 블록 발견 (depth={depth}) url/name={_emb_url[:60]!r}")
             html_text = _extract_attached_html(client, block)
-            print(f"        [DBG] _extract_attached_html 결과: {len(html_text)} 자")
             if html_text:
                 name = block.get(btype, {}).get("name", "HTML 첨부")
                 print(f"        📎 HTML 첨부 추출: {name} ({len(html_text)} 자)")
