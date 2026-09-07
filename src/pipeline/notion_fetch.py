@@ -386,6 +386,9 @@ def _extract_attached_html(client, block: dict) -> str:
 
     try:
         resp = client.get(url, follow_redirects=True, timeout=30)
+        ctype_dbg = resp.headers.get("content-type", "")
+        print(f"          [DBG] GET status={resp.status_code} content-type={ctype_dbg!r} body_len={len(resp.text)}")
+        print(f"          [DBG] body_start={resp.text[:120]!r}")
         resp.raise_for_status()
 
         if is_html_by_name:
@@ -394,7 +397,9 @@ def _extract_attached_html(client, block: dict) -> str:
             pass
         elif is_notion_s3_emb:
             # Notion S3 embed: 실제 내용으로 HTML 여부 판단
-            if not _is_html_content(resp):
+            is_html = _is_html_content(resp)
+            print(f"          [DBG] is_html_content={is_html}")
+            if not is_html:
                 return ""   # 이미지·PDF·XML 오류 응답 등 — 건너뜀
         else:
             # 외부 .html URL embed
@@ -403,11 +408,13 @@ def _extract_attached_html(client, block: dict) -> str:
                 return ""
 
         extracted = _html_to_text(resp.text)
+        print(f"          [DBG] _html_to_text 결과: {len(extracted)} 자")
         return extracted
 
     except Exception as e:
         disp = content.get("name", url[:60])
         print(f"        ⚠️  HTML 첨부 다운로드 실패 ({disp}): {e}")
+        import traceback; traceback.print_exc()
         return ""
 
 
