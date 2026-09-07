@@ -320,10 +320,16 @@ def _extract_attached_html(client, block: dict) -> str:
     btype   = block.get("type", "")
     content = block.get(btype, {})
 
+    # file 블록: 파일명(name) 기반 HTML 판단
+    #   → Notion의 S3 서명 URL은 쿼리스트링만 있어 확장자 체크 불가,
+    #     반드시 content["name"] 필드로 판단해야 합니다.
+    # embed 블록: URL 자체가 .html/.htm 으로 끝나는 경우만 시도
+    is_html_by_name = False
     if btype == "file":
         name = content.get("name", "").lower()
         if not (name.endswith(".html") or name.endswith(".htm")):
             return ""
+        is_html_by_name = True
         inner = content.get("file") or content.get("external") or {}
         url   = inner.get("url", "")
     elif btype == "embed":
@@ -340,14 +346,16 @@ def _extract_attached_html(client, block: dict) -> str:
     try:
         resp = client.get(url, follow_redirects=True, timeout=30)
         resp.raise_for_status()
-        ctype = resp.headers.get("content-type", "")
-        if "html" not in ctype and not url.lower().endswith((".html", ".htm")):
+        ctype = resp.headers.get("content-type", "").lower()
+        # is_html_by_name=True(file 블록)이면 Content-Type 재확인 불필요:
+        # S3 서명 URL은 application/octet-stream을 반환하는 경우가 많음
+        if not is_html_by_name and "html" not in ctype and not url.lower().endswith((".html", ".htm")):
             return ""
         extracted = _html_to_text(resp.text)
         return extracted
     except Exception as e:
-        name = content.get("name", url[:60])
-        print(f"        ⚠️  HTML 첨부 다운로드 실패 ({name}): {e}")
+        disp = content.get("name", url[:60])
+        print(f"        ⚠️  HTML 첨부 다운로드 실패 ({disp}): {e}")
         return ""
 
 
