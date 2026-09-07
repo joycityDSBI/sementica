@@ -17,12 +17,15 @@ API 권한이 있는 모든 페이지를 수집해 data/{dept}/notion_pages/ 에
 """
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import sys
 import time
+from html.parser import HTMLParser
 from pathlib import Path
+from typing import ClassVar
 
 # .env 로드
 _env_path = Path(__file__).parent.parent.parent / ".env"
@@ -246,6 +249,108 @@ def blocks_to_text(blocks: list, depth: int = 0) -> str:
     return "\n".join(line for line in lines if line.strip() or not lines)
 
 
+class _HTMLStripper(HTMLParser):
+    """
+    HTML → 평문 텍스트 변환기 (표준 라이브러리만 사용).
+
+    script·style·head 등 비표시 태그 내용을 건너뛰고,
+    블록 레벨 태그(p, div, h1~h6, tr, li …)에서 줄바꿈을 삽입합니다.
+    """
+
+    _SKIP_TAGS: ClassVar[set] = {
+        "script", "style", "head", "meta", "link", "noscript", "template",
+    }
+    _BLOCK_TAGS: ClassVar[set] = {
+        "p", "div", "br", "tr", "li",
+        "h1", "h2", "h3", "h4", "h5", "h6",
+        "table", "thead", "tbody", "section",
+        "article", "header", "footer", "blockquote",
+    }
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs):
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str):
+        if tag in self._SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag in self._BLOCK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str):
+        if not self._skip_depth:
+            self._parts.append(data)
+
+    def result(self) -> str:
+        raw = "".join(self._parts)
+        raw = re.sub(r"[ \t]+", " ", raw)        # 연속 공백 → 단일 스페이스
+        raw = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", raw)  # 3줄 이상 → 2줄
+        return raw.strip()
+
+
+def _html_to_text(html_content: str) -> str:
+    """HTML 문자열에서 평문 텍스트를 추출합니다."""
+    stripper = _HTMLStripper()
+    with contextlib.suppress(Exception):
+        stripper.feed(html_content)
+    return stripper.result()
+
+
+def _extract_attached_html(client, block: dict) -> str:
+    """
+    Notion file/embed 블록에서 HTML 파일을 다운로드하고 텍스트를 추출합니다.
+
+    지원 블록 유형:
+      - file  : Notion에 직접 첨부된 .html/.htm 파일
+      - embed : 외부 URL을 임베드한 블록 (HTML URL인 경우)
+
+    Notion 첨부 파일의 서명된 S3 URL 은 만료 시간이 있으므로
+    수집 시점에 즉시 다운로드합니다.
+
+    Returns:
+        추출된 평문 텍스트. HTML이 아니거나 다운로드 실패 시 "".
+    """
+    btype   = block.get("type", "")
+    content = block.get(btype, {})
+
+    if btype == "file":
+        name = content.get("name", "").lower()
+        if not (name.endswith(".html") or name.endswith(".htm")):
+            return ""
+        inner = content.get("file") or content.get("external") or {}
+        url   = inner.get("url", "")
+    elif btype == "embed":
+        url = content.get("url", "")
+        url_lower = url.lower()
+        if not (url_lower.endswith(".html") or url_lower.endswith(".htm")):
+            return ""   # HTML URL이 아님 — 다운로드 생략
+    else:
+        return ""
+
+    if not url:
+        return ""
+
+    try:
+        resp = client.get(url, follow_redirects=True, timeout=30)
+        resp.raise_for_status()
+        ctype = resp.headers.get("content-type", "")
+        if "html" not in ctype and not url.lower().endswith((".html", ".htm")):
+            return ""
+        extracted = _html_to_text(resp.text)
+        return extracted
+    except Exception as e:
+        name = content.get("name", url[:60])
+        print(f"        ⚠️  HTML 첨부 다운로드 실패 ({name}): {e}")
+        return ""
+
+
 def _table_to_md(client, token, table_block: dict) -> str:
     """
     Notion table 블록을 Markdown 테이블 문자열로 변환합니다.
@@ -298,13 +403,29 @@ def fetch_blocks_recursive(client, token, block_id, depth=0, max_depth=4) -> str
                 parts.append(md)
             continue  # table_row 자식은 이미 처리 완료
 
+        # ── HTML 첨부 파일 / embed ───────────────────────────────────────
+        # Notion에 올려둔 .html/.htm 파일을 다운로드해 텍스트로 변환합니다.
+        # 서명된 S3 URL은 만료되므로 수집 시점에 즉시 처리합니다.
+        if btype in ("file", "embed"):
+            html_text = _extract_attached_html(client, block)
+            if html_text:
+                name = block.get(btype, {}).get("name", "HTML 첨부")
+                print(f"        📎 HTML 첨부 추출: {name} ({len(html_text)} 자)")
+                parts.append(f"[첨부 HTML: {name}]\n{html_text}")
+            elif btype == "file":
+                # HTML이 아닌 첨부 파일은 파일명만 기록
+                name = block.get("file", {}).get("name", "")
+                if name:
+                    parts.append(f"[첨부 파일: {name}]")
+            continue
+
         # ── 일반 블록 ────────────────────────────────────────────────────
         block_text = blocks_to_text([block], depth)
         if block_text.strip():
             parts.append(block_text)
 
-        # 자식이 있는 블록 재귀 (table 제외 — 위에서 처리)
-        if block.get("has_children") and btype != "table":
+        # 자식이 있는 블록 재귀 (table/file/embed 제외 — 위에서 처리)
+        if block.get("has_children") and btype not in ("table", "file", "embed"):
             child = fetch_blocks_recursive(client, token, block["id"], depth + 1, max_depth)
             if child.strip():
                 parts.append(child)
