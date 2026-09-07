@@ -303,15 +303,47 @@ def _html_to_text(html_content: str) -> str:
     return stripper.result()
 
 
+def _is_notion_s3_url(url: str) -> bool:
+    """Notion이 내부적으로 사용하는 S3 파일 URL 여부를 판단합니다."""
+    lower = url.lower()
+    return (
+        "prod-files-secure.s3" in lower
+        or "notion-static.com" in lower
+        or "secure.notion-static.com" in lower
+    )
+
+
+def _is_html_content(resp) -> bool:
+    """HTTP 응답이 실제 HTML 문서인지 판단합니다.
+
+    Content-Type이 application/xml·application/octet-stream 등으로 잘못 보고되는
+    경우를 대비해 본문 앞부분도 확인합니다.
+    S3 서명 URL: HEAD → application/xml(접근 오류), GET → 실제 Content-Type
+    """
+    ctype = resp.headers.get("content-type", "").lower()
+    if "text/html" in ctype:
+        return True
+    # Content-Type이 불확실하면 본문 앞 512바이트로 판단
+    text_start = resp.text[:512].lstrip().lower()
+    return (
+        text_start.startswith("<!doctype html")
+        or text_start.startswith("<html")
+        or ("<html" in text_start[:200] and "<body" in text_start)
+    )
+
+
 def _extract_attached_html(client, block: dict) -> str:
     """
     Notion file/embed 블록에서 HTML 파일을 다운로드하고 텍스트를 추출합니다.
 
     지원 블록 유형:
       - file  : Notion에 직접 첨부된 .html/.htm 파일
-      - embed : 외부 URL을 임베드한 블록 (HTML URL인 경우)
+                content["name"] 기반 판단 (S3 서명 URL에 파일명 없음)
+      - embed : Notion 내부 S3 파일 embed (prod-files-secure.s3…)
+                URL 확장자가 없으므로 실제 다운로드 후 내용으로 판단
+              + 외부 .html/.htm URL embed
 
-    Notion 첨부 파일의 서명된 S3 URL 은 만료 시간이 있으므로
+    Notion 첨부 파일의 서명된 S3 URL은 만료 시간이 있으므로
     수집 시점에 즉시 다운로드합니다.
 
     Returns:
@@ -320,23 +352,27 @@ def _extract_attached_html(client, block: dict) -> str:
     btype   = block.get("type", "")
     content = block.get(btype, {})
 
-    # file 블록: 파일명(name) 기반 HTML 판단
-    #   → Notion의 S3 서명 URL은 쿼리스트링만 있어 확장자 체크 불가,
-    #     반드시 content["name"] 필드로 판단해야 합니다.
-    # embed 블록: URL 자체가 .html/.htm 으로 끝나는 경우만 시도
-    is_html_by_name = False
+    is_html_by_name  = False
+    is_notion_s3_emb = False
+
     if btype == "file":
+        # file 블록: 파일명(name) 기반 HTML 판단
+        # S3 서명 URL은 쿼리스트링만 있어 확장자 체크 불가 → name 필드 사용
         name = content.get("name", "").lower()
         if not (name.endswith(".html") or name.endswith(".htm")):
             return ""
         is_html_by_name = True
         inner = content.get("file") or content.get("external") or {}
         url   = inner.get("url", "")
+
     elif btype == "embed":
         url = content.get("url", "")
         url_lower = url.lower()
-        if not (url_lower.endswith(".html") or url_lower.endswith(".htm")):
-            return ""   # HTML URL이 아님 — 다운로드 생략
+        # Notion 내부 S3 embed: URL에 파일명 확장자 없음 → 다운로드 후 내용 확인
+        if _is_notion_s3_url(url):
+            is_notion_s3_emb = True
+        elif not (url_lower.endswith(".html") or url_lower.endswith(".htm")):
+            return ""   # YouTube 등 일반 외부 embed — 건너뜀
     else:
         return ""
 
@@ -346,13 +382,24 @@ def _extract_attached_html(client, block: dict) -> str:
     try:
         resp = client.get(url, follow_redirects=True, timeout=30)
         resp.raise_for_status()
-        ctype = resp.headers.get("content-type", "").lower()
-        # is_html_by_name=True(file 블록)이면 Content-Type 재확인 불필요:
-        # S3 서명 URL은 application/octet-stream을 반환하는 경우가 많음
-        if not is_html_by_name and "html" not in ctype and not url.lower().endswith((".html", ".htm")):
-            return ""
+
+        if is_html_by_name:
+            # file 블록: name으로 이미 확인 완료 → Content-Type 재확인 불필요
+            # (S3는 application/octet-stream 반환 가능)
+            pass
+        elif is_notion_s3_emb:
+            # Notion S3 embed: 실제 내용으로 HTML 여부 판단
+            if not _is_html_content(resp):
+                return ""   # 이미지·PDF·XML 오류 응답 등 — 건너뜀
+        else:
+            # 외부 .html URL embed
+            ctype = resp.headers.get("content-type", "").lower()
+            if "html" not in ctype and not url.lower().endswith((".html", ".htm")):
+                return ""
+
         extracted = _html_to_text(resp.text)
         return extracted
+
     except Exception as e:
         disp = content.get("name", url[:60])
         print(f"        ⚠️  HTML 첨부 다운로드 실패 ({disp}): {e}")

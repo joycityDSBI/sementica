@@ -93,12 +93,17 @@ def inspect_blocks(token: str, block_id: str, depth: int = 0) -> None:
             if expiry:
                 print(f"{indent}   expiry_time : {expiry}")
 
-            # Content-Type 확인
+            # Content-Type 확인 (GET으로 — S3 서명 URL은 HEAD 불가)
             if url:
                 try:
-                    head = httpx.head(url, follow_redirects=True, timeout=10)
-                    ctype = head.headers.get("content-type", "알 수 없음")
+                    r = httpx.get(url, follow_redirects=True, timeout=15)
+                    ctype = r.headers.get("content-type", "알 수 없음")
+                    text_start = r.text[:200].strip().lower()
+                    is_html = "text/html" in ctype or text_start.startswith(("<!doctype html", "<html"))
                     print(f"{indent}   Content-Type: {ctype}")
+                    print(f"{indent}   HTML 여부   : {'✅ HTML' if is_html else '❌ HTML 아님'}")
+                    if is_html:
+                        print(f"{indent}   내용 앞부분 : {r.text[:80].strip()!r}")
                 except Exception as e:
                     print(f"{indent}   Content-Type: 조회 실패 ({e})")
 
@@ -108,9 +113,15 @@ def inspect_blocks(token: str, block_id: str, depth: int = 0) -> None:
             print(f"{indent}   url         : {url[:100]}")
             if url:
                 try:
-                    head = httpx.head(url, follow_redirects=True, timeout=10)
-                    ctype = head.headers.get("content-type", "알 수 없음")
+                    # S3 URL은 HEAD 대신 GET으로 실제 내용 확인
+                    r = httpx.get(url, follow_redirects=True, timeout=15)
+                    ctype = r.headers.get("content-type", "알 수 없음")
+                    text_start = r.text[:200].strip().lower()
+                    is_html = "text/html" in ctype or text_start.startswith(("<!doctype html", "<html"))
                     print(f"{indent}   Content-Type: {ctype}")
+                    print(f"{indent}   HTML 여부   : {'✅ HTML' if is_html else '❌ HTML 아님'}")
+                    if is_html:
+                        print(f"{indent}   내용 앞부분 : {r.text[:80].strip()!r}")
                 except Exception as e:
                     print(f"{indent}   Content-Type: 조회 실패 ({e})")
 
