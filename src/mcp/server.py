@@ -251,6 +251,81 @@ def _fetch_full_pages(
     return assembled
 
 
+def _fetch_pages_by_source_urls(
+    qc,
+    collection_name: str,
+    source_urls: list,
+    max_chars: int = 2000,
+) -> dict:
+    """
+    source_url 목록으로 Qdrant 청크를 직접 필터링해 전문을 반환합니다.
+
+    graph_search / timeline_search가 찾은 :Event / :REL 노드의 source_url을 키로
+    벡터 DB의 연관 문서를 조회하는 명시적 연결 (Explicit Parent Document Retrieval).
+
+    _fetch_full_pages()가 page_id 기준인 것과 달리, 이 함수는 source_url 기준으로
+    조회하므로 그래프에서 얻은 출처 URL로 바로 원문을 꺼낼 수 있습니다.
+
+    Returns:
+        {source_url: {title, source_url, page_id, content, chunk_count}}
+    """
+    if not source_urls:
+        return {}
+
+    from qdrant_client.models import FieldCondition, Filter, MatchAny
+
+    pages: dict = {}
+    offset = None
+    url_set = set(source_urls)
+
+    while True:
+        scroll_result, next_offset = qc.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="source_url", match=MatchAny(any=list(url_set)))]
+            ),
+            limit=500,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        for point in scroll_result:
+            p   = point.payload or {}
+            url = p.get("source_url", "")
+            if not url or url not in url_set:
+                continue
+            if url not in pages:
+                pages[url] = {
+                    "title":      p.get("title", ""),
+                    "source_url": url,
+                    "page_id":    p.get("page_id", ""),
+                    "chunks":     [],
+                }
+            pages[url]["chunks"].append({
+                "index": p.get("chunk_index", 9999),
+                "text":  p.get("text", ""),
+            })
+
+        offset = next_offset
+        if offset is None:
+            break
+
+    assembled: dict = {}
+    for url, page in pages.items():
+        sorted_chunks = sorted(page["chunks"], key=lambda c: c["index"])
+        full_text = "\n\n".join(c["text"] for c in sorted_chunks)
+        assembled[url] = {
+            "title":       page["title"],
+            "source_url":  url,
+            "page_id":     page["page_id"],
+            "content":     full_text[:max_chars],
+            "chunk_count": len(sorted_chunks),
+        }
+
+    return assembled
+
+
 def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
     """서브쿼리 단위 벡터+그래프 검색 — ThreadPoolExecutor로 두 검색을 병렬 실행.
 
@@ -755,6 +830,8 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
             semantic_results: 벡터 검색 결과 목록 [{title, source_url, content, chunk_count, score, coverage}],
             graph_results:    그래프 탐색 결과 목록 [{entity, type, outgoing, incoming}],
             entity_summary:   관계 요약 문자열 목록 ["엔티티A → 관계 → 엔티티B", ...],
+            linked_pages:     그래프 엣지 source_url로 연결된 추가 문서 [{title, source_url, content, chunk_count}]
+                              (semantic_results에 없는 페이지만 포함 — 그래프-벡터 명시적 교차 연결),
             decomposed:       복합 쿼리 분해 여부 (true/false),
             sub_queries:      분해된 서브쿼리 목록 (decomposed=true일 때만)
         }
@@ -807,10 +884,33 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
             for rel in (g.get("outgoing") or [])[:3]
         ]
 
+        # ── 6. 그래프 엣지 source_url → 벡터 DB 원문 연결 ──────────────────
+        # semantic_results에 없는 페이지만 linked_pages로 추가합니다.
+        # (그래프가 참조하는 문서 중 벡터 유사도 상위에 없었던 것을 보완)
+        existing_urls: set = {r.get("source_url", "") for r in semantic}
+        edge_urls: list = list({
+            rel.get("source_url", "")
+            for g in graph_hits
+            for rel in (g.get("outgoing", []) + g.get("incoming", []))
+            if rel.get("source_url") and rel["source_url"] not in existing_urls
+        } - {""})
+
+        linked_pages: list = []
+        if edge_urls:
+            try:
+                qc      = _get_qdrant()
+                lp_map  = _fetch_pages_by_source_urls(
+                    qc, COLLECTION_NAME, edge_urls, max_chars=1500
+                )
+                linked_pages = list(lp_map.values())
+            except Exception:
+                pass
+
         _result = {
             "semantic_results": semantic,
             "graph_results":    graph_hits,
             "entity_summary":   entity_summary,
+            "linked_pages":     linked_pages,
             "decomposed":       decomposed,
             "sub_queries":      sub_queries if decomposed else [],
         }
@@ -1029,16 +1129,18 @@ def timeline_search(
             found:  이벤트 존재 여부,
             total:  조건에 맞는 전체 이벤트 수,
             events: [{
-                event_id:    이벤트 고유 ID,
-                game:        게임명,
-                event_type:  이벤트 유형,
-                date:        날짜 (YYYY-MM-DD),
-                title:       이벤트 제목,
-                description: 상세 설명,
-                target:      대상 유저 (예: "신규유저,복귀유저"),
-                source_url:  출처 Notion URL,
-                prev_event:  직전 이벤트 요약,
-                next_event:  직후 이벤트 요약
+                event_id:        이벤트 고유 ID,
+                game:            게임명,
+                event_type:      이벤트 유형,
+                date:            날짜 (YYYY-MM-DD),
+                title:           이벤트 제목,
+                description:     상세 설명,
+                target:          대상 유저 (예: "신규유저,복귀유저"),
+                source_url:      출처 Notion URL,
+                prev_event:      직전 이벤트 요약,
+                next_event:      직후 이벤트 요약,
+                page_content:    source_url로 연결된 Notion 원문 (벡터 DB, 최대 1500자),
+                page_chunk_count: 해당 페이지의 총 청크 수
             }],
             timeline_summary: ["2026-04-12: [client_update] v2.3.1 패치", ...] 형태의 요약 목록
         }
@@ -1059,6 +1161,31 @@ def timeline_search(
             to_date    = to_date    or None,
             limit      = limit,
         )
+
+        # ── source_url → 벡터 DB 원문 연결 (Explicit Parent Document Retrieval) ──
+        # 그래프에서 찾은 :Event 노드의 source_url로 Qdrant를 직접 필터링해
+        # 이벤트별 Notion 원문(page_content)을 첨부합니다.
+        if _result and _result.get("events"):
+            unique_urls = list({
+                ev["source_url"] for ev in _result["events"] if ev.get("source_url")
+            })
+            if unique_urls:
+                try:
+                    qc    = _get_qdrant()
+                    pages = _fetch_pages_by_source_urls(
+                        qc, COLLECTION_NAME, unique_urls, max_chars=1500
+                    )
+                    for ev in _result["events"]:
+                        url = ev.get("source_url", "")
+                        if url in pages:
+                            ev["page_content"]     = pages[url]["content"]
+                            ev["page_chunk_count"] = pages[url]["chunk_count"]
+                        else:
+                            ev["page_content"]     = ""
+                            ev["page_chunk_count"] = 0
+                except Exception:
+                    pass   # Qdrant 실패해도 이벤트 목록은 반환
+
         return _result
     except Exception as e:
         _err = str(e)
