@@ -1,7 +1,7 @@
 # Semantica — 프로젝트 전체 요약
 
 > JoyCity 전략사업본부 Notion 기반 온톨로지 검색 솔루션  
-> 최종 업데이트: 2026-09-03 (Parent Document Retrieval, 대시보드 청크 뷰어, notion_fetch 개선, FalkorDB 쿼리/시각화, 방화벽 포트)
+> 최종 업데이트: 2026-09-07 (HTML 첨부 추출, has_html_attachment 대시보드, 그래프→벡터 크로스링킹)
 
 ---
 
@@ -72,12 +72,57 @@ Notion 문서 → 전처리·임베딩 → Qdrant(벡터) + FalkorDB(그래프)
 ```bash
 python src/pipeline/notion_fetch.py --dept strategic
 python src/pipeline/notion_fetch.py --dept strategic --min-words 50   # 최소 단어 수 지정
+python src/pipeline/notion_fetch.py --dept strategic --page-id <UUID>  # 단일 페이지 수집
 ```
 - Notion API에서 전체 페이지 메타 + 본문 수집
 - `.md` 파일로 `data/strategic/notion_pages/` 에 저장
 - **`--min-words` 옵션 (기본 30)**: 단어 수 미만 페이지는 `.md` 파일 **미생성** (저장 전 필터링)
   - 기존: 저장 후 `⚠️ 텍스트 부족` 표시 → ingest 단계에서 건너뜀
   - 개선: 수집 단계에서 미리 제외 → 불필요한 파일 생성 없음
+
+#### HTML 첨부 파일 추출 (2026-09-07 추가)
+
+Notion 페이지에 업로드된 HTML 파일(`.html`/`.htm`)을 자동으로 다운로드해 텍스트로 변환 후 `.md`에 포함합니다.
+
+**처리 대상 Notion 블록 타입**
+
+| 블록 타입 | 처리 방식 | 판별 방법 |
+|----------|----------|---------|
+| `file` | `name` 필드 확인 (`.html`/`.htm`) → S3 URL GET | 파일명 기반 |
+| `embed` | Notion S3 URL 감지 → GET 후 HTML 내용 확인 | URL 패턴 + 실제 content-type |
+
+**Notion S3 URL 패턴** (`_is_notion_s3_url()`):
+```
+prod-files-secure.s3.us-west-2.amazonaws.com/...
+notion-static.com/...
+secure.notion-static.com/...
+```
+- ⚠️ HEAD 요청 시 `application/xml` (S3 에러 응답) 반환 → **반드시 GET으로 다운로드**
+- URL에 확장자가 없으므로 실제 내용의 content-type + 본문 앞부분으로 HTML 여부 판별
+
+**HTML 텍스트 변환 (`_HTMLStripper`)**:
+- `html.parser.HTMLParser` 서브클래스, `_skip_depth` 카운터로 스킵 제어
+- `_SKIP_TAGS`: `script, style, head, noscript, template` (void 요소 `meta, link` 제외)
+  - ⚠️ 수정 포인트: `meta`, `link`는 HTML void 요소(닫는 태그 없음) → 포함 시 `_skip_depth`가 영구 증가해 `<body>` 내용 전체가 스킵됨
+- `_BLOCK_TAGS`에 해당하는 요소에서 줄바꿈 삽입 → 가독성 있는 평문 출력
+
+**`.md` 파일 내 마커**:
+```markdown
+[첨부 HTML: tbl_gbtw_cost_cut.html]
+GBTW 회수세
+
+2025-01  44.6%
+…
+```
+
+**`has_html_attachment` 백필** (`tools/backfill_html_flag.py`):
+```bash
+# 전체 플로우 (서버)
+python src/pipeline/notion_fetch.py --dept strategic   # 재수집
+python tools/backfill_html_flag.py --dept strategic    # DB 백필
+```
+- `.md` 파일에서 `[첨부 HTML:` 마커 검색 → PostgreSQL `has_html_attachment=TRUE` 업데이트
+- `--dry-run` 옵션으로 변경 없이 대상 목록만 확인 가능
 
 ### 4-2. 전체 인제스트 (Full Ingest)
 ```bash
@@ -216,8 +261,8 @@ python falkordb/export_graph.py --output graph.json --html graph.html
 - **도구 (Tools)**:
   - `semantic_search(query, limit)` — 벡터 유사도 검색 + **Parent Document Retrieval**
   - `graph_search(entity, depth)` — 그래프 엔티티 탐색
-  - `timeline_search(game, event_type, from_date, to_date, limit)` — 이벤트 이력
-  - `hybrid_search(query, limit)` — 벡터 + 그래프 통합 + **Parent Document Retrieval**
+  - `timeline_search(game, event_type, from_date, to_date, limit)` — 이벤트 이력 + **벡터 크로스링킹**
+  - `hybrid_search(query, limit)` — 벡터 + 그래프 통합 + **Parent Document Retrieval** + **linked_pages**
 
 **Parent Document Retrieval (2026-09-03 적용)**
 ```
@@ -231,6 +276,44 @@ python falkordb/export_graph.py --output graph.json --html graph.html
 ```
 - 기존: `text_preview` (300자 미리보기) → 청크 단위 단편적 문맥
 - 개선: `content` (전체 페이지, 최대 4000자) → 완전한 문맥 해석
+
+**그래프→벡터 크로스링킹 (2026-09-07 추가)**
+
+`_fetch_pages_by_source_urls(qc, collection_name, source_urls, max_chars=2000)`:
+- Qdrant `scroll`에 `FieldCondition(key="source_url", match=MatchAny(...))` 필터 적용
+- 그래프에서 찾은 `source_url`로 벡터 DB의 동일 문서 청크를 직접 조회
+
+```
+그래프 노드/엣지 ─ source_url 수집
+                         ↓
+     Qdrant scroll (source_url MatchAny 필터)
+                         ↓
+  청크 조합 → content(최대 2000자) + chunk_count 반환
+```
+
+**`timeline_search` 강화**:
+```python
+# 이벤트 노드의 source_url → 연결된 Notion 원문 첨부
+{
+  "title": "GBTW UA예산 증액",
+  "date": "2026-08",
+  "source_url": "https://app.notion.com/p/...",
+  "page_content": "…Notion 원문 본문 (최대 1500자)…",
+  "page_chunk_count": 12
+}
+```
+
+**`hybrid_search` 강화**:
+```python
+# 반환 구조
+{
+  "semantic_results": [...],   # 벡터 검색 결과 (Parent Document Retrieval 적용)
+  "graph_results":   [...],   # 그래프 엔티티
+  "linked_pages":    [...]    # 그래프 엣지 source_url로 연결된 추가 문서
+                              # (semantic_results에 없는 페이지만 포함)
+}
+```
+
 - **실행**:
   ```bash
   python src/mcp/server.py --dept strategic
@@ -246,7 +329,7 @@ python falkordb/export_graph.py --output graph.json --html graph.html
   |------|------|
   | `GET /api/pages` | PostgreSQL `notion_pages` 페이지 목록 (dept 필터, 제목 검색) |
   | `GET /api/qdrant-stats` | Qdrant 전체 컬렉션 통계 |
-  | `GET /api/qdrant-chunks` | **특정 `page_id`의 모든 청크 조회** (신규) |
+  | `GET /api/qdrant-chunks` | **특정 `page_id`의 모든 청크 조회** |
   | `GET /api/graph-stats` | FalkorDB 노드·엣지·이벤트 수 |
   | `GET /api/sync-log` | 동기화 이력 |
   | `POST /api/batch/run` | 배치 작업 실행 (fetch/ingest/sync 등) |
@@ -256,6 +339,11 @@ python falkordb/export_graph.py --output graph.json --html graph.html
   - 클릭 시 모달 팝업: 해당 page_id의 Qdrant 청크 전체를 `chunk_index` 순으로 표시
   - 각 청크의 내용, 길이, UUID, Notion 원본 링크 확인 가능
   - Parent Document Retrieval 조합 결과를 사전 검증하는 용도
+
+- **HTML 첨부 컬럼 (2026-09-07 추가)**:
+  - 페이지 목록에 **HTML** 컬럼 추가
+  - `has_html_attachment=TRUE` 인 페이지에 📎 아이콘 표시
+  - PostgreSQL `notion_pages.has_html_attachment` 기반
 
 - **대시보드 수치 출처**:
 
@@ -358,6 +446,26 @@ Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 �
 | `scripts/backup_to_gcs.sh` | GCS 백업 |
 | `scripts/create_indexes.py` | Qdrant 인덱스 생성 |
 | `scripts/test_mcp.py` | MCP 서버 테스트 |
+| `tools/backfill_html_flag.py` | `has_html_attachment` DB 백필 |
+| `tools/debug_html_blocks.py` | Notion 페이지 HTML 블록 구조 진단 |
+
+**`tools/backfill_html_flag.py` 사용법**:
+```bash
+# 재수집 후 DB 플래그 동기화
+python src/pipeline/notion_fetch.py --dept strategic
+python tools/backfill_html_flag.py --dept strategic
+
+# 변경 없이 대상 목록만 확인
+python tools/backfill_html_flag.py --dept strategic --dry-run
+```
+
+**`tools/debug_html_blocks.py` 사용법**:
+```bash
+# 특정 페이지의 블록 타입·URL·Content-Type 진단
+python tools/debug_html_blocks.py --page-id 3c7ea67a568180b4b288fab957019624
+```
+- `file`/`embed`/`pdf`/`image`/`link_preview` 블록을 재귀적으로 순회
+- S3 URL은 GET 요청으로 실제 Content-Type + HTML 여부 확인
 
 ### 7-2. 서비스 재시작 (git pull 후)
 
@@ -445,10 +553,13 @@ curl http://localhost:4040/api/tunnels
 | 11 | notion_fetch `--min-words` 필터 | ✅ | 수집 단계에서 텍스트 부족 페이지 제외 |
 | 12 | FalkorDB 예시 쿼리 (`falkordb/01_example_queries.cypher`) | ✅ | 6종 예시 쿼리 + 전체 그래프 조회 |
 | 13 | FalkorDB 그래프 내보내기 + HTML 시각화 (`falkordb/export_graph.py`) | ✅ | Force-directed 인터랙티브 HTML |
-| 14 | Cortex Analyst YAML 모델 | 🔜 | KPI/매출 테이블 시맨틱 모델 작성 필요 |
-| 15 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
-| 16 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
-| 17 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
+| 14 | Notion HTML 첨부 자동 추출 | ✅ | `notion_fetch.py` `_extract_attached_html()`, 2026-09-07 |
+| 15 | has_html_attachment 대시보드 컬럼 | ✅ | PostgreSQL + 웹 대시보드 📎 아이콘, 2026-09-07 |
+| 16 | 그래프→벡터 크로스링킹 | ✅ | `server.py` `_fetch_pages_by_source_urls()`, timeline/hybrid, 2026-09-07 |
+| 17 | Cortex Analyst YAML 모델 | 🔜 | KPI/매출 테이블 시맨틱 모델 작성 필요 |
+| 18 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
+| 19 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
+| 20 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
 
 ---
 
@@ -527,6 +638,12 @@ SNOWFLAKE_REST_PORT=8766
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-07 | `_HTMLStripper._SKIP_TAGS` void 요소 버그 수정 — `meta`, `link` 제거로 `<body>` 내용 스킵 문제 해결 |
+| 2026-09-07 | Notion HTML 첨부 자동 추출 (`notion_fetch.py`) — `file`/`embed` 블록, Notion S3 URL 지원, `[첨부 HTML:]` 마커 포함 |
+| 2026-09-07 | `has_html_attachment` DB 컬럼 추가 — PostgreSQL, `ingest.py`, `sync.py`, `db_logger.py` |
+| 2026-09-07 | 웹 대시보드 HTML 컬럼 추가 (`web_app.py`) — 📎 아이콘 표시 |
+| 2026-09-07 | 그래프→벡터 크로스링킹 (`server.py`) — `_fetch_pages_by_source_urls()`, `timeline_search` page_content 첨부, `hybrid_search` linked_pages |
+| 2026-09-07 | 백필/진단 도구 추가 — `tools/backfill_html_flag.py`, `tools/debug_html_blocks.py` |
 | 2026-09-03 | Parent Document Retrieval 적용 (`server.py`) — 청크 단위 → 페이지 전체 본문(최대 4000자) 반환 |
 | 2026-09-03 | 웹 대시보드 Qdrant 청크 뷰어 추가 (`web_app.py`) — 🔍 청크 버튼 + 모달 UI |
 | 2026-09-03 | notion_fetch `--min-words` 옵션 추가 — 수집 단계에서 텍스트 부족 페이지 제외 |
