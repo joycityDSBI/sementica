@@ -25,6 +25,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+# ─── 동의어 해결기 (비즈니스 용어집 API) ────────────────────────────────────────
+try:
+    from utils.synonym_resolver import expand as _syn_expand
+    from utils.synonym_resolver import preload as _syn_preload
+    from utils.synonym_resolver import resolve as _syn_resolve
+except ImportError:
+    def _syn_expand(name: str) -> list[str]:  # type: ignore[misc]
+        return [name]
+    def _syn_resolve(name: str) -> str:  # type: ignore[misc]
+        return name
+    def _syn_preload() -> None:  # type: ignore[misc]
+        pass
+
 # ─── .env 로드 ────────────────────────────────────────────────────────────────
 _env_path = Path(__file__).parent.parent.parent / ".env"
 if _env_path.exists():
@@ -641,12 +654,14 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
     try:
         graph = _get_falkordb()
 
-        # 노드 검색 (이름 부분 일치)
+        # 동의어 확장: "드래곤슈퍼" → ["DS", "드래곤슈퍼", "Dragon Super"]
+        # canonical로 저장된 신규 데이터와 비정규 이름의 구버전 데이터를 모두 검색합니다.
+        entity_forms = _syn_expand(entity)
         node_query = (
-            "MATCH (n) WHERE n.name CONTAINS $name "
+            "MATCH (n) WHERE ANY(form IN $forms WHERE n.name CONTAINS form) "
             "RETURN n.name AS name, labels(n)[0] AS type LIMIT 5"
         )
-        node_result = graph.query(node_query, {"name": entity})
+        node_result = graph.query(node_query, {"forms": entity_forms})
 
         if not node_result.result_set:
             _result = {"entity": entity, "found": False, "relations": []}
@@ -1153,14 +1168,29 @@ def timeline_search(
         if _get_event_chain is None:
             return {"game": game, "found": False, "error": "timeline_search 모듈을 로드할 수 없습니다"}
         graph = _get_falkordb()
+
+        # 동의어 → canonical 정규화: "드래곤슈퍼" → "DS"
+        # ingest 시 canonical로 저장되므로 canonical로 조회해야 이벤트가 연결됩니다.
+        # 구버전 데이터 호환: canonical로 결과가 없으면 원본 이름으로 재시도합니다.
+        game_canonical = _syn_resolve(game)
         _result = _get_event_chain(
             graph,
-            game       = game,
+            game       = game_canonical,
             event_type = event_type or None,
             from_date  = from_date  or None,
             to_date    = to_date    or None,
             limit      = limit,
         )
+        if (not _result.get("events")) and game_canonical != game:
+            # 구버전 데이터(비정규 이름으로 저장된 경우) 폴백
+            _result = _get_event_chain(
+                graph,
+                game       = game,
+                event_type = event_type or None,
+                from_date  = from_date  or None,
+                to_date    = to_date    or None,
+                limit      = limit,
+            )
 
         # ── source_url → 벡터 DB 원문 연결 (Explicit Parent Document Retrieval) ──
         # 그래프에서 찾은 :Event 노드의 source_url로 Qdrant를 직접 필터링해
@@ -1208,6 +1238,9 @@ if __name__ == "__main__":
     parser.add_argument("--host",      default="0.0.0.0", help="호스트 (기본: 0.0.0.0)")
     parser.add_argument("--port",      type=int, default=8765, help="포트 (기본: 8765)")
     args = parser.parse_args()
+
+    # 비즈니스 용어집 사전 미리 로드 (동의어 해결기 워밍업)
+    _syn_preload()
 
     # 본부 설정 로드 (포트도 departments.yaml 에서 가져올 수 있음)
     if args.dept:

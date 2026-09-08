@@ -34,6 +34,13 @@ import re
 import uuid
 from datetime import UTC, datetime
 
+# ─── 동의어 해결기 (비즈니스 용어집 API) ────────────────────────────────────────
+try:
+    from utils.synonym_resolver import resolve as _resolve_entity
+except ImportError:
+    def _resolve_entity(name: str) -> str:  # type: ignore[misc]
+        return name
+
 # ─── Semantica 가용 여부 자동 감지 ──────────────────────────────────────────────
 _SEM_AVAILABLE   = False   # Semantica 패키지 설치 여부
 _KOREAN_OK       = False   # 한국어 엔티티 인식 가능 여부
@@ -70,10 +77,14 @@ def merge_node(graph, entity_name: str, entity_type: str, source_url: str) -> in
     - 이미 존재하는 노드 → 기존 node_id 반환 (중복 생성 방지)
     - 없으면 신규 생성 후 node_id 반환
     - 실패 시 -1 반환
+    - 비즈니스 용어집 API를 통해 entity_name을 canonical form으로 정규화 후 저장
 
     사용:
         node_id = merge_node(graph, "운영팀", "Team", "https://notion.so/...")
     """
+    # 동의어 → canonical(term) 정규화: "드래곤슈퍼" → "DS", "월간활성유저" → "MAU"
+    entity_name = _resolve_entity(entity_name)
+
     # 라벨에 ASCII가 아닌 문자가 포함되면 FalkorDB 오류 → sanitize
     safe_type = re.sub(r"[^A-Za-z0-9_]", "_", entity_type) or "Entity"
 

@@ -753,6 +753,13 @@ def main():
                         help="병렬 처리 워커 수 (기본: 5). Vertex AI 쿼터에 따라 조정")
     args = parser.parse_args()
 
+    # ── 비즈니스 용어집 사전 미리 로드 (동의어 해결기 워밍업) ────────────────
+    try:
+        from utils.synonym_resolver import preload as _syn_preload
+        _syn_preload()
+    except Exception:
+        pass  # 로드 실패해도 인제스트는 계속 진행
+
     # ── 본부 설정 로드 ──────────────────────────────────────────────────────
     global COLLECTION_NAME, GRAPH_NAME
     samples_dir = _LEGACY_SAMPLES_DIR
