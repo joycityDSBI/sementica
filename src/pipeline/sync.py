@@ -697,6 +697,7 @@ def sync_page(
         return nid
 
     edges_created = 0
+    seen_edges: set[tuple[int, str, int]] = set()  # 인메모리 중복 방지
     for t in triplets:
         sid = get_or_create_node(t["subject"])
         oid = get_or_create_node(t["object"])
@@ -715,18 +716,30 @@ def sync_page(
             cid = find_evidence_chunk_id(eq, chunks, source_url)
             if cid:
                 props["evidence_chunk_id"] = cid
+
+        # ── 인메모리 중복 체크 ────────────────────────────────────────────────
+        edge_key = (sid, props["rel_name"], oid)
+        if edge_key in seen_edges:
+            continue
+        seen_edges.add(edge_key)
+
         try:
-            # create_relationship() SDK 메서드는 버전에 따라 동작이 다름 →
-            # Cypher 직접 실행으로 대체 (node id 기반, 안정적)
-            # MERGE on rel_name: 동일 (subject, rel_name, object) 조합이면 기존 엣지를 재사용.
-            # source_url·evidence_quote 등은 SET으로 최신값으로 갱신.
             set_clauses = ", ".join(f"r.{k} = ${k}" for k in props)
-            graph.query(
-                f"MATCH (s), (o) WHERE id(s) = $sid AND id(o) = $oid "
-                f"MERGE (s)-[r:REL {{rel_name: $rel_name}}]->(o) "
-                f"SET {set_clauses}",
-                {"sid": sid, "oid": oid, **props},
+            # ── DB 수준 중복 체크 (크로스-페이지 중복 방지) ────────────────
+            # FalkorDB MERGE의 관계 속성 조건이 신뢰할 수 없어
+            # MATCH로 존재 여부를 확인한 뒤 없을 때만 CREATE합니다.
+            existing = graph.query(
+                "MATCH (s)-[r:REL]->(o) "
+                "WHERE id(s) = $sid AND id(o) = $oid AND r.rel_name = $rel_name "
+                "RETURN id(r) LIMIT 1",
+                {"sid": sid, "oid": oid, "rel_name": props["rel_name"]},
             )
+            if not existing.result_set:
+                graph.query(
+                    f"MATCH (s), (o) WHERE id(s) = $sid AND id(o) = $oid "
+                    f"CREATE (s)-[r:REL]->(o) SET {set_clauses}",
+                    {"sid": sid, "oid": oid, **props},
+                )
             edges_created += 1
 
             # 의사결정 트리플이면 :Decision 노드로도 기록

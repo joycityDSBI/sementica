@@ -526,7 +526,10 @@ def store_graph(
     edges_created = 0
 
     # 노드 캐시 (세션 내 중복 호출 방지)
-    node_cache = {}
+    node_cache: dict = {}
+    # 엣지 중복 방지: (subj_id, rel_name, obj_id) → 동일 페이지의 여러 청크에서
+    # 같은 트리플이 추출되어도 DB 조회 없이 즉시 차단
+    seen_edges: set[tuple[int, str, int]] = set()
 
     def get_or_create_node(entity: dict) -> int:
         key = (entity["name"], entity["type"])
@@ -562,6 +565,12 @@ def store_graph(
             if cid:
                 rel_props["evidence_chunk_id"] = cid
 
+        # ── 인메모리 중복 체크 (같은 페이지 내 여러 청크 → 동일 트리플) ──────
+        edge_key = (subj_id, rel_props["rel_name"], obj_id)
+        if edge_key in seen_edges:
+            continue
+        seen_edges.add(edge_key)
+
         try:
             # rel_props 키를 파라미터명 충돌 없이 SET으로 처리
             params = {"_s": subj_id, "_o": obj_id}
@@ -571,15 +580,23 @@ def store_graph(
                 params[pk] = v
                 set_parts.append(f"r.{k} = ${pk}")
             set_clause = ("SET " + ", ".join(set_parts)) if set_parts else ""
-            # MERGE on rel_name: 동일 (subject, rel_name, object) 조합이면 기존 엣지를 재사용.
-            # source_url·evidence_quote 등은 SET으로 최신값으로 갱신.
-            _falkordb.query(
-                "MATCH (s) WHERE id(s) = $_s "
-                "MATCH (o) WHERE id(o) = $_o "
-                f"MERGE (s)-[r:REL {{rel_name: $_p_rel_name}}]->(o) "
-                + set_clause,
-                params,
+
+            # ── DB 수준 중복 체크 (다른 페이지에서 동일 트리플이 이미 저장된 경우) ──
+            # FalkorDB의 MERGE는 관계 속성 조건을 신뢰하기 어려워
+            # MATCH로 존재 여부를 먼저 확인한 뒤 없을 때만 CREATE합니다.
+            existing = _falkordb.query(
+                "MATCH (s)-[r:REL]->(o) "
+                "WHERE id(s) = $_s AND id(o) = $_o AND r.rel_name = $_rn "
+                "RETURN id(r) LIMIT 1",
+                {"_s": subj_id, "_o": obj_id, "_rn": rel_props["rel_name"]},
             )
+            if not existing.result_set:
+                _falkordb.query(
+                    "MATCH (s) WHERE id(s) = $_s "
+                    "MATCH (o) WHERE id(o) = $_o "
+                    f"CREATE (s)-[r:REL]->(o) {set_clause}",
+                    params,
+                )
             edges_created += 1
 
             # 의사결정 트리플이면 :Decision 노드로도 기록
