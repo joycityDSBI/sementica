@@ -329,6 +329,56 @@ def _fetch_full_pages(qdrant, page_ids: list, max_chars: int = PAGE_MAX_CHARS) -
     return out
 
 
+def timeline_lookup(graph, query: str, limit: int = 20) -> dict:
+    """질문에 게임명 + 시계열 의도가 있으면 :Event 이력을 조회합니다.
+
+    server.py `_search_event_timeline()` 과 동일한 트리거 조건을 사용합니다
+    (게임명 매칭 AND 날짜/시계열 키워드). 평가와 서비스의 조건을 맞춥니다.
+    """
+    try:
+        from utils.datespan import extract_date_range, has_timeline_intent
+    except Exception:
+        return {}
+    if not has_timeline_intent(query):
+        return {}
+
+    # 질문에 이름이 등장하는 게임 탐색 (:Game 우선, 없으면 :Event.game)
+    names: list = []
+    for cypher in (
+        "MATCH (g:Game) WHERE g.name IS NOT NULL AND $text CONTAINS g.name "
+        "RETURN DISTINCT g.name AS name LIMIT 20",
+        "MATCH (e:Event) WHERE e.game IS NOT NULL AND $text CONTAINS e.game "
+        "RETURN DISTINCT e.game AS name LIMIT 20",
+    ):
+        try:
+            res = graph.query(cypher, {"text": query})
+        except Exception:
+            continue
+        names = [str(r[0]) for r in res.result_set if r and r[0] and len(str(r[0])) >= 2]
+        if names:
+            break
+    if not names:
+        return {}
+    names.sort(key=len, reverse=True)
+
+    try:
+        sys.path.insert(0, str(ROOT / "src" / "pipeline"))
+        from semantica_helper import get_event_chain
+
+        from_date, to_date = extract_date_range(query)
+        result = get_event_chain(
+            graph,
+            game=names[0],
+            event_type=None,
+            from_date=from_date or None,
+            to_date=to_date or None,
+            limit=limit,
+        )
+        return result if result and result.get("events") else {}
+    except Exception:
+        return {}
+
+
 def semantic_search(embed_client, qdrant, query: str, limit: int = 5) -> list:
     """청크로 검색한 뒤 해당 페이지 전문을 조립해 반환 (Parent Document Retrieval)."""
     vec = embed(embed_client, query)
@@ -498,7 +548,10 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
         sub_queries = _decompose_query(query, claude)
         decomposed = len(sub_queries) > 1
 
-    # ── 2. 서브쿼리별 검색 및 결과 수집 ────────────────────────────────────
+    # ── 2. 이벤트 타임라인 (원본 질문 기준 1회) ────────────────────────────
+    timeline = timeline_lookup(graph, query)
+
+    # ── 3. 서브쿼리별 검색 및 결과 수집 ────────────────────────────────────
     url_counts: dict = {}
     url_best: dict = {}
     all_graph: list = []
@@ -523,7 +576,7 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
                 graph_seen.add(key)
                 all_graph.append(r)
 
-    # ── 3. coverage 가중 재랭킹 ────────────────────────────────────────────
+    # ── 4. coverage 가중 재랭킹 ────────────────────────────────────────────
     sem_final = []
     for url, item in url_best.items():
         coverage = url_counts[url]
@@ -536,11 +589,26 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
         )
     sem_final.sort(key=lambda x: x["score"], reverse=True)
 
-    # ── 4. 컨텍스트 합성 ───────────────────────────────────────────────────
+    # ── 5. 컨텍스트 합성 ───────────────────────────────────────────────────
     graph_text = ""
     for r in all_graph[:TOP_RELATIONS]:
         cond = f" (조건: {r['condition']})" if r.get("condition") else ""
         graph_text += f"- {r['subject']} →[{r['predicate']}]→ {r['object']}{cond}\n"
+
+    # 이벤트 타임라인 — 날짜·카테고리·담당자를 명시해 날짜 기반 질문에 답하게 함
+    timeline_text = ""
+    for ev in (timeline.get("events") or [])[:20]:
+        parts = [f"- {ev.get('date', '')}"]
+        if ev.get("category"):
+            parts.append(f"[{ev['category']}]")
+        elif ev.get("event_type"):
+            parts.append(f"[{ev['event_type']}]")
+        parts.append(str(ev.get("title", "")))
+        if ev.get("manager"):
+            parts.append(f"(담당: {ev['manager']})")
+        timeline_text += " ".join(parts) + "\n"
+        if ev.get("description"):
+            timeline_text += f"    {ev['description'][:300]}\n"
 
     # 상위 TOP_PAGES 건만 — 무제한이면 CONTEXT_MAX_CHARS 에서 뒤쪽이 잘려
     # 하위 순위 문서가 상위 문서를 밀어내는 문제가 생깁니다.
@@ -548,14 +616,20 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
     for s in sem_final[:TOP_PAGES]:
         vector_text += f"[{s['title']}]\n{s['text']}\n\n"
 
+    # 타임라인은 날짜 질문의 직접 근거이므로 문서보다 앞에 배치합니다.
+    context_parts = ["=== 그래프 관계 ===\n" + graph_text]
+    if timeline_text:
+        game_label = timeline.get("game", "")
+        context_parts.append(f"=== 이벤트 이력 ({game_label}) ===\n" + timeline_text)
+    context_parts.append("=== 관련 문서 ===\n" + vector_text)
+
     return {
         "semantic": sem_final,
         "graph": all_graph,
+        "timeline": timeline.get("events") or [],
         "decomposed": decomposed,
         "sub_queries": sub_queries if decomposed else [],
-        "combined_context": (
-            "=== 그래프 관계 ===\n" + graph_text + "\n=== 관련 문서 ===\n" + vector_text
-        ).strip(),
+        "combined_context": "\n".join(context_parts).strip(),
     }
 
 
@@ -658,6 +732,7 @@ def run_evaluation():
             context = search_result["combined_context"]
             sem_count = len(search_result["semantic"])
             grp_count = len(search_result["graph"])
+            tl_count = len(search_result.get("timeline") or [])
             decomposed = search_result.get("decomposed", False)
             sub_queries = search_result.get("sub_queries", [])
         except Exception as e:
@@ -687,7 +762,11 @@ def run_evaluation():
         score_icon = "✅" if score >= 0.8 else ("⚡" if score >= 0.4 else "❌")
         print(f"  {score_icon} 점수: {score:.1f} | {reason}")
         decomp_info = f" [분해: {len(sub_queries)}개]" if decomposed else ""
-        print(f"     검색: 벡터 {sem_count}건 + 그래프 {grp_count}건 ({search_time}s){decomp_info}")
+        tl_info = f" + 이벤트 {tl_count}건" if tl_count else ""
+        print(
+            f"     검색: 벡터 {sem_count}건 + 그래프 {grp_count}건{tl_info} "
+            f"({search_time}s){decomp_info}"
+        )
         print()
 
         row = {

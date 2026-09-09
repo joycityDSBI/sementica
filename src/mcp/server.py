@@ -377,6 +377,91 @@ def _fetch_pages_by_source_urls(
     return assembled
 
 
+def _detect_games(graph, text: str, limit: int = 3) -> list[str]:
+    """질문 문장에 이름이 등장하는 게임/서비스를 찾습니다.
+
+    :Game 노드를 우선 조회하고, 없으면 :Event 의 game 속성에서 탐색합니다
+    (게임 노드 없이 이벤트만 적재된 구버전 데이터 대응).
+    긴 이름을 우선합니다 — 조사·부분 문자열로 인한 오탐을 줄입니다.
+    """
+    names: list[str] = []
+    for cypher in (
+        "MATCH (g:Game) WHERE g.name IS NOT NULL AND $text CONTAINS g.name "
+        "RETURN DISTINCT g.name AS name LIMIT 20",
+        "MATCH (e:Event) WHERE e.game IS NOT NULL AND $text CONTAINS e.game "
+        "RETURN DISTINCT e.game AS name LIMIT 20",
+    ):
+        try:
+            res = graph.query(cypher, {"text": text})
+        except Exception:
+            continue
+        names = [str(r[0]) for r in res.result_set if r and r[0] and len(str(r[0])) >= 2]
+        if names:
+            break
+    names.sort(key=len, reverse=True)
+    return names[:limit]
+
+
+def _search_event_timeline(query: str, limit: int = 20) -> dict:
+    """질문에 게임명과 시계열 의도가 함께 있으면 :Event 이력을 조회합니다.
+
+    hybrid_search 가 날짜 기반 질문에 답하지 못하던 문제를 해결합니다.
+    이전에는 timeline_search 가 별도 도구로만 존재해, 호출자가 그 도구를
+    직접 고르지 않으면 :Event 노드에 아예 접근하지 못했습니다.
+
+    호출 조건 (둘 다 충족해야 함 — 오탐 방지):
+      ① 질문에 그래프의 게임/서비스 이름이 등장
+      ② 날짜 표현 또는 시계열 키워드가 존재
+    "점검 시작은 어느 팀 담당?" 처럼 키워드만 걸리는 질문은
+    게임명이 없으므로 호출되지 않습니다.
+
+    Returns:
+        get_event_chain() 결과 dict. 조건 미충족·조회 실패 시 {}.
+    """
+    if _get_event_chain is None:
+        return {}
+    try:
+        from utils.datespan import extract_date_range, has_timeline_intent
+
+        if not has_timeline_intent(query):
+            return {}
+
+        graph = _get_falkordb()
+        games = _detect_games(graph, query)
+        if not games:
+            return {}
+
+        from_date, to_date = extract_date_range(query)
+        result = _get_event_chain(
+            graph,
+            game=games[0],
+            event_type=None,  # 질문에서 유형까지 추정하지 않음 — 전체 조회 후 LLM이 판단
+            from_date=from_date or None,
+            to_date=to_date or None,
+            limit=limit,
+        )
+        if not result or not result.get("events"):
+            return {}
+
+        # :Event 의 source_url → Qdrant 원문 첨부 (timeline_search 와 동일한 방식)
+        urls = list({ev["source_url"] for ev in result["events"] if ev.get("source_url")})
+        if urls:
+            try:
+                pages = _fetch_pages_by_source_urls(
+                    _get_qdrant(), COLLECTION_NAME, urls, max_chars=1500
+                )
+                for ev in result["events"]:
+                    page = pages.get(ev.get("source_url", ""))
+                    if page:
+                        ev["page_content"] = page.get("content", "")
+                        ev["page_chunk_count"] = page.get("chunk_count", 0)
+            except Exception:
+                pass  # 원문 첨부는 부가 정보 — 실패해도 이벤트 목록은 반환
+        return result
+    except Exception:
+        return {}
+
+
 def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
     """서브쿼리 단위 벡터+그래프 검색 — ThreadPoolExecutor로 두 검색을 병렬 실행.
 
@@ -922,8 +1007,23 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
             linked_pages:     그래프 엣지 source_url로 연결된 추가 문서 [{title, source_url, content, chunk_count}]
                               (semantic_results에 없는 페이지만 포함 — 그래프-벡터 명시적 교차 연결),
             decomposed:       복합 쿼리 분해 여부 (true/false),
-            sub_queries:      분해된 서브쿼리 목록 (decomposed=true일 때만)
+            sub_queries:      분해된 서브쿼리 목록 (decomposed=true일 때만),
+
+            timeline_results: 날짜 기반 질문일 때만 존재.
+                              {game, total, events: [{date, category, event_type, title,
+                               description, target, manager, source_url, page_content, ...}]}
+                              질문에 게임/서비스 이름과 날짜(또는 이력·변경 등 시계열
+                              키워드)가 함께 있을 때 :Event 노드에서 자동 조회됩니다.
+                              category는 Notion "변경카테고리" 원문입니다.
+            timeline_summary: ["2026-06-19: [소재변경] 소재 3건 OFF", ...] 형태 요약.
+                              위 두 키는 조건 미충족 시 아예 포함되지 않습니다.
         }
+
+    【날짜 기반 질문도 이 도구로 처리됩니다】
+    "2026년 6월 19일 RESU에서 OFF된 소재는?" 처럼 게임명 + 날짜가 있는 질문은
+    timeline_results 가 자동으로 채워지므로 timeline_search 를 따로 호출할
+    필요가 없습니다. 특정 게임의 전체 이력을 기간·유형으로 정밀하게 필터링해야
+    할 때만 timeline_search 를 사용하세요.
     """
     _t0 = time.time()
     _err = None
@@ -944,13 +1044,19 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
         sem_per_q: list[list] = []
         all_graph_hits: list = []
 
-        n_workers = min(len(sub_queries), 4)  # 최대 4개 서브쿼리 동시 실행
+        # +1 워커: 이벤트 타임라인 조회를 서브쿼리 검색과 병렬로 실행하므로
+        # 레이턴시가 추가되지 않습니다.
+        n_workers = min(len(sub_queries), 4) + 1
         with ThreadPoolExecutor(max_workers=n_workers) as sq_pool:
+            # 타임라인은 원본 질문 기준으로 1회만 조회합니다.
+            # (날짜·게임명은 질문 전체의 속성이므로 서브쿼리로 쪼갤 필요가 없음)
+            tl_future = sq_pool.submit(_search_event_timeline, query)
             sq_futures = [sq_pool.submit(_run_sub_search, sq, limit) for sq in sub_queries]
             for fut in as_completed(sq_futures):
                 sem, gph = fut.result()
                 sem_per_q.append(sem)
                 all_graph_hits.extend(gph)
+            timeline = tl_future.result()
 
         # ── 3. 벡터 결과 병합 (coverage 재랭킹) ────────────────────────────
         semantic = _merge_semantic_results(sem_per_q)
@@ -1001,6 +1107,17 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
             "decomposed": decomposed,
             "sub_queries": sub_queries if decomposed else [],
         }
+
+        # ── 7. 이벤트 타임라인 (날짜 기반 질문일 때만 존재) ─────────────────
+        # 조건 미충족 시 키를 넣지 않습니다 — 호출자가 무관한 빈 필드를
+        # 해석하려 시도하지 않도록.
+        if timeline and timeline.get("events"):
+            _result["timeline_results"] = {
+                "game": timeline.get("game", ""),
+                "total": timeline.get("total", 0),
+                "events": timeline["events"],
+            }
+            _result["timeline_summary"] = timeline.get("timeline_summary", [])
         return _result
     except Exception as e:
         _err = str(e)
@@ -1230,9 +1347,11 @@ def timeline_search(
                 event_id:        이벤트 고유 ID,
                 game:            게임명,
                 event_type:      이벤트 유형,
+                category:        Notion "변경카테고리" 원문 (예: "소재변경", "캠페인조정"),
                 date:            날짜 (YYYY-MM-DD),
                 title:           이벤트 제목,
                 description:     상세 설명,
+                manager:         담당자,
                 target:          대상 유저 (예: "신규유저,복귀유저"),
                 source_url:      출처 Notion URL,
                 prev_event:      직전 이벤트 요약,

@@ -1025,11 +1025,13 @@ def get_event_chain(
             {
               "event_id", "game", "event_type", "date", "title",
               "description", "target", "source_url",
+              "category",  # Notion "변경카테고리" 원문 (예: "소재변경")
+              "manager",   # 담당자
               "prev_event": {"title", "date"} | None,
               "next_event": {"title", "date"} | None,
             }, ...
           ],
-          "timeline_summary": ["2026-04-12: [client_update] 클라이언트 업데이트", ...]
+          "timeline_summary": ["2026-06-19: [소재변경] 소재 3건 OFF", ...]
         }
     """
     from_ts = _date_to_ts(from_date) if from_date else 0
@@ -1070,7 +1072,10 @@ def get_event_chain(
             "RETURN e.event_id, e.game, e.event_type, e.date, "
             "       e.title, e.description, e.target, e.source_url, "
             "       prev.title AS prev_title, prev.date AS prev_date, "
-            "       nxt.title AS next_title, nxt.date AS next_date "
+            "       nxt.title AS next_title, nxt.date AS next_date, "
+            # category: Notion "변경카테고리" 원문 (예: "소재변경", "캠페인조정")
+            # manager:  담당자 — 기존 인덱스를 깨지 않도록 뒤에 추가합니다.
+            "       e.category AS category, e.manager AS manager "
             f"ORDER BY e.date_ts ASC LIMIT {int(limit)}"
         )
         r = graph.query(cypher, params)
@@ -1085,7 +1090,8 @@ def get_event_chain(
             }
 
         # row: [event_id, game, event_type, date, title, description,
-        #       target, source_url, prev_title, prev_date, next_title, next_date]
+        #       target, source_url, prev_title, prev_date, next_title, next_date,
+        #       category, manager]
         events = [
             {
                 "event_id": row[0],
@@ -1098,11 +1104,18 @@ def get_event_chain(
                 "source_url": row[7] or "",
                 "prev_event": {"title": row[8], "date": row[9]} if row[8] else None,
                 "next_event": {"title": row[10], "date": row[11]} if row[10] else None,
+                # 구버전 데이터는 category/manager 가 없을 수 있음 → 길이 확인 후 접근
+                "category": (row[12] or "") if len(row) > 12 else "",
+                "manager": (row[13] or "") if len(row) > 13 else "",
             }
             for row in r.result_set
         ]
 
-        timeline_summary = [f"{e['date']}: [{e['event_type']}] {e['title']}" for e in events]
+        # 요약 줄에 category 를 함께 노출 — "어떤 변경 카테고리인가?" 류 질문에
+        # events 상세를 파싱하지 않고 요약만으로 답할 수 있게 합니다.
+        timeline_summary = [
+            f"{e['date']}: [{e['category'] or e['event_type']}] {e['title']}" for e in events
+        ]
 
         return {
             "game": actual_game,
