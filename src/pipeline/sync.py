@@ -726,17 +726,21 @@ def sync_page(
         try:
             set_clauses = ", ".join(f"r.{k} = ${k}" for k in props)
             # ── DB 수준 중복 체크: (rel_name + source_url) 기준 ─────────────
+            # ※ FalkorDB: 관계 패턴 MATCH 후 WHERE id() 조건은 신뢰할 수 없음.
+            #   노드를 먼저 각각 MATCH 후 관계를 조회합니다.
             existing = graph.query(
+                "MATCH (s) WHERE id(s) = $sid "
+                "MATCH (o) WHERE id(o) = $oid "
                 "MATCH (s)-[r:REL]->(o) "
-                "WHERE id(s) = $sid AND id(o) = $oid "
-                "  AND r.rel_name = $rel_name AND r.source_url = $source_url "
+                "WHERE r.rel_name = $rel_name AND r.source_url = $source_url "
                 "RETURN id(r) LIMIT 1",
                 {"sid": sid, "oid": oid,
                  "rel_name": props["rel_name"], "source_url": source_url},
             )
             if not existing.result_set:
                 graph.query(
-                    f"MATCH (s), (o) WHERE id(s) = $sid AND id(o) = $oid "
+                    f"MATCH (s) WHERE id(s) = $sid "
+                    f"MATCH (o) WHERE id(o) = $oid "
                     f"CREATE (s)-[r:REL]->(o) SET {set_clauses}",
                     {"sid": sid, "oid": oid, **props},
                 )

@@ -529,7 +529,7 @@ def store_graph(
     node_cache: dict = {}
     # 엣지 중복 방지: (subj_id, rel_name, obj_id) → 동일 페이지의 여러 청크에서
     # 같은 트리플이 추출되어도 DB 조회 없이 즉시 차단
-    seen_edges: set[tuple[int, str, int]] = set()
+    seen_edges: set[tuple[int, str, int, str]] = set()
 
     def get_or_create_node(entity: dict) -> int:
         key = (entity["name"], entity["type"])
@@ -586,10 +586,13 @@ def store_graph(
             # ── DB 수준 중복 체크: (rel_name + source_url) 기준 ─────────────
             # 같은 페이지를 재인제스트해도 엣지가 하나만 유지됩니다.
             # 다른 페이지에서 동일 관계가 추출되면 별도 엣지로 보존합니다.
+            # ※ FalkorDB: 관계 패턴 MATCH 후 WHERE id() 조건은 신뢰할 수 없음.
+            #   CREATE와 동일하게 노드를 먼저 각각 MATCH 후 관계를 조회합니다.
             existing = _falkordb.query(
+                "MATCH (s) WHERE id(s) = $_s "
+                "MATCH (o) WHERE id(o) = $_o "
                 "MATCH (s)-[r:REL]->(o) "
-                "WHERE id(s) = $_s AND id(o) = $_o "
-                "  AND r.rel_name = $_rn AND r.source_url = $_url "
+                "WHERE r.rel_name = $_rn AND r.source_url = $_url "
                 "RETURN id(r) LIMIT 1",
                 {"_s": subj_id, "_o": obj_id,
                  "_rn": rel_props["rel_name"], "_url": source_url},
