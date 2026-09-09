@@ -40,32 +40,34 @@ if _env.exists():
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
 import argparse as _argparse  # noqa: E402
 
-GCP_PROJECT     = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION        = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
-EMBED_MODEL     = "text-multilingual-embedding-002"
-QDRANT_URL      = os.environ.get("QDRANT_URL", "http://localhost:6333")
-FALKORDB_HOST   = os.environ.get("FALKORDB_HOST", "localhost")
-FALKORDB_PORT   = int(os.environ.get("FALKORDB_PORT", "6379"))
-CLAUDE_MODEL    = "claude-sonnet-4-6@default"
+GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
+EMBED_MODEL = "text-multilingual-embedding-002"
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
+FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
+FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
+CLAUDE_MODEL = "claude-sonnet-4-6@default"
 
 # 기본값 (--dept 없을 때)
 COLLECTION_NAME = "joycity_pages"
-GRAPH_NAME      = "joycity_kg"
-DEPT_LABEL      = "legacy"
+GRAPH_NAME = "joycity_kg"
+DEPT_LABEL = "legacy"
 
 # --dept / --golden 인수 처리
 _parser = _argparse.ArgumentParser(add_help=False)
-_parser.add_argument("--dept",   default="")
+_parser.add_argument("--dept", default="")
 _parser.add_argument("--golden", default="", help="골든셋 JSON 파일 경로 (gen_golden_set.py 결과)")
 _known, _ = _parser.parse_known_args()
 
 if _known.dept:
     sys.path.insert(0, str(ROOT / "src" / "pipeline"))
     from dept_config import load_dept as _load_dept
+
     _cfg = _load_dept(_known.dept)
     COLLECTION_NAME = _cfg["qdrant_collection"]
-    GRAPH_NAME      = _cfg["falkordb_graph"]
-    DEPT_LABEL      = f"{_cfg['name']} ({_known.dept})"
+    GRAPH_NAME = _cfg["falkordb_graph"]
+    DEPT_LABEL = f"{_cfg['name']} ({_known.dept})"
+
 
 # ─── 골든셋 로드 ──────────────────────────────────────────────────────────────
 # --golden 파일이 지정되면 그 파일에서 로드, 없으면 내장 기본 골든셋 사용
@@ -79,6 +81,7 @@ def _load_golden(path: str) -> list:
         return data
     raise ValueError(f"골든셋 형식 오류: {path}")
 
+
 _GOLDEN_PATH = _known.golden
 if _GOLDEN_PATH and Path(_GOLDEN_PATH).exists():
     GOLDEN_SET = _load_golden(_GOLDEN_PATH)
@@ -86,72 +89,153 @@ if _GOLDEN_PATH and Path(_GOLDEN_PATH).exists():
 else:
     # 내장 기본 골든셋 (하위 호환)
     GOLDEN_SET = [
-    # 카테고리 1: 담당자
-    {"id": "Q01", "category": "담당자", "difficulty": "easy",
-     "question": "점검 시작과 서버 오픈 단계는 어느 팀이 담당하나요?",
-     "answer": "운영팀"},
-    {"id": "Q02", "category": "담당자", "difficulty": "easy",
-     "question": "에러코드 198이 발생했을 때 확인을 요청해야 하는 담당자는 누구인가요?",
-     "answer": "정보시스템팀 안제민"},
-    {"id": "Q03", "category": "담당자", "difficulty": "medium",
-     "question": "RESU 라이브 + PM 이슈 전달의 담당자는 누구누구인가요?",
-     "answer": "김도형, 허현철, 고명수 / 김정빈, 신동화"},
-    {"id": "Q04", "category": "담당자", "difficulty": "medium",
-     "question": "iOS 빌드 관련 채널이 없을 때 데브옵스팀에서 문의할 수 있는 담당자는 누구인가요?",
-     "answer": "임재욱"},
-    {"id": "Q05", "category": "담당자", "difficulty": "medium",
-     "question": "애플 앱스토어 iOS 내부테스터를 등록할 때 애니플렉스 측에 요청을 전달하는 담당자는 누구인가요?",
-     "answer": "김원태"},
-    # 카테고리 2: 정책/규정
-    {"id": "Q06", "category": "정책/규정", "difficulty": "easy",
-     "question": "점검 소요 시간 확인은 점검 당일 기준 언제까지 완료해야 하나요?",
-     "answer": "점검 전날 15시까지"},
-    {"id": "Q07", "category": "정책/규정", "difficulty": "medium",
-     "question": "iOS 버전 표기에서 괄호 안의 숫자(예: 1.9.1(10)에서 10)는 무엇을 의미하나요?",
-     "answer": "번들버전(Bundle Version)"},
-    {"id": "Q08", "category": "정책/규정", "difficulty": "easy",
-     "question": "QA 빌드 후 접속까지 소요되는 시간은 얼마로 안내하나요?",
-     "answer": "약 30분"},
-    {"id": "Q09", "category": "정책/규정", "difficulty": "medium",
-     "question": "QA 빌드 공유 시 공유해야 하는 빌드 항목은 어떻게 구성되나요?",
-     "answer": "안드로이드 링크 2개(애니플렉스, 조이시티) + iOS 버전 2개(애니플렉스, 조이시티)를 QA방(+DQA방)에 공유"},
-    # 카테고리 3: 관계
-    {"id": "Q10", "category": "관계", "difficulty": "medium",
-     "question": "FDE1팀과 FDE2팀의 기반 조직과 담당 리더는 각각 누구인가요?",
-     "answer": "FDE1팀: 데이터사이언스실 기반, 리더 정민호 / FDE2팀: 플랫폼실 기반, 리더 김주철"},
-    {"id": "Q11", "category": "관계", "difficulty": "medium",
-     "question": "온톨로지, 디지털 트윈, End-to-End 도구는 각각 어떤 역할로 설명되나요?",
-     "answer": "온톨로지(규칙) → 디지털 트윈(엔진) → End-to-End 도구(화면)"},
-    {"id": "Q12", "category": "관계", "difficulty": "easy",
-     "question": "FDE 활동 기여도는 무엇에 반영되나요?",
-     "answer": "인사 평가 (GIVE + TAKE 두 기준으로 반영)"},
-    {"id": "Q13", "category": "관계", "difficulty": "medium",
-     "question": "FDE 파견이 종료되면 도구와 지식은 각각 어디에 남나요?",
-     "answer": "도구는 해당 팀에, 지식(온톨로지)은 전사 온톨로지에 남음"},
-    {"id": "Q14", "category": "관계", "difficulty": "medium",
-     "question": "AppGuard Upload/Download Timeout 에러가 지속 발생할 경우 어떻게 해야 하나요?",
-     "answer": "시간을 두고 재실행하고, 지속 발생 시 라이브팀에 공유"},
-    # 카테고리 4: 문서위치
-    {"id": "Q15", "category": "문서위치", "difficulty": "easy",
-     "question": "iOS 버전 관리 시트는 어디서 확인할 수 있나요?",
-     "answer": "https://www.notion.so/joycity/2e6ea67a5681804997f6e69195b4c008"},
-    {"id": "Q16", "category": "문서위치", "difficulty": "medium",
-     "question": "버전 표기 규칙 문서의 파일명은 무엇인가요?",
-     "answer": "STRAT-버전 표기 규칙-101125-144421.pdf"},
-    {"id": "Q17", "category": "문서위치", "difficulty": "hard",
-     "question": "pLTV D3D5 관련 도커 이미지는 어느 GCP 레포지토리 경로에 업로드되나요?",
-     "answer": "https://console.cloud.google.com/artifacts/docker/data-science-division-216308/us-west1/pltv-preprocessor-repo/pltv-uid-d3d5-model"},
-    # 카테고리 5: 복합
-    {"id": "Q18", "category": "복합", "difficulty": "hard",
-     "question": "빌드 중 에러코드 138과 198이 발생했을 때 각각의 대응 방법은 무엇인가요?",
-     "answer": "에러코드 138: 재빌드 / 에러코드 198: 정보시스템팀 안제민 확인 (급한 경우 빌드머신 재부팅 또는 sudo pkill -f Unity.Licensing.Client)"},
-    {"id": "Q19", "category": "복합", "difficulty": "medium",
-     "question": "점검 진행 중 서버 상태 확인에 사용하는 도구는 무엇이 있나요?",
-     "answer": "Grafana, Kibana, OpenSearch 대시보드 (서버 상태 확인 단계에서 사용)"},
-    {"id": "Q20", "category": "복합", "difficulty": "hard",
-     "question": "IN-JOY가 '왜 매출이 떨어졌나'에 답하지 못하는 이유는 무엇이고, FDE는 이를 어떻게 해결하려 하나요?",
-     "answer": "IN-JOY는 End-to-End 도구(화면)만 먼저 만들었으나 온톨로지(규칙)와 디지털 트윈(엔진)이 비어 있어 분석 불가. FDE의 TAKE 모델로 파견 중 수집한 업무 지식을 온톨로지에 축적하여 AI 분석 기반을 구축하는 것이 해결 방향."},
-]  # ← 내장 기본 골든셋 끝 (else 블록)
+        # 카테고리 1: 담당자
+        {
+            "id": "Q01",
+            "category": "담당자",
+            "difficulty": "easy",
+            "question": "점검 시작과 서버 오픈 단계는 어느 팀이 담당하나요?",
+            "answer": "운영팀",
+        },
+        {
+            "id": "Q02",
+            "category": "담당자",
+            "difficulty": "easy",
+            "question": "에러코드 198이 발생했을 때 확인을 요청해야 하는 담당자는 누구인가요?",
+            "answer": "정보시스템팀 안제민",
+        },
+        {
+            "id": "Q03",
+            "category": "담당자",
+            "difficulty": "medium",
+            "question": "RESU 라이브 + PM 이슈 전달의 담당자는 누구누구인가요?",
+            "answer": "김도형, 허현철, 고명수 / 김정빈, 신동화",
+        },
+        {
+            "id": "Q04",
+            "category": "담당자",
+            "difficulty": "medium",
+            "question": "iOS 빌드 관련 채널이 없을 때 데브옵스팀에서 문의할 수 있는 담당자는 누구인가요?",
+            "answer": "임재욱",
+        },
+        {
+            "id": "Q05",
+            "category": "담당자",
+            "difficulty": "medium",
+            "question": "애플 앱스토어 iOS 내부테스터를 등록할 때 애니플렉스 측에 요청을 전달하는 담당자는 누구인가요?",
+            "answer": "김원태",
+        },
+        # 카테고리 2: 정책/규정
+        {
+            "id": "Q06",
+            "category": "정책/규정",
+            "difficulty": "easy",
+            "question": "점검 소요 시간 확인은 점검 당일 기준 언제까지 완료해야 하나요?",
+            "answer": "점검 전날 15시까지",
+        },
+        {
+            "id": "Q07",
+            "category": "정책/규정",
+            "difficulty": "medium",
+            "question": "iOS 버전 표기에서 괄호 안의 숫자(예: 1.9.1(10)에서 10)는 무엇을 의미하나요?",
+            "answer": "번들버전(Bundle Version)",
+        },
+        {
+            "id": "Q08",
+            "category": "정책/규정",
+            "difficulty": "easy",
+            "question": "QA 빌드 후 접속까지 소요되는 시간은 얼마로 안내하나요?",
+            "answer": "약 30분",
+        },
+        {
+            "id": "Q09",
+            "category": "정책/규정",
+            "difficulty": "medium",
+            "question": "QA 빌드 공유 시 공유해야 하는 빌드 항목은 어떻게 구성되나요?",
+            "answer": "안드로이드 링크 2개(애니플렉스, 조이시티) + iOS 버전 2개(애니플렉스, 조이시티)를 QA방(+DQA방)에 공유",
+        },
+        # 카테고리 3: 관계
+        {
+            "id": "Q10",
+            "category": "관계",
+            "difficulty": "medium",
+            "question": "FDE1팀과 FDE2팀의 기반 조직과 담당 리더는 각각 누구인가요?",
+            "answer": "FDE1팀: 데이터사이언스실 기반, 리더 정민호 / FDE2팀: 플랫폼실 기반, 리더 김주철",
+        },
+        {
+            "id": "Q11",
+            "category": "관계",
+            "difficulty": "medium",
+            "question": "온톨로지, 디지털 트윈, End-to-End 도구는 각각 어떤 역할로 설명되나요?",
+            "answer": "온톨로지(규칙) → 디지털 트윈(엔진) → End-to-End 도구(화면)",
+        },
+        {
+            "id": "Q12",
+            "category": "관계",
+            "difficulty": "easy",
+            "question": "FDE 활동 기여도는 무엇에 반영되나요?",
+            "answer": "인사 평가 (GIVE + TAKE 두 기준으로 반영)",
+        },
+        {
+            "id": "Q13",
+            "category": "관계",
+            "difficulty": "medium",
+            "question": "FDE 파견이 종료되면 도구와 지식은 각각 어디에 남나요?",
+            "answer": "도구는 해당 팀에, 지식(온톨로지)은 전사 온톨로지에 남음",
+        },
+        {
+            "id": "Q14",
+            "category": "관계",
+            "difficulty": "medium",
+            "question": "AppGuard Upload/Download Timeout 에러가 지속 발생할 경우 어떻게 해야 하나요?",
+            "answer": "시간을 두고 재실행하고, 지속 발생 시 라이브팀에 공유",
+        },
+        # 카테고리 4: 문서위치
+        {
+            "id": "Q15",
+            "category": "문서위치",
+            "difficulty": "easy",
+            "question": "iOS 버전 관리 시트는 어디서 확인할 수 있나요?",
+            "answer": "https://www.notion.so/joycity/2e6ea67a5681804997f6e69195b4c008",
+        },
+        {
+            "id": "Q16",
+            "category": "문서위치",
+            "difficulty": "medium",
+            "question": "버전 표기 규칙 문서의 파일명은 무엇인가요?",
+            "answer": "STRAT-버전 표기 규칙-101125-144421.pdf",
+        },
+        {
+            "id": "Q17",
+            "category": "문서위치",
+            "difficulty": "hard",
+            "question": "pLTV D3D5 관련 도커 이미지는 어느 GCP 레포지토리 경로에 업로드되나요?",
+            "answer": "https://console.cloud.google.com/artifacts/docker/data-science-division-216308/us-west1/pltv-preprocessor-repo/pltv-uid-d3d5-model",
+        },
+        # 카테고리 5: 복합
+        {
+            "id": "Q18",
+            "category": "복합",
+            "difficulty": "hard",
+            "question": "빌드 중 에러코드 138과 198이 발생했을 때 각각의 대응 방법은 무엇인가요?",
+            "answer": "에러코드 138: 재빌드 / 에러코드 198: 정보시스템팀 안제민 확인 (급한 경우 빌드머신 재부팅 또는 sudo pkill -f Unity.Licensing.Client)",
+        },
+        {
+            "id": "Q19",
+            "category": "복합",
+            "difficulty": "medium",
+            "question": "점검 진행 중 서버 상태 확인에 사용하는 도구는 무엇이 있나요?",
+            "answer": "Grafana, Kibana, OpenSearch 대시보드 (서버 상태 확인 단계에서 사용)",
+        },
+        {
+            "id": "Q20",
+            "category": "복합",
+            "difficulty": "hard",
+            "question": "IN-JOY가 '왜 매출이 떨어졌나'에 답하지 못하는 이유는 무엇이고, FDE는 이를 어떻게 해결하려 하나요?",
+            "answer": "IN-JOY는 End-to-End 도구(화면)만 먼저 만들었으나 온톨로지(규칙)와 디지털 트윈(엔진)이 비어 있어 분석 불가. FDE의 TAKE 모델로 파견 중 수집한 업무 지식을 온톨로지에 축적하여 AI 분석 기반을 구축하는 것이 해결 방향.",
+        },
+    ]  # ← 내장 기본 골든셋 끝 (else 블록)
+
 
 # ─── 클라이언트 초기화 ────────────────────────────────────────────────────────
 def init_clients():
@@ -187,12 +271,14 @@ def semantic_search(embed_client, qdrant, query: str, limit: int = 5) -> list:
     out = []
     for h in result.points:
         p = h.payload or {}
-        out.append({
-            "title":   p.get("title", ""),
-            "text":    p.get("text", "")[:2000],
-            "score":   round(h.score, 4),
-            "url":     p.get("source_url", ""),
-        })
+        out.append(
+            {
+                "title": p.get("title", ""),
+                "text": p.get("text", "")[:2000],
+                "score": round(h.score, 4),
+                "url": p.get("source_url", ""),
+            }
+        )
     return out
 
 
@@ -203,30 +289,47 @@ def graph_search(graph, entity: str) -> list:
     words = [w for w in entity.split() if len(w) >= 2][:3]
     seen = set()
     for word in words:
-        q = ("MATCH (n)-[r:REL]->(m) WHERE n.name CONTAINS $w OR m.name CONTAINS $w "
-             "RETURN n.name, r.rel_name, m.name, r.condition LIMIT 10")
+        q = (
+            "MATCH (n)-[r:REL]->(m) WHERE n.name CONTAINS $w OR m.name CONTAINS $w "
+            "RETURN n.name, r.rel_name, m.name, r.condition LIMIT 10"
+        )
         try:
             res = graph.query(q, {"w": word})
             for row in res.result_set:
                 key = (row[0], row[1], row[2])
                 if key not in seen:
                     seen.add(key)
-                    relations.append({
-                        "subject":   row[0],
-                        "predicate": row[1],
-                        "object":    row[2],
-                        "condition": row[3] if len(row) > 3 else "",
-                    })
+                    relations.append(
+                        {
+                            "subject": row[0],
+                            "predicate": row[1],
+                            "object": row[2],
+                            "condition": row[3] if len(row) > 3 else "",
+                        }
+                    )
         except Exception:
             pass
     return relations
 
 
-_COMPLEX_PATTERNS = frozenset([
-    "이고", "이며", "하는", "이면서", "이자",
-    "담당하는", "작성한", "소속된", "승인한", "결정한",
-    "관련된", "연관된", "포함된", "연결된",
-])
+_COMPLEX_PATTERNS = frozenset(
+    [
+        "이고",
+        "이며",
+        "하는",
+        "이면서",
+        "이자",
+        "담당하는",
+        "작성한",
+        "소속된",
+        "승인한",
+        "결정한",
+        "관련된",
+        "연관된",
+        "포함된",
+        "연결된",
+    ]
+)
 
 
 def _is_complex_query(query: str) -> bool:
@@ -239,21 +342,24 @@ def _is_complex_query(query: str) -> bool:
 def _decompose_query(query: str, claude) -> list:
     """Claude로 복합 쿼리를 서브쿼리 2~3개로 분해"""
     import re as _re
+
     try:
         msg = claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=300,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "다음 복합 질문을 독립적으로 검색 가능한 서브쿼리 2~3개로 분해하세요.\n"
-                    "JSON 배열만 반환하세요. 예: [\"서브쿼리1\", \"서브쿼리2\"]\n\n"
-                    f"질문: {query}"
-                ),
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "다음 복합 질문을 독립적으로 검색 가능한 서브쿼리 2~3개로 분해하세요.\n"
+                        'JSON 배열만 반환하세요. 예: ["서브쿼리1", "서브쿼리2"]\n\n'
+                        f"질문: {query}"
+                    ),
+                }
+            ],
         )
         text = msg.content[0].text.strip()
-        m = _re.search(r'\[.*?\]', text, _re.DOTALL)
+        m = _re.search(r"\[.*?\]", text, _re.DOTALL)
         if m:
             parts = json.loads(m.group())
             parts = [p.strip() for p in parts if isinstance(p, str) and p.strip()]
@@ -261,7 +367,7 @@ def _decompose_query(query: str, claude) -> list:
                 return parts
     except Exception:
         pass
-    return [query]   # 분해 실패 시 원본 반환
+    return [query]  # 분해 실패 시 원본 반환
 
 
 def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
@@ -306,11 +412,13 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
     sem_final = []
     for url, item in url_best.items():
         coverage = url_counts[url]
-        sem_final.append({
-            **item,
-            "score": round(item["score"] * (1 + 0.15 * (coverage - 1)), 4),
-            "coverage": coverage,
-        })
+        sem_final.append(
+            {
+                **item,
+                "score": round(item["score"] * (1 + 0.15 * (coverage - 1)), 4),
+                "coverage": coverage,
+            }
+        )
     sem_final.sort(key=lambda x: x["score"], reverse=True)
 
     # ── 4. 컨텍스트 합성 ───────────────────────────────────────────────────
@@ -329,9 +437,8 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
         "decomposed": decomposed,
         "sub_queries": sub_queries if decomposed else [],
         "combined_context": (
-            "=== 그래프 관계 ===\n" + graph_text +
-            "\n=== 관련 문서 ===\n" + vector_text
-        ).strip()
+            "=== 그래프 관계 ===\n" + graph_text + "\n=== 관련 문서 ===\n" + vector_text
+        ).strip(),
     }
 
 
@@ -430,8 +537,7 @@ def run_evaluation():
         # 1. 하이브리드 검색 (복합 쿼리 자동 분해)
         t0 = time.time()
         try:
-            search_result = hybrid_search(embed_client, qdrant, graph, question,
-                                          claude=claude)
+            search_result = hybrid_search(embed_client, qdrant, graph, question, claude=claude)
             context = search_result["combined_context"]
             sem_count = len(search_result["semantic"])
             grp_count = len(search_result["graph"])
@@ -439,8 +545,15 @@ def run_evaluation():
             sub_queries = search_result.get("sub_queries", [])
         except Exception as e:
             print(f"  ❌ 검색 오류: {e}")
-            results.append({**item, "score": 0.0, "reason": f"검색 실패: {e}",
-                             "response": "", "search_time": 0})
+            results.append(
+                {
+                    **item,
+                    "score": 0.0,
+                    "reason": f"검색 실패: {e}",
+                    "response": "",
+                    "search_time": 0,
+                }
+            )
             continue
 
         search_time = round(time.time() - t0, 2)
@@ -484,7 +597,9 @@ def run_evaluation():
     print("=" * 60)
     print("  📊 평가 결과 요약")
     print("=" * 60)
-    print(f"  전체 평균:  {total_score:.3f} ({'✅ 목표 달성' if total_score >= 0.7 else '❌ 목표 미달'}, 목표 0.70)")
+    print(
+        f"  전체 평균:  {total_score:.3f} ({'✅ 목표 달성' if total_score >= 0.7 else '❌ 목표 미달'}, 목표 0.70)"
+    )
     print(f"  통과 (≥0.7): {passed}/{len(results)}문항")
     print()
     print("  카테고리별:")
@@ -508,11 +623,20 @@ def run_evaluation():
 
     json_path = out_dir / f"eval_result_{ts}.json"
     json_path.write_text(
-        json.dumps({"timestamp": ts, "total_score": round(total_score, 4),
-                    "passed": passed, "category_scores": {
-                        c: round(sum(s)/len(s), 4) for c, s in category_scores.items()
-                    }, "results": results}, ensure_ascii=False, indent=2),
-        encoding="utf-8"
+        json.dumps(
+            {
+                "timestamp": ts,
+                "total_score": round(total_score, 4),
+                "passed": passed,
+                "category_scores": {
+                    c: round(sum(s) / len(s), 4) for c, s in category_scores.items()
+                },
+                "results": results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
     )
 
     # Markdown 리포트
@@ -529,14 +653,16 @@ def run_evaluation():
         avg = sum(scores) / len(scores)
         md_lines.append(f"| {cat} | {avg:.2f} | {len(scores)} |")
 
-    md_lines += ["\n## 문항별 결과\n",
-                 "| ID | 카테고리 | 난이도 | 점수 | 이유 |",
-                 "|----|---------|-------|------|-----|"]
+    md_lines += [
+        "\n## 문항별 결과\n",
+        "| ID | 카테고리 | 난이도 | 점수 | 이유 |",
+        "|----|---------|-------|------|-----|",
+    ]
     for r in results:
         icon = "✅" if r["score"] >= 0.8 else ("⚡" if r["score"] >= 0.4 else "❌")
         md_lines.append(
             f"| {r['id']} | {r['category']} | {r['difficulty']} "
-            f"| {icon} {r['score']:.1f} | {r.get('reason','')[:40]} |"
+            f"| {icon} {r['score']:.1f} | {r.get('reason', '')[:40]} |"
         )
 
     md_path = out_dir / f"eval_report_{ts}.md"

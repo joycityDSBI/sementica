@@ -30,6 +30,7 @@ POSTGRES_URL = os.environ.get("POSTGRES_URL", "")
 
 try:
     import psycopg2
+
     _HAS_PG = True
 except ImportError:
     _HAS_PG = False
@@ -47,6 +48,7 @@ def _get_conn():
 
 
 # ─── MCP 요청 로그 ────────────────────────────────────────────────────────────
+
 
 def log_mcp_request(
     dept: str,
@@ -86,6 +88,7 @@ def mcp_tool_logged(dept_getter, tool_name: str):
         def semantic_search(query: str, limit: int = 5):
             ...
     """
+
     def decorator(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
@@ -123,16 +126,19 @@ def mcp_tool_logged(dept_getter, tool_name: str):
                     duration_ms=duration_ms,
                     error=error,
                 )
+
         return wrapper
+
     return decorator
 
 
 # ─── 동기화 작업 로그 ─────────────────────────────────────────────────────────
 
+
 def log_sync_result(
     dept: str,
     search_keyword: str,
-    since_time,          # datetime or ISO string
+    since_time,  # datetime or ISO string
     modified_found: int,
     processed: int,
     skipped: int,
@@ -140,7 +146,7 @@ def log_sync_result(
     new_chunks: int,
     new_triplets: int,
     duration_sec: int,
-    status: str,         # "success" | "partial" | "failed" | "dry_run"
+    status: str,  # "success" | "partial" | "failed" | "dry_run"
     error_detail: str | None = None,
 ) -> None:
     """동기화 작업 1회 결과를 sync_log에 기록."""
@@ -187,6 +193,7 @@ def log_sync_result(
 
 # ─── Notion 페이지 레지스트리 ─────────────────────────────────────────────────
 
+
 def get_pages_edit_times(dept: str) -> "dict | None":
     """
     notion_pages 테이블에서 부서별 페이지 수정 시각을 반환합니다.
@@ -200,7 +207,7 @@ def get_pages_edit_times(dept: str) -> "dict | None":
     """
     conn = _get_conn()
     if conn is None:
-        return None   # 미연결: 호출자가 sync_state.json 등 fallback 사용
+        return None  # 미연결: 호출자가 sync_state.json 등 fallback 사용
     try:
         with conn, conn.cursor() as cur:
             cur.execute(
@@ -213,7 +220,7 @@ def get_pages_edit_times(dept: str) -> "dict | None":
                     result[page_id] = last_edited_time.isoformat()
                 else:
                     result[page_id] = ""
-            return result   # {} 이면 "연결됨 + 신규 부서" 의미
+            return result  # {} 이면 "연결됨 + 신규 부서" 의미
     except Exception as e:
         print(f"  [DB] get_pages_edit_times 실패: {e}")
         return None
@@ -226,16 +233,16 @@ def upsert_notion_page(
     dept: str,
     notion_url: str = "",
     title: str = "",
-    last_edited_time=None,   # datetime | ISO 문자열 | None
+    last_edited_time=None,  # datetime | ISO 문자열 | None
     word_count: int = 0,
     chunk_count: int = 0,
     triplet_count: int = 0,
     event_count: int = 0,
     is_db_item: bool = False,
     has_html_attachment: bool = False,  # HTML 첨부 파일 포함 여부  (v3)
-    status: str = "ok",      # "ok" | "skipped" | "error"
+    status: str = "ok",  # "ok" | "skipped" | "error"
     error_msg: str | None = None,
-    route: str = "core",     # "core" | "defer" | "excluded"  (v2)
+    route: str = "core",  # "core" | "defer" | "excluded"  (v2)
     content_hash: str | None = None,  # SHA-256 앞 16자  (v2)
 ) -> None:
     """
@@ -260,7 +267,7 @@ def upsert_notion_page(
             except Exception:
                 last_edited_time = None
         else:
-            last_edited_time = None   # 빈 문자열 → NULL
+            last_edited_time = None  # 빈 문자열 → NULL
     try:
         with conn, conn.cursor() as cur:
             cur.execute(
@@ -290,7 +297,7 @@ def upsert_notion_page(
                     """,
                 (
                     page_id[:32] if page_id else "",
-                    dept[:50]    if dept     else "",
+                    dept[:50] if dept else "",
                     notion_url or "",
                     (title or "")[:500],
                     last_edited_time,

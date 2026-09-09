@@ -1,4 +1,4 @@
-﻿"""
+"""
 JoyCity Ontology MCP 서버
 Claude Code에서 사용할 수 있는 3가지 검색 도구를 제공합니다:
 
@@ -31,12 +31,16 @@ try:
     from utils.synonym_resolver import preload as _syn_preload
     from utils.synonym_resolver import resolve as _syn_resolve
 except ImportError:
+
     def _syn_expand(name: str) -> list[str]:  # type: ignore[misc]
         return [name]
+
     def _syn_resolve(name: str) -> str:  # type: ignore[misc]
         return name
+
     def _syn_preload() -> None:  # type: ignore[misc]
         pass
+
 
 # ─── .env 로드 ────────────────────────────────────────────────────────────────
 _env_path = Path(__file__).parent.parent.parent / ".env"
@@ -48,17 +52,17 @@ if _env_path.exists():
             os.environ.setdefault(_k.strip(), _v.strip())
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
-GCP_PROJECT     = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION        = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
-EMBED_MODEL     = "text-multilingual-embedding-002"
-QDRANT_URL      = os.environ.get("QDRANT_URL", "http://localhost:6333")
-FALKORDB_HOST   = os.environ.get("FALKORDB_HOST", "localhost")
-FALKORDB_PORT   = int(os.environ.get("FALKORDB_PORT", "6379"))
+GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
+EMBED_MODEL = "text-multilingual-embedding-002"
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
+FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
+FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 
 # 기본값 (--dept 없을 때 / legacy)
 COLLECTION_NAME = "joycity_pages"
-GRAPH_NAME      = "joycity_kg"
-DEPT_NAME       = "JoyCity"
+GRAPH_NAME = "joycity_kg"
+DEPT_NAME = "JoyCity"
 
 
 def _load_dept_config(dept: str):
@@ -67,25 +71,28 @@ def _load_dept_config(dept: str):
     try:
         sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
         from dept_config import load_dept
+
         cfg = load_dept(dept)
         COLLECTION_NAME = cfg["qdrant_collection"]
-        GRAPH_NAME      = cfg["falkordb_graph"]
-        DEPT_NAME       = cfg["name"]
+        GRAPH_NAME = cfg["falkordb_graph"]
+        DEPT_NAME = cfg["name"]
         print(f"  본부: {DEPT_NAME} ({dept})")
         print(f"  컬렉션: {COLLECTION_NAME}  그래프: {GRAPH_NAME}")
     except Exception as e:
         print(f"  ⚠️  본부 설정 로드 실패: {e} → legacy 모드 사용")
 
+
 # ─── 클라이언트 (지연 초기화) ─────────────────────────────────────────────────
-_embed_client  = None
-_qdrant        = None
-_falkordb      = None
+_embed_client = None
+_qdrant = None
+_falkordb = None
 
 
 def _get_embed():
     global _embed_client
     if _embed_client is None:
         from google import genai
+
         _embed_client = genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
     return _embed_client
 
@@ -94,6 +101,7 @@ def _get_qdrant():
     global _qdrant
     if _qdrant is None:
         from qdrant_client import QdrantClient
+
         _qdrant = QdrantClient(url=QDRANT_URL)
     return _qdrant
 
@@ -102,6 +110,7 @@ def _get_falkordb():
     global _falkordb
     if _falkordb is None:
         import falkordb
+
         db = falkordb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
         _falkordb = db.select_graph(GRAPH_NAME)
     return _falkordb
@@ -116,15 +125,36 @@ def _embed(text: str) -> list[float]:
 
 # ─── 복합 쿼리 분해 헬퍼 ─────────────────────────────────────────────────────
 
-_COMPLEX_PATTERNS = frozenset([
-    "이고", "이며", "하는", "이면서", "이자",
-    "담당하는", "작성한", "소속된", "승인한", "결정한",
-    "관련된", "연관된", "포함된", "연결된",
-    # 추가: 복합 조건을 표현하는 추가 한국어 패턴
-    "중에서", "기준으로", "에서의", "으로의",
-    "누가", "어느", "어떤 팀", "어떤 사람",
-    "기반으로", "따라서", "통해서",
-])
+_COMPLEX_PATTERNS = frozenset(
+    [
+        "이고",
+        "이며",
+        "하는",
+        "이면서",
+        "이자",
+        "담당하는",
+        "작성한",
+        "소속된",
+        "승인한",
+        "결정한",
+        "관련된",
+        "연관된",
+        "포함된",
+        "연결된",
+        # 추가: 복합 조건을 표현하는 추가 한국어 패턴
+        "중에서",
+        "기준으로",
+        "에서의",
+        "으로의",
+        "누가",
+        "어느",
+        "어떤 팀",
+        "어떤 사람",
+        "기반으로",
+        "따라서",
+        "통해서",
+    ]
+)
 
 
 def _is_complex_query(query: str) -> bool:
@@ -148,42 +178,46 @@ def _decompose_query(query: str) -> list[str]:
         import re as _re
 
         import anthropic
+
         client = anthropic.Anthropic()
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=400,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "사내 업무 문서 검색 시스템입니다. "
-                    "문서에는 담당자·팀·프로세스·정책·시스템·게임 서비스 정보가 담겨 있습니다.\n\n"
-                    "다음 복합 질문을 독립적으로 검색 가능한 서브쿼리 2~3개로 분해하세요.\n\n"
-                    "규칙:\n"
-                    "- 각 서브쿼리는 단독으로 검색해도 유의미한 10~25자 한국어 표현\n"
-                    "- 원본 질문의 핵심 엔티티(사람·팀·프로세스·정책·게임)를 모두 포함\n"
-                    "- 서로 다른 관점(담당자 관점, 문서 관점, 관계 관점)으로 분해\n"
-                    "- JSON 배열만 반환 (설명·마크다운 없이)\n\n"
-                    "예시 1:\n"
-                    "Q: 운영팀에서 POTC 점검을 담당하는 사람이 작성한 배포 가이드는?\n"
-                    "A: [\"운영팀 POTC 점검 담당자\", \"POTC 배포 가이드 문서\", \"운영팀 작성 점검 절차\"]\n\n"
-                    "예시 2:\n"
-                    "Q: 전략사업본부 글로벌 게임 출시 승인 절차와 관련 팀은?\n"
-                    "A: [\"글로벌 게임 출시 승인 절차\", \"전략사업본부 출시 담당팀\", \"게임 출시 관련 정책\"]\n\n"
-                    f"질문: {query}"
-                ),
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "사내 업무 문서 검색 시스템입니다. "
+                        "문서에는 담당자·팀·프로세스·정책·시스템·게임 서비스 정보가 담겨 있습니다.\n\n"
+                        "다음 복합 질문을 독립적으로 검색 가능한 서브쿼리 2~3개로 분해하세요.\n\n"
+                        "규칙:\n"
+                        "- 각 서브쿼리는 단독으로 검색해도 유의미한 10~25자 한국어 표현\n"
+                        "- 원본 질문의 핵심 엔티티(사람·팀·프로세스·정책·게임)를 모두 포함\n"
+                        "- 서로 다른 관점(담당자 관점, 문서 관점, 관계 관점)으로 분해\n"
+                        "- JSON 배열만 반환 (설명·마크다운 없이)\n\n"
+                        "예시 1:\n"
+                        "Q: 운영팀에서 POTC 점검을 담당하는 사람이 작성한 배포 가이드는?\n"
+                        'A: ["운영팀 POTC 점검 담당자", "POTC 배포 가이드 문서", "운영팀 작성 점검 절차"]\n\n'
+                        "예시 2:\n"
+                        "Q: 전략사업본부 글로벌 게임 출시 승인 절차와 관련 팀은?\n"
+                        'A: ["글로벌 게임 출시 승인 절차", "전략사업본부 출시 담당팀", "게임 출시 관련 정책"]\n\n'
+                        f"질문: {query}"
+                    ),
+                }
+            ],
         )
         text = msg.content[0].text.strip()
-        m = _re.search(r'\[.*?\]', text, _re.DOTALL)
+        m = _re.search(r"\[.*?\]", text, _re.DOTALL)
         if m:
             import json as _json
+
             parts = _json.loads(m.group())
             parts = [p.strip() for p in parts if isinstance(p, str) and p.strip()]
             if 2 <= len(parts) <= 4:
                 return parts
     except Exception:
         pass
-    return [query]   # 분해 실패 시 원본 유지
+    return [query]  # 분해 실패 시 원본 유지
 
 
 def _fetch_full_pages(
@@ -235,15 +269,17 @@ def _fetch_full_pages(
                 continue
             if pid not in pages:
                 pages[pid] = {
-                    "title":      p.get("title", ""),
+                    "title": p.get("title", ""),
                     "source_url": p.get("source_url", ""),
-                    "page_id":    pid,
-                    "chunks":     [],
+                    "page_id": pid,
+                    "chunks": [],
                 }
-            pages[pid]["chunks"].append({
-                "index": p.get("chunk_index", 9999),
-                "text":  p.get("text", ""),
-            })
+            pages[pid]["chunks"].append(
+                {
+                    "index": p.get("chunk_index", 9999),
+                    "text": p.get("text", ""),
+                }
+            )
 
         offset = next_offset
         if offset is None:
@@ -254,10 +290,10 @@ def _fetch_full_pages(
         sorted_chunks = sorted(page["chunks"], key=lambda c: c["index"])
         full_text = "\n\n".join(c["text"] for c in sorted_chunks)
         assembled[pid] = {
-            "title":       page["title"],
-            "source_url":  page["source_url"],
-            "page_id":     pid,
-            "content":     full_text[:max_chars],
+            "title": page["title"],
+            "source_url": page["source_url"],
+            "page_id": pid,
+            "content": full_text[:max_chars],
             "chunk_count": len(sorted_chunks),
         }
 
@@ -304,21 +340,23 @@ def _fetch_pages_by_source_urls(
         )
 
         for point in scroll_result:
-            p   = point.payload or {}
+            p = point.payload or {}
             url = p.get("source_url", "")
             if not url or url not in url_set:
                 continue
             if url not in pages:
                 pages[url] = {
-                    "title":      p.get("title", ""),
+                    "title": p.get("title", ""),
                     "source_url": url,
-                    "page_id":    p.get("page_id", ""),
-                    "chunks":     [],
+                    "page_id": p.get("page_id", ""),
+                    "chunks": [],
                 }
-            pages[url]["chunks"].append({
-                "index": p.get("chunk_index", 9999),
-                "text":  p.get("text", ""),
-            })
+            pages[url]["chunks"].append(
+                {
+                    "index": p.get("chunk_index", 9999),
+                    "text": p.get("text", ""),
+                }
+            )
 
         offset = next_offset
         if offset is None:
@@ -329,10 +367,10 @@ def _fetch_pages_by_source_urls(
         sorted_chunks = sorted(page["chunks"], key=lambda c: c["index"])
         full_text = "\n\n".join(c["text"] for c in sorted_chunks)
         assembled[url] = {
-            "title":       page["title"],
-            "source_url":  url,
-            "page_id":     page["page_id"],
-            "content":     full_text[:max_chars],
+            "title": page["title"],
+            "source_url": url,
+            "page_id": page["page_id"],
+            "content": full_text[:max_chars],
             "chunk_count": len(sorted_chunks),
         }
 
@@ -370,13 +408,15 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
             full_pages = _fetch_full_pages(qc, COLLECTION_NAME, list(page_scores.keys()))
             result = []
             for pid, page in full_pages.items():
-                result.append({
-                    "title":       page["title"],
-                    "source_url":  page["source_url"],
-                    "content":     page["content"],
-                    "chunk_count": page["chunk_count"],
-                    "score":       page_scores.get(pid, 0.0),
-                })
+                result.append(
+                    {
+                        "title": page["title"],
+                        "source_url": page["source_url"],
+                        "content": page["content"],
+                        "chunk_count": page["chunk_count"],
+                        "score": page_scores.get(pid, 0.0),
+                    }
+                )
             return result
         except Exception:
             return []
@@ -436,11 +476,13 @@ def _merge_semantic_results(results_per_query: list) -> list:
     merged = []
     for url, item in url_best.items():
         coverage = url_counts[url]
-        merged.append({
-            **item,
-            "coverage": coverage,
-            "score": round(item["score"] * (1 + 0.20 * (coverage - 1)), 4),
-        })
+        merged.append(
+            {
+                **item,
+                "coverage": coverage,
+                "score": round(item["score"] * (1 + 0.20 * (coverage - 1)), 4),
+            }
+        )
 
     return sorted(merged, key=lambda x: x["score"], reverse=True)
 
@@ -450,7 +492,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 try:
     from db_logger import log_mcp_request
 except Exception:
-    def log_mcp_request(*a, **kw): pass   # DB 없을 때 no-op
+
+    def log_mcp_request(*a, **kw):
+        pass  # DB 없을 때 no-op
+
 
 # ─── Semantica 헬퍼 (경로 탐색) ───────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
@@ -460,10 +505,10 @@ try:
     from semantica_helper import trace_decision_chain as _trace_decision
     from semantica_helper import upsert_event_node as _upsert_event_node
 except Exception:
-    _find_path          = None
-    _trace_decision     = None
-    _get_event_chain    = None
-    _upsert_event_node  = None
+    _find_path = None
+    _trace_decision = None
+    _get_event_chain = None
+    _upsert_event_node = None
 
 # ─── FastMCP 서버 ─────────────────────────────────────────────────────────────
 from fastmcp import FastMCP  # noqa: E402
@@ -552,7 +597,7 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     """
     _t0 = time.time()
     _err = None
-    results = []   # finally 블록에서 참조 가능하도록 try 외부에서 초기화
+    results = []  # finally 블록에서 참조 가능하도록 try 외부에서 초기화
     try:
         vec = _embed(query)
         qc = _get_qdrant()
@@ -575,13 +620,15 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
         # Parent Document Retrieval: page_id의 전체 청크 조합
         full_pages = _fetch_full_pages(qc, COLLECTION_NAME, list(page_scores.keys()))
         for pid, page in full_pages.items():
-            results.append({
-                "title":       page["title"],
-                "source_url":  page["source_url"],
-                "content":     page["content"],
-                "chunk_count": page["chunk_count"],
-                "score":       page_scores.get(pid, 0.0),
-            })
+            results.append(
+                {
+                    "title": page["title"],
+                    "source_url": page["source_url"],
+                    "content": page["content"],
+                    "chunk_count": page["chunk_count"],
+                    "score": page_scores.get(pid, 0.0),
+                }
+            )
 
         # 유사도 점수 기준 내림차순 정렬
         results.sort(key=lambda x: x["score"], reverse=True)
@@ -591,9 +638,12 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
         raise
     finally:
         log_mcp_request(
-            dept=DEPT_NAME, tool="semantic_search", query=query,
+            dept=DEPT_NAME,
+            tool="semantic_search",
+            query=query,
             result_count=len(results) if _err is None else 0,
-            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+            duration_ms=int((time.time() - _t0) * 1000),
+            error=_err,
         )
 
 
@@ -694,7 +744,7 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
         relations = []
         for row in rel_result.result_set:
             rel = {
-                "relation":    row[0],
+                "relation": row[0],
                 "target_name": row[1],
                 "target_type": row[2],
             }
@@ -702,19 +752,19 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
                 # row: [rel_name, target, target_type, condition, order, source_url,
                 #        evidence_quote, realization_status, evidence_chunk_id]
                 if len(row) > 3 and row[3]:
-                    rel["condition"]          = row[3]
+                    rel["condition"] = row[3]
                 if len(row) > 4 and row[4]:
-                    rel["order"]              = row[4]
+                    rel["order"] = row[4]
                 if len(row) > 5 and row[5]:
-                    rel["source_url"]         = row[5]
+                    rel["source_url"] = row[5]
                 if len(row) > 6 and row[6]:
-                    rel["evidence_quote"]     = row[6]
+                    rel["evidence_quote"] = row[6]
                 if len(row) > 7 and row[7]:
                     rel["realization_status"] = row[7]
                 if len(row) > 8 and row[8]:
-                    rel["evidence_chunk_id"]  = row[8]
+                    rel["evidence_chunk_id"] = row[8]
             else:
-                pass   # depth=2: rel_name만 (path 기반)
+                pass  # depth=2: rel_name만 (path 기반)
             relations.append(rel)
 
         # ── evidence_chunk_id → Qdrant 직접 조회로 원문 청크 텍스트 첨부 ──────
@@ -734,7 +784,7 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
                     if cid and cid in id_to_text:
                         r["source_text"] = id_to_text[cid]
             except Exception:
-                pass   # chunk 조회 실패해도 그래프 결과는 정상 반환
+                pass  # chunk 조회 실패해도 그래프 결과는 정상 반환
 
         # 역방향 관계 탐색 (누가 이 엔티티와 관계를 맺는지)
         # depth=1: 직접 연결된 1홉 incoming
@@ -754,12 +804,14 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
             src = row[1]
             if src not in seen_incoming:
                 seen_incoming.add(src)
-                incoming.append({
-                    "relation":    row[0],
-                    "source_name": src,
-                    "source_type": row[2],
-                    "source_url":  row[3] if len(row) > 3 else "",
-                })
+                incoming.append(
+                    {
+                        "relation": row[0],
+                        "source_name": src,
+                        "source_type": row[2],
+                        "source_url": row[3] if len(row) > 3 else "",
+                    }
+                )
 
         # ── 2홉 incoming (depth=2 전용 추가) ──────────────────────────────────
         if depth == 2:
@@ -773,19 +825,21 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
                 src = row[1]
                 if src not in seen_incoming:
                     seen_incoming.add(src)
-                    incoming.append({
-                        "relation":    f"{row[0]} (2홉)",
-                        "source_name": src,
-                        "source_type": row[2],
-                        "source_url":  "",
-                    })
+                    incoming.append(
+                        {
+                            "relation": f"{row[0]} (2홉)",
+                            "source_name": src,
+                            "source_type": row[2],
+                            "source_url": "",
+                        }
+                    )
 
         _result = {
-            "entity":      matched_name,
-            "type":        matched_type,
-            "found":       True,
-            "outgoing":    relations,
-            "incoming":    incoming,
+            "entity": matched_name,
+            "type": matched_type,
+            "found": True,
+            "outgoing": relations,
+            "incoming": incoming,
         }
         return _result
     except Exception as e:
@@ -793,9 +847,12 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
         raise
     finally:
         log_mcp_request(
-            dept=DEPT_NAME, tool="graph_search", query=entity,
+            dept=DEPT_NAME,
+            tool="graph_search",
+            query=entity,
             result_count=len(_result.get("outgoing", [])) if _result else 0,
-            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+            duration_ms=int((time.time() - _t0) * 1000),
+            error=_err,
         )
 
 
@@ -870,12 +927,9 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
         sem_per_q: list[list] = []
         all_graph_hits: list = []
 
-        n_workers = min(len(sub_queries), 4)   # 최대 4개 서브쿼리 동시 실행
+        n_workers = min(len(sub_queries), 4)  # 최대 4개 서브쿼리 동시 실행
         with ThreadPoolExecutor(max_workers=n_workers) as sq_pool:
-            sq_futures = [
-                sq_pool.submit(_run_sub_search, sq, limit)
-                for sq in sub_queries
-            ]
+            sq_futures = [sq_pool.submit(_run_sub_search, sq, limit) for sq in sub_queries]
             for fut in as_completed(sq_futures):
                 sem, gph = fut.result()
                 sem_per_q.append(sem)
@@ -903,31 +957,32 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
         # semantic_results에 없는 페이지만 linked_pages로 추가합니다.
         # (그래프가 참조하는 문서 중 벡터 유사도 상위에 없었던 것을 보완)
         existing_urls: set = {r.get("source_url", "") for r in semantic}
-        edge_urls: list = list({
-            rel.get("source_url", "")
-            for g in graph_hits
-            for rel in (g.get("outgoing", []) + g.get("incoming", []))
-            if rel.get("source_url") and rel["source_url"] not in existing_urls
-        } - {""})
+        edge_urls: list = list(
+            {
+                rel.get("source_url", "")
+                for g in graph_hits
+                for rel in (g.get("outgoing", []) + g.get("incoming", []))
+                if rel.get("source_url") and rel["source_url"] not in existing_urls
+            }
+            - {""}
+        )
 
         linked_pages: list = []
         if edge_urls:
             try:
-                qc      = _get_qdrant()
-                lp_map  = _fetch_pages_by_source_urls(
-                    qc, COLLECTION_NAME, edge_urls, max_chars=1500
-                )
+                qc = _get_qdrant()
+                lp_map = _fetch_pages_by_source_urls(qc, COLLECTION_NAME, edge_urls, max_chars=1500)
                 linked_pages = list(lp_map.values())
             except Exception:
                 pass
 
         _result = {
             "semantic_results": semantic,
-            "graph_results":    graph_hits,
-            "entity_summary":   entity_summary,
-            "linked_pages":     linked_pages,
-            "decomposed":       decomposed,
-            "sub_queries":      sub_queries if decomposed else [],
+            "graph_results": graph_hits,
+            "entity_summary": entity_summary,
+            "linked_pages": linked_pages,
+            "decomposed": decomposed,
+            "sub_queries": sub_queries if decomposed else [],
         }
         return _result
     except Exception as e:
@@ -935,9 +990,12 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
         raise
     finally:
         log_mcp_request(
-            dept=DEPT_NAME, tool="hybrid_search", query=query,
+            dept=DEPT_NAME,
+            tool="hybrid_search",
+            query=query,
             result_count=len(_result.get("semantic_results", [])) if _result else 0,
-            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+            duration_ms=int((time.time() - _t0) * 1000),
+            error=_err,
         )
 
 
@@ -997,10 +1055,12 @@ def path_search(start_entity: str, end_entity: str, max_hops: int = 6) -> dict[s
         raise
     finally:
         log_mcp_request(
-            dept=DEPT_NAME, tool="path_search",
+            dept=DEPT_NAME,
+            tool="path_search",
             query=f"{start_entity} → {end_entity}",
             result_count=1 if (_result and _result.get("found")) else 0,
-            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+            duration_ms=int((time.time() - _t0) * 1000),
+            error=_err,
         )
 
 
@@ -1063,8 +1123,11 @@ def decision_trace(entity: str, max_depth: int = 4) -> dict[str, Any]:
     _result = None
     try:
         if _trace_decision is None:
-            return {"entity": entity, "found": False,
-                    "error": "decision_trace 모듈을 로드할 수 없습니다"}
+            return {
+                "entity": entity,
+                "found": False,
+                "error": "decision_trace 모듈을 로드할 수 없습니다",
+            }
         graph = _get_falkordb()
         _result = _trace_decision(graph, entity, max_depth)
         return _result
@@ -1073,9 +1136,12 @@ def decision_trace(entity: str, max_depth: int = 4) -> dict[str, Any]:
         raise
     finally:
         log_mcp_request(
-            dept=DEPT_NAME, tool="decision_trace", query=entity,
+            dept=DEPT_NAME,
+            tool="decision_trace",
+            query=entity,
             result_count=len(_result.get("decisions", [])) if _result else 0,
-            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+            duration_ms=int((time.time() - _t0) * 1000),
+            error=_err,
         )
 
 
@@ -1083,8 +1149,8 @@ def decision_trace(entity: str, max_depth: int = 4) -> dict[str, Any]:
 def timeline_search(
     game: str,
     event_type: str = "",
-    from_date:  str = "",
-    to_date:    str = "",
+    from_date: str = "",
+    to_date: str = "",
     limit: int = 20,
 ) -> dict[str, Any]:
     """
@@ -1166,7 +1232,11 @@ def timeline_search(
     _result: dict | None = None
     try:
         if _get_event_chain is None:
-            return {"game": game, "found": False, "error": "timeline_search 모듈을 로드할 수 없습니다"}
+            return {
+                "game": game,
+                "found": False,
+                "error": "timeline_search 모듈을 로드할 수 없습니다",
+            }
         graph = _get_falkordb()
 
         # 동의어 → canonical 정규화: "드래곤슈퍼" → "DS"
@@ -1175,46 +1245,46 @@ def timeline_search(
         game_canonical = _syn_resolve(game)
         _result = _get_event_chain(
             graph,
-            game       = game_canonical,
-            event_type = event_type or None,
-            from_date  = from_date  or None,
-            to_date    = to_date    or None,
-            limit      = limit,
+            game=game_canonical,
+            event_type=event_type or None,
+            from_date=from_date or None,
+            to_date=to_date or None,
+            limit=limit,
         )
         if (not _result.get("events")) and game_canonical != game:
             # 구버전 데이터(비정규 이름으로 저장된 경우) 폴백
             _result = _get_event_chain(
                 graph,
-                game       = game,
-                event_type = event_type or None,
-                from_date  = from_date  or None,
-                to_date    = to_date    or None,
-                limit      = limit,
+                game=game,
+                event_type=event_type or None,
+                from_date=from_date or None,
+                to_date=to_date or None,
+                limit=limit,
             )
 
         # ── source_url → 벡터 DB 원문 연결 (Explicit Parent Document Retrieval) ──
         # 그래프에서 찾은 :Event 노드의 source_url로 Qdrant를 직접 필터링해
         # 이벤트별 Notion 원문(page_content)을 첨부합니다.
         if _result and _result.get("events"):
-            unique_urls = list({
-                ev["source_url"] for ev in _result["events"] if ev.get("source_url")
-            })
+            unique_urls = list(
+                {ev["source_url"] for ev in _result["events"] if ev.get("source_url")}
+            )
             if unique_urls:
                 try:
-                    qc    = _get_qdrant()
+                    qc = _get_qdrant()
                     pages = _fetch_pages_by_source_urls(
                         qc, COLLECTION_NAME, unique_urls, max_chars=1500
                     )
                     for ev in _result["events"]:
                         url = ev.get("source_url", "")
                         if url in pages:
-                            ev["page_content"]     = pages[url]["content"]
+                            ev["page_content"] = pages[url]["content"]
                             ev["page_chunk_count"] = pages[url]["chunk_count"]
                         else:
-                            ev["page_content"]     = ""
+                            ev["page_content"] = ""
                             ev["page_chunk_count"] = 0
                 except Exception:
-                    pass   # Qdrant 실패해도 이벤트 목록은 반환
+                    pass  # Qdrant 실패해도 이벤트 목록은 반환
 
         return _result
     except Exception as e:
@@ -1222,21 +1292,31 @@ def timeline_search(
         raise
     finally:
         log_mcp_request(
-            dept=DEPT_NAME, tool="timeline_search",
+            dept=DEPT_NAME,
+            tool="timeline_search",
             query=f"{game} {event_type} {from_date}~{to_date}",
             result_count=(_result.get("total", 0) if _result else 0),
-            duration_ms=int((time.time() - _t0) * 1000), error=_err,
+            duration_ms=int((time.time() - _t0) * 1000),
+            error=_err,
         )
+
+
 # ─── 실행 ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="JoyCity Ontology MCP 서버")
-    parser.add_argument("--dept",      default="",
-                        help="본부 이름 (config/departments.yaml의 key). 미지정 시 legacy 모드")
-    parser.add_argument("--transport", default="streamable-http",
-                        choices=["stdio", "streamable-http", "sse"],
-                        help="전송 방식 (기본: streamable-http)")
-    parser.add_argument("--host",      default="0.0.0.0", help="호스트 (기본: 0.0.0.0)")
-    parser.add_argument("--port",      type=int, default=8765, help="포트 (기본: 8765)")
+    parser.add_argument(
+        "--dept",
+        default="",
+        help="본부 이름 (config/departments.yaml의 key). 미지정 시 legacy 모드",
+    )
+    parser.add_argument(
+        "--transport",
+        default="streamable-http",
+        choices=["stdio", "streamable-http", "sse"],
+        help="전송 방식 (기본: streamable-http)",
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="호스트 (기본: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8765, help="포트 (기본: 8765)")
     args = parser.parse_args()
 
     # 비즈니스 용어집 사전 미리 로드 (동의어 해결기 워밍업)
@@ -1246,9 +1326,10 @@ if __name__ == "__main__":
     if args.dept:
         _load_dept_config(args.dept)
         # departments.yaml 포트 사용 (--port 명시 시 명시값 우선)
-        if args.port == 8765:   # 기본값이면 yaml 포트 사용
+        if args.port == 8765:  # 기본값이면 yaml 포트 사용
             try:
                 import yaml
+
                 cfg_path = Path(__file__).parent.parent.parent / "config" / "departments.yaml"
                 with cfg_path.open(encoding="utf-8") as f:
                     yaml_cfg = yaml.safe_load(f)
@@ -1261,12 +1342,16 @@ if __name__ == "__main__":
         print(f"🚀 {DEPT_NAME} Ontology MCP 서버 시작 (Streamable HTTP)")
         print(f"   MCP 주소: http://{args.host}:{args.port}/mcp")
         print(f"   REST API: python src/mcp/rest_api.py --dept {args.dept or ''} (포트 8766)")
-        print(f"   Claude Code 등록: claude mcp add --transport http {args.dept or 'joycity'}-ontology http://<서버IP>:{args.port}/mcp")
+        print(
+            f"   Claude Code 등록: claude mcp add --transport http {args.dept or 'joycity'}-ontology http://<서버IP>:{args.port}/mcp"
+        )
         mcp.run(transport="streamable-http", host=args.host, port=args.port)
     elif args.transport == "sse":
         print(f"🚀 {DEPT_NAME} Ontology MCP 서버 시작 (SSE 레거시)")
         print(f"   주소: http://{args.host}:{args.port}/sse")
-        print(f"   Claude Code 등록: claude mcp add --transport sse {args.dept or 'joycity'}-ontology http://<서버IP>:{args.port}/sse")
+        print(
+            f"   Claude Code 등록: claude mcp add --transport sse {args.dept or 'joycity'}-ontology http://<서버IP>:{args.port}/sse"
+        )
         mcp.run(transport="sse", host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")

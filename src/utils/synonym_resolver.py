@@ -62,7 +62,7 @@ def _load() -> None:
         for entry in data.get("terms", []):
             canonical: str = entry["term"]
             synonyms: list[str] = entry.get("synonyms") or []
-            all_forms: list[str] = [canonical] + synonyms
+            all_forms: list[str] = [canonical, *synonyms]
 
             # 모든 표현 → canonical
             for form in all_forms:
@@ -76,7 +76,9 @@ def _load() -> None:
         _loaded_at = time.monotonic()
         logger.info(
             "용어집 로드 완료: %d개 term, %d개 alias (URL: %s)",
-            len(expand_m), len(alias), GLOSSARY_URL,
+            len(expand_m),
+            len(alias),
+            GLOSSARY_URL,
         )
 
     except Exception as exc:
@@ -87,7 +89,8 @@ def _load() -> None:
             # 갱신 실패 — 이전 캐시 유지
             logger.warning(
                 "용어집 갱신 실패 — 이전 캐시(%d개 term) 유지: %s",
-                len(_expand_map), exc,
+                len(_expand_map),
+                exc,
             )
 
 
@@ -98,6 +101,7 @@ def _ensure() -> None:
 
 
 # ── 공개 API ──────────────────────────────────────────────────────────────────
+
 
 def resolve(name: str) -> str:
     """

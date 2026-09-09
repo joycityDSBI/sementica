@@ -33,15 +33,16 @@ if _env_path.exists():
             os.environ.setdefault(key.strip(), val.strip())
 
 SAMPLES_DIR = Path(__file__).parent.parent.parent / "data" / "notion_samples"
-LOGS_DIR    = Path(__file__).parent.parent.parent / "data" / "logs"
+LOGS_DIR = Path(__file__).parent.parent.parent / "data" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION    = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
-MODEL       = os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@20250514")
+LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
+MODEL = os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@20250514")
 
 # ─── AnthropicVertex 클라이언트 초기화 ───────────────────────────────────────
 _client = None
+
 
 def _init_client():
     global _client
@@ -52,6 +53,7 @@ def _init_client():
         return False
     try:
         from anthropic import AnthropicVertex
+
         _client = AnthropicVertex(project_id=GCP_PROJECT, region=LOCATION)
         print("✅ Claude on Vertex AI 초기화 완료")
         print(f"   프로젝트: {GCP_PROJECT} | 모델: {MODEL} | 리전: {LOCATION}")
@@ -62,7 +64,9 @@ def _init_client():
         print("   1. GOOGLE_APPLICATION_CREDENTIALS 파일 경로 정확 여부")
         print("   2. 서비스 계정에 Vertex AI User 역할 부여 여부")
         print("   3. Vertex AI Model Garden에서 Claude 모델 사용 동의 여부")
-        print(f"      → https://console.cloud.google.com/vertex-ai/model-garden?project={GCP_PROJECT}")
+        print(
+            f"      → https://console.cloud.google.com/vertex-ai/model-garden?project={GCP_PROJECT}"
+        )
         return False
 
 
@@ -123,17 +127,24 @@ def _normalize_pred(val) -> dict:
 def extract_triplets(text: str, source_url: str = "") -> dict:
     """Claude Sonnet 4.6 (Vertex AI)로 한국어 텍스트에서 타입 있는 트리플 추출"""
     if not _init_client():
-        return {"error": "Claude on Vertex AI 미초기화", "triplets": [], "source_url": source_url, "pass": False}
+        return {
+            "error": "Claude on Vertex AI 미초기화",
+            "triplets": [],
+            "source_url": source_url,
+            "pass": False,
+        }
 
     raw = ""
     try:
         response = _client.messages.create(
             model=MODEL,
             max_tokens=2048,
-            messages=[{
-                "role": "user",
-                "content": EXTRACT_PROMPT.format(text=text[:3000]),
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": EXTRACT_PROMPT.format(text=text[:3000]),
+                }
+            ],
         )
         raw = response.content[0].text.strip()
 
@@ -152,15 +163,17 @@ def extract_triplets(text: str, source_url: str = "") -> dict:
         for t in parsed:
             if not isinstance(t, dict):
                 continue
-            result_triplets.append({
-                "subject":   _normalize_node(t.get("subject", "")),
-                "predicate": _normalize_pred(t.get("predicate", "")),
-                "object":    _normalize_node(t.get("object", "")),
-            })
+            result_triplets.append(
+                {
+                    "subject": _normalize_node(t.get("subject", "")),
+                    "predicate": _normalize_pred(t.get("predicate", "")),
+                    "object": _normalize_node(t.get("object", "")),
+                }
+            )
 
         return {
             "triplet_count": len(result_triplets),
-            "triplets": result_triplets[:15],   # 더 많이 저장 (타입 정보 가치 있음)
+            "triplets": result_triplets[:15],  # 더 많이 저장 (타입 정보 가치 있음)
             "source_url": source_url,
             "model": MODEL,
             "pass": len(result_triplets) >= 3,
@@ -169,12 +182,16 @@ def extract_triplets(text: str, source_url: str = "") -> dict:
     except json.JSONDecodeError as e:
         return {
             "error": f"JSON 파싱 실패: {e} | raw={raw[:200]}",
-            "triplets": [], "source_url": source_url, "pass": False,
+            "triplets": [],
+            "source_url": source_url,
+            "pass": False,
         }
     except Exception as e:
         return {
             "error": str(e),
-            "triplets": [], "source_url": source_url, "pass": False,
+            "triplets": [],
+            "source_url": source_url,
+            "pass": False,
         }
 
 
@@ -190,7 +207,7 @@ def verify_file(md_path: Path) -> dict:
             for line in content[3:end].splitlines():
                 if line.startswith("notion_url:"):
                     source_url = line.split(":", 1)[1].strip()
-            body = content[end + 3:].strip()
+            body = content[end + 3 :].strip()
 
     word_count = len(body.split())
     print(f"\n📄 {md_path.name}  ({word_count} 단어)")
@@ -198,8 +215,10 @@ def verify_file(md_path: Path) -> dict:
     if word_count < 50:
         print("   ⚠️  텍스트 부족 (< 50단어) — Premise 1 불합격")
         return {
-            "file": str(md_path), "word_count": word_count,
-            "premise1": False, "pass": False,
+            "file": str(md_path),
+            "word_count": word_count,
+            "premise1": False,
+            "pass": False,
         }
 
     result = extract_triplets(body, source_url)
@@ -217,8 +236,8 @@ def verify_file(md_path: Path) -> dict:
             s = t["subject"]
             p = t["predicate"]
             o = t["object"]
-            s_str = f"{s['name']}({s.get('type','?')})"
-            o_str = f"{o['name']}({o.get('type','?')})"
+            s_str = f"{s['name']}({s.get('type', '?')})"
+            o_str = f"{o['name']}({o.get('type', '?')})"
             p_parts = [p["name"]]
             if "condition" in p:
                 p_parts.append(f"조건:{p['condition']}")
@@ -256,8 +275,8 @@ def main():
                 s = t["subject"]
                 p = t["predicate"]
                 o = t["object"]
-                s_str = f"{s['name']}({s.get('type','?')})"
-                o_str = f"{o['name']}({o.get('type','?')})"
+                s_str = f"{s['name']}({s.get('type', '?')})"
+                o_str = f"{o['name']}({o.get('type', '?')})"
                 p_parts = [p["name"]]
                 if "condition" in p:
                     p_parts.append(f"조건:{p['condition']}")
@@ -292,8 +311,12 @@ def main():
 
         print("\n" + "=" * 60)
         print("📊 합격 기준 판정 (10페이지 기준)")
-        print(f"   Premise 1 (텍스트 품질): {p1}/{total} ≥ 6  →  {'✅ 합격' if p1 >= 6 else '❌ 불합격'}")
-        print(f"   Premise 3 (트리플 추출): {p3}/{total} ≥ 6  →  {'✅ 합격' if p3 >= 6 else '❌ 불합격'}")
+        print(
+            f"   Premise 1 (텍스트 품질): {p1}/{total} ≥ 6  →  {'✅ 합격' if p1 >= 6 else '❌ 불합격'}"
+        )
+        print(
+            f"   Premise 3 (트리플 추출): {p3}/{total} ≥ 6  →  {'✅ 합격' if p3 >= 6 else '❌ 불합격'}"
+        )
         overall = p1 >= 6 and p3 >= 6
         print(f"\n   전체: {'✅ Phase 1 계속 진행' if overall else '❌ 전환 경로 확인 필요'}")
         if not overall:

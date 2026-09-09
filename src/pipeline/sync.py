@@ -77,23 +77,32 @@ try:
     from db_logger import log_sync_result
     from db_logger import upsert_notion_page as _upsert_notion_page
 except Exception:
-    def log_sync_result(*a, **kw): pass
-    def _upsert_notion_page(*a, **kw): pass
-    def _get_pages_edit_times(*a, **kw): return None  # import 실패 → PG 미연결로 간주
-    def _get_page_hashes(*a, **kw): return None       # import 실패 → hash skip 없이 전체 처리
+
+    def log_sync_result(*a, **kw):
+        pass
+
+    def _upsert_notion_page(*a, **kw):
+        pass
+
+    def _get_pages_edit_times(*a, **kw):
+        return None  # import 실패 → PG 미연결로 간주
+
+    def _get_page_hashes(*a, **kw):
+        return None  # import 실패 → hash skip 없이 전체 처리
+
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
-GCP_PROJECT      = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION         = os.environ.get("VERTEX_AI_LOCATION", "us-east5")    # 임베딩 리전
+GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")  # 임베딩 리전
 ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")  # Claude LLM 리전
 EMBED_MODEL_NAME = "text-multilingual-embedding-002"
-EMBED_BATCH_SIZE = 50     # Vertex AI 배치 크기
-HAIKU_MODEL      = "claude-haiku-4-5@20251001"   # 트리플·이벤트 추출용 (Vertex AI 형식)
-QDRANT_URL       = os.environ.get("QDRANT_URL", "http://localhost:6333")
-FALKORDB_HOST    = os.environ.get("FALKORDB_HOST", "localhost")
-FALKORDB_PORT    = int(os.environ.get("FALKORDB_PORT", "6379"))
-CHUNK_SIZE       = 800
-CHUNK_OVERLAP    = 200
+EMBED_BATCH_SIZE = 50  # Vertex AI 배치 크기
+HAIKU_MODEL = "claude-haiku-4-5@20251001"  # 트리플·이벤트 추출용 (Vertex AI 형식)
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
+FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
+FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 200
 
 # ─── 이벤트 추출 프롬프트 (ingest.py와 동일) ──────────────────────────────────
 EVENT_EXTRACT_PROMPT = """\
@@ -229,7 +238,7 @@ JSON 배열로만 응답 (설명·마크다운 없이):
 def _make_chunks(text: str) -> list[str]:
     chunks, start = [], 0
     while start < len(text):
-        chunk = text[start:start + CHUNK_SIZE].strip()
+        chunk = text[start : start + CHUNK_SIZE].strip()
         if chunk:
             chunks.append(chunk)
         if start + CHUNK_SIZE >= len(text):
@@ -247,7 +256,7 @@ def check_page_exists(client, token: str, page_id_nodash: str) -> bool:
     - 네트워크 오류 → True 반환 (안전 우선, 실수로 삭제 방지)
     """
     # 대시 없는 32자 page_id → Notion API 형식 UUID로 변환
-    pid = page_id_nodash.replace("-", "")   # 혹시 대시 섞인 경우 정규화
+    pid = page_id_nodash.replace("-", "")  # 혹시 대시 섞인 경우 정규화
     notion_id = f"{pid[:8]}-{pid[8:12]}-{pid[12:16]}-{pid[16:20]}-{pid[20:32]}"
     try:
         resp = client.get(
@@ -259,9 +268,9 @@ def check_page_exists(client, token: str, page_id_nodash: str) -> bool:
             return False
         if resp.status_code == 200:
             return not resp.json().get("archived", False)
-        return True   # 기타 상태 (403 권한 없음 등)는 존재하는 것으로 간주
+        return True  # 기타 상태 (403 권한 없음 등)는 존재하는 것으로 간주
     except Exception:
-        return True   # 네트워크 오류 시 삭제로 처리하지 않음
+        return True  # 네트워크 오류 시 삭제로 처리하지 않음
 
 
 def _get_stored_pages(dept: str) -> list[dict]:
@@ -271,6 +280,7 @@ def _get_stored_pages(dept: str) -> list[dict]:
         return []
     try:
         import psycopg2
+
         conn = psycopg2.connect(pg_url)
         with conn, conn.cursor() as cur:
             cur.execute(
@@ -280,8 +290,9 @@ def _get_stored_pages(dept: str) -> list[dict]:
                        ORDER BY last_ingested_at DESC""",
                 (dept,),
             )
-            return [{"page_id": r[0], "notion_url": r[1], "title": r[2] or r[0]}
-                    for r in cur.fetchall()]
+            return [
+                {"page_id": r[0], "notion_url": r[1], "title": r[2] or r[0]} for r in cur.fetchall()
+            ]
     except Exception as e:
         print(f"  ⚠️  notion_pages 조회 실패: {e}")
         return []
@@ -297,6 +308,7 @@ def _mark_page_deleted(page_id: str, dept: str) -> None:
         return
     try:
         import psycopg2
+
         conn = psycopg2.connect(pg_url)
         with conn, conn.cursor() as cur:
             cur.execute(
@@ -324,8 +336,12 @@ def delete_page_events(graph, source_url: str) -> int:
 
 
 def reconcile_deleted_pages(
-    notion_client, token: str, dept: str,
-    qc, graph, collection_name: str,
+    notion_client,
+    token: str,
+    dept: str,
+    qc,
+    graph,
+    collection_name: str,
     dry_run: bool = False,
 ) -> dict:
     """
@@ -351,9 +367,9 @@ def reconcile_deleted_pages(
 
     deleted_pages = []
     for i, page in enumerate(stored, 1):
-        page_id    = page["page_id"]
+        page_id = page["page_id"]
         source_url = page["notion_url"]
-        title      = page["title"]
+        title = page["title"]
 
         exists = check_page_exists(notion_client, token, page_id)
 
@@ -362,8 +378,8 @@ def reconcile_deleted_pages(
             print(f"       URL: {source_url}")
 
             if not dry_run:
-                v_del  = delete_page_vectors(qc, collection_name, source_url)
-                e_del  = delete_page_edges(graph, source_url)
+                v_del = delete_page_vectors(qc, collection_name, source_url)
+                e_del = delete_page_edges(graph, source_url)
                 ev_del = delete_page_events(graph, source_url)
                 _mark_page_deleted(page_id, dept)
                 print(f"       → 벡터 {v_del}개 / 엣지 {e_del}개 / 이벤트 {ev_del}개 삭제 완료")
@@ -387,6 +403,7 @@ def reconcile_deleted_pages(
 def delete_page_vectors(qc, collection_name: str, source_url: str) -> int:
     """source_url이 일치하는 벡터 전체 삭제. 삭제된 수 반환."""
     from qdrant_client.models import FieldCondition, Filter, MatchValue
+
     try:
         result = qc.delete(
             collection_name=collection_name,
@@ -394,7 +411,7 @@ def delete_page_vectors(qc, collection_name: str, source_url: str) -> int:
                 must=[FieldCondition(key="source_url", match=MatchValue(value=source_url))]
             ),
         )
-        return getattr(result, 'deleted', 0) or 0
+        return getattr(result, "deleted", 0) or 0
     except Exception as e:
         print(f"    ⚠️  벡터 삭제 실패: {e}")
         return 0
@@ -411,7 +428,7 @@ def delete_page_edges(graph, source_url: str) -> int:
             "MATCH ()-[r:REL {source_url: $url}]->() "
             "WHERE r.is_manual IS NULL OR r.is_manual = false "
             "DELETE r RETURN count(r) AS cnt",
-            {"url": source_url}
+            {"url": source_url},
         )
         return res.result_set[0][0] if res.result_set else 0
     except Exception as e:
@@ -443,7 +460,7 @@ def extract_events_from_text(llm_client, text: str) -> list[dict]:
     """Claude로 텍스트에서 날짜 기반 시계열 이벤트를 추출합니다."""
     try:
         resp = llm_client.messages.create(
-            model=HAIKU_MODEL,   # Sonnet → Haiku (3~5배 빠름)
+            model=HAIKU_MODEL,  # Sonnet → Haiku (3~5배 빠름)
             max_tokens=1024,
             messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=text[:3000])}],
         )
@@ -455,10 +472,7 @@ def extract_events_from_text(llm_client, text: str) -> list[dict]:
         raw = raw.strip()
         parsed = json.loads(raw)
         if isinstance(parsed, list):
-            return [
-                e for e in parsed
-                if isinstance(e, dict) and e.get("game") and e.get("date")
-            ]
+            return [e for e in parsed if isinstance(e, dict) and e.get("game") and e.get("date")]
         return []
     except Exception:
         return []
@@ -483,13 +497,15 @@ def extract_triplets(llm_client, text: str) -> list:
                 continue
             eq = (t.get("evidence_quote") or "").strip()
             if not eq:
-                continue   # evidence_quote 없는 트리플은 환각으로 간주, 제외
-            result.append({
-                "subject":        _norm_node(t.get("subject", "")),
-                "predicate":      _norm_pred(t.get("predicate", "")),
-                "object":         _norm_node(t.get("object", "")),
-                "evidence_quote": eq,
-            })
+                continue  # evidence_quote 없는 트리플은 환각으로 간주, 제외
+            result.append(
+                {
+                    "subject": _norm_node(t.get("subject", "")),
+                    "predicate": _norm_pred(t.get("predicate", "")),
+                    "object": _norm_node(t.get("object", "")),
+                    "evidence_quote": eq,
+                }
+            )
         if not result:
             print(f"    [LLM] 트리플 없음 (LLM 응답: {raw[:120]!r})")
         return result
@@ -503,27 +519,34 @@ def extract_triplets(llm_client, text: str) -> list:
 
 # ─── 페이지 동기화 (핵심 함수) ───────────────────────────────────────────────
 def sync_page(
-    notion_client, token: str, page_meta: dict,
-    qc, embed_client, llm_client, graph,
-    collection_name: str, dry_run: bool = False, dept: str = "",
+    notion_client,
+    token: str,
+    page_meta: dict,
+    qc,
+    embed_client,
+    llm_client,
+    graph,
+    collection_name: str,
+    dry_run: bool = False,
+    dept: str = "",
     stored_hashes: "dict | None" = None,
 ) -> dict:
     """
     단일 페이지를 Notion에서 가져와 Qdrant + FalkorDB 업데이트
     """
-    page_id    = page_meta["id"].replace("-", "")
-    title      = page_title(page_meta)
+    page_id = page_meta["id"].replace("-", "")
+    title = page_title(page_meta)
     source_url = page_meta.get("url", "")
 
     result = {
-        "page_id":    page_id,
-        "title":      title,
+        "page_id": page_id,
+        "title": title,
         "source_url": source_url,
         "deleted_vectors": 0,
-        "deleted_edges":   0,
-        "new_chunks":      0,
-        "new_triplets":    0,
-        "new_events":      0,
+        "deleted_edges": 0,
+        "new_chunks": 0,
+        "new_triplets": 0,
+        "new_events": 0,
     }
 
     print(f"  🔄 {title[:60]}")
@@ -548,26 +571,32 @@ def sync_page(
     # 이 경우 속성값을 줄글로 합성해 벡터 임베딩과 LLM 추출에 활용한다.
     db_props_meta = extract_db_properties(page_meta)
     if db_props_meta and word_count < 30:
-        prop_text  = "\n".join(f"{k}: {v}" for k, v in db_props_meta.items())
-        body       = (prop_text + ("\n\n" + body if body.strip() else "")).strip()
+        prop_text = "\n".join(f"{k}: {v}" for k, v in db_props_meta.items())
+        body = (prop_text + ("\n\n" + body if body.strip() else "")).strip()
         word_count = len(body.split())
         print(f"     🔧 DB 속성에서 텍스트 합성 ({word_count} 단어)")
 
-    body_hash       = content_hash(body)
+    body_hash = content_hash(body)
     has_html_attach = "[첨부 HTML:" in body
 
     # ── Phase 1-① 경로 분류 ───────────────────────────────────────────────
-    route = classify_page(body, {
-        "title":         title,
-        "db_properties": db_props_meta or None,
-    }, word_count)
+    route = classify_page(
+        body,
+        {
+            "title": title,
+            "db_properties": db_props_meta or None,
+        },
+        word_count,
+    )
 
     if route == "excluded":
         print(f"     ⚠️  excluded 판정 ({word_count} 단어) — 건너뜀")
         result["skipped"] = True
         _upsert_notion_page(
-            page_id=page_id, dept=dept,
-            notion_url=source_url, title=title,
+            page_id=page_id,
+            dept=dept,
+            notion_url=source_url,
+            title=title,
             last_edited_time=page_meta.get("last_edited_time"),
             word_count=word_count,
             is_db_item=bool(db_props_meta),
@@ -584,8 +613,10 @@ def sync_page(
         print("     ↩️  내용 변경 없음 (hash 일치) — LLM 재처리 건너뜀")
         result["hash_skip"] = True
         _upsert_notion_page(
-            page_id=page_id, dept=dept,
-            notion_url=source_url, title=title,
+            page_id=page_id,
+            dept=dept,
+            notion_url=source_url,
+            title=title,
             last_edited_time=page_meta.get("last_edited_time"),
             word_count=word_count,
             is_db_item=bool(db_props_meta),
@@ -614,27 +645,27 @@ def sync_page(
             # 4-1. 배치 임베딩 (EMBED_BATCH_SIZE 단위, API 호출 최소화)
             all_vecs = []
             for bi in range(0, len(chunks), EMBED_BATCH_SIZE):
-                batch = chunks[bi:bi + EMBED_BATCH_SIZE]
-                res   = embed_client.models.embed_content(
-                    model=EMBED_MODEL_NAME, contents=batch
-                )
+                batch = chunks[bi : bi + EMBED_BATCH_SIZE]
+                res = embed_client.models.embed_content(model=EMBED_MODEL_NAME, contents=batch)
                 all_vecs.extend([list(e.values) for e in res.embeddings])
 
             # 4-2. 전체 청크 한 번에 Qdrant upsert
             points = []
             for i, (chunk, vec) in enumerate(zip(chunks, all_vecs, strict=True)):
-                points.append({
-                    "id":     str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_url}#chunk{i}")),
-                    "vector": vec,
-                    "payload": {
-                        "title":       title,
-                        "source_url":  source_url,
-                        "page_id":     page_id,
-                        "text":        chunk,
-                        "chunk_index": i,
-                        "chunk_total": len(chunks),
-                    },
-                })
+                points.append(
+                    {
+                        "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source_url}#chunk{i}")),
+                        "vector": vec,
+                        "payload": {
+                            "title": title,
+                            "source_url": source_url,
+                            "page_id": page_id,
+                            "text": chunk,
+                            "chunk_index": i,
+                            "chunk_total": len(chunks),
+                        },
+                    }
+                )
             qc.upsert(collection_name=collection_name, points=points)
             new_chunks = len(chunks)
         except Exception as e:
@@ -647,10 +678,12 @@ def sync_page(
     if route == "defer":
         print("     ↩️  defer 경로 — LLM 추출 생략")
         result["new_triplets"] = 0
-        result["new_events"]   = 0
+        result["new_events"] = 0
         _upsert_notion_page(
-            page_id=page_id, dept=dept,
-            notion_url=source_url, title=title,
+            page_id=page_id,
+            dept=dept,
+            notion_url=source_url,
+            title=title,
             last_edited_time=page_meta.get("last_edited_time"),
             word_count=word_count,
             chunk_count=new_chunks,
@@ -664,7 +697,7 @@ def sync_page(
 
     # 5+6. LLM 추출 — 트리플·이벤트 동시 실행 (순차 대비 ~40% 단축)
     # db_props_meta: 위(DB 항목 텍스트 합성 단계)에서 이미 추출됨 — 재사용
-    db_props   = db_props_meta
+    db_props = db_props_meta
     ev_from_db = event_from_db_props(db_props, source_url, title) if db_props else None
 
     with ThreadPoolExecutor(max_workers=2) as _pool:
@@ -675,9 +708,7 @@ def sync_page(
         )
         # DB 속성에 이벤트가 없을 때만 LLM 이벤트 추출 병행
         fe = (
-            _pool.submit(extract_events_from_text, llm_client, body)
-            if ev_from_db is None
-            else None
+            _pool.submit(extract_events_from_text, llm_client, body) if ev_from_db is None else None
         )
         triplets, triplet_src = ft.result()
         llm_events = fe.result() if fe is not None else []
@@ -711,7 +742,7 @@ def sync_page(
         # v2: 근거 인용문 + 실현 상태 + 청크 직접 링크
         eq = (t.get("evidence_quote") or "").strip()
         if eq:
-            props["evidence_quote"]     = eq
+            props["evidence_quote"] = eq
             props["realization_status"] = detect_realization_status(eq)
             cid = find_evidence_chunk_id(eq, chunks, source_url)
             if cid:
@@ -734,8 +765,7 @@ def sync_page(
                 "MATCH (s)-[r:REL]->(o) "
                 "WHERE r.rel_name = $rel_name AND r.source_url = $source_url "
                 "RETURN id(r) LIMIT 1",
-                {"sid": sid, "oid": oid,
-                 "rel_name": props["rel_name"], "source_url": source_url},
+                {"sid": sid, "oid": oid, "rel_name": props["rel_name"], "source_url": source_url},
             )
             if not existing.result_set:
                 graph.query(
@@ -823,12 +853,12 @@ def save_sync_state(state_path: Path, state: dict):
 def fetch_modified_pages(client, token: str, since_iso: str) -> list:
     """last_edited_time > since_iso 인 전체 페이지 반환 (최신순 정렬)"""
     modified = []
-    cursor   = None
-    batch    = 1
+    cursor = None
+    batch = 1
     while True:
         body = {
             "filter": {"value": "page", "property": "object"},
-            "sort":   {"direction": "descending", "timestamp": "last_edited_time"},
+            "sort": {"direction": "descending", "timestamp": "last_edited_time"},
             "page_size": 100,
         }
         if cursor:
@@ -840,7 +870,7 @@ def fetch_modified_pages(client, token: str, since_iso: str) -> list:
         )
         resp.raise_for_status()
         time.sleep(RATE_LIMIT_DELAY)
-        data    = resp.json()
+        data = resp.json()
         results = data.get("results", [])
 
         stop = False
@@ -853,8 +883,10 @@ def fetch_modified_pages(client, token: str, since_iso: str) -> list:
             modified.append(page)
             added_this_batch += 1
 
-        print(f"    배치 {batch:02d}: {len(results)}개 조회 → {added_this_batch}개 수정됨 (누적 {len(modified)}개)"
-              + (" ← 기준 시각 도달, 중단" if stop else ""))
+        print(
+            f"    배치 {batch:02d}: {len(results)}개 조회 → {added_this_batch}개 수정됨 (누적 {len(modified)}개)"
+            + (" ← 기준 시각 도달, 중단" if stop else "")
+        )
         batch += 1
 
         if stop or not data.get("has_more"):
@@ -864,9 +896,7 @@ def fetch_modified_pages(client, token: str, since_iso: str) -> list:
     return modified
 
 
-def fetch_modified_db_items(
-    client, token: str, since_iso: str, notion_databases: list
-) -> list:
+def fetch_modified_db_items(client, token: str, since_iso: str, notion_databases: list) -> list:
     """
     departments.yaml 에 등록된 Notion DB에서 since_iso 이후 수정된 항목을 직접 쿼리합니다.
 
@@ -882,7 +912,7 @@ def fetch_modified_db_items(
     """
     items = []
     for db_entry in notion_databases:
-        db_id   = db_entry["id"] if isinstance(db_entry, dict) else str(db_entry)
+        db_id = db_entry["id"] if isinstance(db_entry, dict) else str(db_entry)
         db_name = db_entry.get("name", db_id) if isinstance(db_entry, dict) else db_id
         print(f"  🗄️  DB 직접 쿼리: {db_name} ({db_id})")
         try:
@@ -897,13 +927,13 @@ def fetch_modified_db_items(
 def fetch_modified_pages_by_keyword(client, token: str, since_iso: str, keyword: str) -> list:
     """Notion 검색 API로 keyword 포함 페이지만 조회 후 since_iso 이후 수정된 것만 반환"""
     modified = []
-    cursor   = None
-    batch    = 1
+    cursor = None
+    batch = 1
     while True:
         body = {
-            "query":  keyword,
+            "query": keyword,
             "filter": {"value": "page", "property": "object"},
-            "sort":   {"direction": "descending", "timestamp": "last_edited_time"},
+            "sort": {"direction": "descending", "timestamp": "last_edited_time"},
             "page_size": 100,
         }
         if cursor:
@@ -915,7 +945,7 @@ def fetch_modified_pages_by_keyword(client, token: str, since_iso: str, keyword:
         )
         resp.raise_for_status()
         time.sleep(RATE_LIMIT_DELAY)
-        data    = resp.json()
+        data = resp.json()
         results = data.get("results", [])
 
         stop = False
@@ -928,8 +958,10 @@ def fetch_modified_pages_by_keyword(client, token: str, since_iso: str, keyword:
             modified.append(page)
             added_this_batch += 1
 
-        print(f"    배치 {batch:02d}: {len(results)}개 조회 → {added_this_batch}개 수정됨 (누적 {len(modified)}개)"
-              + (" ← 기준 시각 도달, 중단" if stop else ""))
+        print(
+            f"    배치 {batch:02d}: {len(results)}개 조회 → {added_this_batch}개 수정됨 (누적 {len(modified)}개)"
+            + (" ← 기준 시각 도달, 중단" if stop else "")
+        )
         batch += 1
 
         if stop or not data.get("has_more"):
@@ -942,31 +974,44 @@ def fetch_modified_pages_by_keyword(client, token: str, since_iso: str, keyword:
 # ─── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Semantica 증분 동기화")
-    parser.add_argument("--dept",    required=True, help="본부 이름 (config/departments.yaml)")
-    parser.add_argument("--search",  default="",   help="수집 대상 키워드 필터 (예: '프로세스'). 미지정 시 전체 페이지")
-    parser.add_argument("--full",    action="store_true", help="전체 재동기화 (last_sync_time 무시)")
-    parser.add_argument("--limit",   type=int, default=0,
-                        help="처리할 최대 페이지 수 (기본: 0 = 무제한). 예: --limit 50")
-    parser.add_argument("--workers",   type=int, default=3,
-                        help="병렬 처리 워커 수 (기본: 3). Notion API 레이트 리밋을 고려해 5 이하 권장")
-    parser.add_argument("--dry-run",   action="store_true", help="변경 내용 확인만 (저장 안 함)")
-    parser.add_argument("--reconcile", action="store_true",
-                        help="Notion 삭제 페이지 감지 후 Qdrant·FalkorDB에서 데이터 정리 (주 1회 권장)")
+    parser.add_argument("--dept", required=True, help="본부 이름 (config/departments.yaml)")
+    parser.add_argument(
+        "--search", default="", help="수집 대상 키워드 필터 (예: '프로세스'). 미지정 시 전체 페이지"
+    )
+    parser.add_argument("--full", action="store_true", help="전체 재동기화 (last_sync_time 무시)")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="처리할 최대 페이지 수 (기본: 0 = 무제한). 예: --limit 50",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=3,
+        help="병렬 처리 워커 수 (기본: 3). Notion API 레이트 리밋을 고려해 5 이하 권장",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="변경 내용 확인만 (저장 안 함)")
+    parser.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="Notion 삭제 페이지 감지 후 Qdrant·FalkorDB에서 데이터 정리 (주 1회 권장)",
+    )
     args = parser.parse_args()
 
     # ── 본부 설정 로드 ──────────────────────────────────────────────────────
-    dept_cfg        = load_dept(args.dept)
-    token           = dept_cfg["notion_token"]
+    dept_cfg = load_dept(args.dept)
+    token = dept_cfg["notion_token"]
     collection_name = dept_cfg["qdrant_collection"]
-    graph_name      = dept_cfg["falkordb_graph"]
-    data_dir        = dept_cfg["data_dir"]
-    state_path      = data_dir / "sync_state.json"
-    log_dir         = ROOT / "data" / "logs"
+    graph_name = dept_cfg["falkordb_graph"]
+    data_dir = dept_cfg["data_dir"]
+    state_path = data_dir / "sync_state.json"
+    log_dir = ROOT / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     start_time = time.time()
-    now_iso    = datetime.now(UTC).isoformat()
-    state      = load_sync_state(state_path)
+    now_iso = datetime.now(UTC).isoformat()
+    state = load_sync_state(state_path)
 
     # ── since_iso 및 PostgreSQL 사전 확인 ──────────────────────────────────
     # stored_edit_times:
@@ -1011,18 +1056,22 @@ def main():
     import falkordb as fdb
 
     embed_client = genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
-    qc           = QdrantClient(url=QDRANT_URL)
-    db           = fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
-    graph        = db.select_graph(graph_name)
-    llm_client   = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
+    qc = QdrantClient(url=QDRANT_URL)
+    db = fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
+    graph = db.select_graph(graph_name)
+    llm_client = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
     print("  ✅ 완료")
 
     # ── Reconcile 모드 (삭제 페이지 감지) ────────────────────────────────
     if args.reconcile:
         with httpx.Client(timeout=60) as notion_client:
             reconcile_deleted_pages(
-                notion_client, token, args.dept,
-                qc, graph, collection_name,
+                notion_client,
+                token,
+                args.dept,
+                qc,
+                graph,
+                collection_name,
                 dry_run=args.dry_run,
             )
         print("\n  ✅ Reconcile 완료")
@@ -1036,7 +1085,9 @@ def main():
     with httpx.Client(timeout=60) as notion_client:
         if keyword:
             # 키워드로 먼저 좁힌 뒤 시간 필터 적용 (전체 조회 불필요)
-            modified_pages = fetch_modified_pages_by_keyword(notion_client, token, since_iso, keyword)
+            modified_pages = fetch_modified_pages_by_keyword(
+                notion_client, token, since_iso, keyword
+            )
         else:
             modified_pages = fetch_modified_pages(notion_client, token, since_iso)
         print(f"  📋 Notion API 반환: {len(modified_pages)}개")
@@ -1046,12 +1097,11 @@ def main():
         notion_databases = dept_cfg.get("notion_databases", [])
         if notion_databases:
             existing_ids = {p.get("id", "").replace("-", "") for p in modified_pages}
-            db_items = fetch_modified_db_items(
-                notion_client, token, since_iso, notion_databases
-            )
+            db_items = fetch_modified_db_items(notion_client, token, since_iso, notion_databases)
             # 중복 제거: /search 로 이미 가져온 항목은 건너뜀
-            added = [item for item in db_items
-                     if item.get("id", "").replace("-", "") not in existing_ids]
+            added = [
+                item for item in db_items if item.get("id", "").replace("-", "") not in existing_ids
+            ]
             if added:
                 print(f"  + DB 직접 쿼리로 {len(added)}개 추가 (중복 제외)")
                 modified_pages.extend(added)
@@ -1067,11 +1117,11 @@ def main():
             before = len(modified_pages)
             truly_modified = []
             already_synced = 0
-            new_pages      = 0
+            new_pages = 0
             for page in modified_pages:
-                pid          = page.get("id", "").replace("-", "")
-                notion_time  = page.get("last_edited_time", "")
-                stored_time  = stored_edit_times.get(pid, "")
+                pid = page.get("id", "").replace("-", "")
+                notion_time = page.get("last_edited_time", "")
+                stored_time = stored_edit_times.get(pid, "")
                 if not stored_time:
                     # table에 없는 신규 페이지 → 무조건 처리
                     truly_modified.append(page)
@@ -1092,13 +1142,15 @@ def main():
 
         # --limit 적용
         if args.limit and len(modified_pages) > args.limit:
-            print(f"  ✂️  --limit {args.limit} 적용 → {args.limit}개만 처리 (나머지 {len(modified_pages) - args.limit}개 제외)")
-            modified_pages = modified_pages[:args.limit]
+            print(
+                f"  ✂️  --limit {args.limit} 적용 → {args.limit}개만 처리 (나머지 {len(modified_pages) - args.limit}개 제외)"
+            )
+            modified_pages = modified_pages[: args.limit]
 
         if not modified_pages:
             print("\n  ✅ 새로 수정된 페이지 없음 — 동기화 완료")
             state["last_sync_time"] = now_iso
-            state["last_check"]     = now_iso
+            state["last_check"] = now_iso
             if not args.dry_run:
                 save_sync_state(state_path, state)
             return
@@ -1126,21 +1178,28 @@ def main():
             print(f"\n  [{idx:03d}/{total_pages:03d}]")
             # 스레드 전용 FalkorDB 연결 (Graph 객체는 Redis 단일 연결로 비안전)
             import falkordb as _fdb
-            _db    = _fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
+
+            _db = _fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
             _graph = _db.select_graph(graph_name)
             # 스레드 전용 Notion httpx 클라이언트
             with httpx.Client(timeout=60) as _nc:
                 return sync_page(
-                    _nc, token, page_meta,
-                    qc, embed_client, llm_client, _graph,
-                    collection_name, dry_run=args.dry_run, dept=args.dept,
+                    _nc,
+                    token,
+                    page_meta,
+                    qc,
+                    embed_client,
+                    llm_client,
+                    _graph,
+                    collection_name,
+                    dry_run=args.dry_run,
+                    dept=args.dept,
                     stored_hashes=_stored_hashes,
                 )
 
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = {
-                pool.submit(_sync_one, (i, page)): i
-                for i, page in enumerate(modified_pages, 1)
+                pool.submit(_sync_one, (i, page)): i for i, page in enumerate(modified_pages, 1)
             }
             for fut in as_completed(futures):
                 try:
@@ -1151,12 +1210,12 @@ def main():
             time.sleep(0.5)
 
     # ── 결과 요약 ─────────────────────────────────────────────────────────
-    success  = [r for r in results if not r.get("error") and not r.get("skipped")]
-    errors   = [r for r in results if r.get("error")]
-    skipped  = [r for r in results if r.get("skipped")]
-    total_v  = sum(r.get("new_chunks",   0) for r in success)
-    total_e  = sum(r.get("new_triplets", 0) for r in success)
-    total_ev = sum(r.get("new_events",   0) for r in success)
+    success = [r for r in results if not r.get("error") and not r.get("skipped")]
+    errors = [r for r in results if r.get("error")]
+    skipped = [r for r in results if r.get("skipped")]
+    total_v = sum(r.get("new_chunks", 0) for r in success)
+    total_e = sum(r.get("new_triplets", 0) for r in success)
+    total_ev = sum(r.get("new_events", 0) for r in success)
 
     print("\n[4/4] 동기화 결과")
     print("=" * 60)
@@ -1167,18 +1226,23 @@ def main():
 
     # ── 상태 저장 ─────────────────────────────────────────────────────────
     if not args.dry_run:
-        state["last_sync_time"]  = now_iso
+        state["last_sync_time"] = now_iso
         state["last_sync_count"] = len(success)
-        state["total_synced"]    = state.get("total_synced", 0) + len(success)
+        state["total_synced"] = state.get("total_synced", 0) + len(success)
         save_sync_state(state_path, state)
         print(f"\n  💾 sync_state.json 갱신: {state_path}")
 
     # ── 로그 저장 ─────────────────────────────────────────────────────────
     log = {
-        "dept": args.dept, "since": since_iso, "now": now_iso,
-        "modified": len(modified_pages), "success": len(success),
-        "skipped": len(skipped), "errors": len(errors),
-        "new_chunks": total_v, "new_triplets": total_e,
+        "dept": args.dept,
+        "since": since_iso,
+        "now": now_iso,
+        "modified": len(modified_pages),
+        "success": len(success),
+        "skipped": len(skipped),
+        "errors": len(errors),
+        "new_chunks": total_v,
+        "new_triplets": total_e,
         "results": results,
     }
     log_path = log_dir / f"sync_{args.dept}_{now_iso[:10].replace('-', '')}.json"

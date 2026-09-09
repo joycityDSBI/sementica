@@ -35,9 +35,9 @@ from pathlib import Path
 
 # ─── 경로 설정 ────────────────────────────────────────────────────────────────
 _HERE = Path(__file__).parent
-sys.path.insert(0, str(_HERE))                          # server.py
-sys.path.insert(0, str(_HERE.parent / "pipeline"))      # dept_config 등
-sys.path.insert(0, str(_HERE.parent / "ops"))           # db_logger 등
+sys.path.insert(0, str(_HERE))  # server.py
+sys.path.insert(0, str(_HERE.parent / "pipeline"))  # dept_config 등
+sys.path.insert(0, str(_HERE.parent / "ops"))  # db_logger 등
 
 # ─── .env 로드 ────────────────────────────────────────────────────────────────
 _env_path = _HERE.parent.parent / ".env"
@@ -77,15 +77,18 @@ def _deny() -> JSONResponse:
 
 # ─── 헬스 체크 ────────────────────────────────────────────────────────────────
 async def health(request: Request):
-    return JSONResponse({
-        "status":     "ok",
-        "dept":       _srv.DEPT_NAME,
-        "collection": _srv.COLLECTION_NAME,
-        "graph":      _srv.GRAPH_NAME,
-    })
+    return JSONResponse(
+        {
+            "status": "ok",
+            "dept": _srv.DEPT_NAME,
+            "collection": _srv.COLLECTION_NAME,
+            "graph": _srv.GRAPH_NAME,
+        }
+    )
 
 
 # ─── /rest/* 일반 REST 핸들러 ─────────────────────────────────────────────────
+
 
 async def rest_search(request: Request):
     """
@@ -96,7 +99,7 @@ async def rest_search(request: Request):
     if not _ok(request):
         return _deny()
     try:
-        body  = await request.json()
+        body = await request.json()
         query = str(body.get("query", "")).strip()
         limit = int(body.get("limit", 5))
         if not query:
@@ -116,9 +119,9 @@ async def rest_graph(request: Request):
     if not _ok(request):
         return _deny()
     try:
-        body   = await request.json()
+        body = await request.json()
         entity = str(body.get("entity", "")).strip()
-        depth  = int(body.get("depth", 1))
+        depth = int(body.get("depth", 1))
         if not entity:
             return JSONResponse({"error": "entity 파라미터가 필요합니다"}, status_code=400)
         result = _srv.graph_search(entity=entity, depth=depth)
@@ -137,17 +140,20 @@ async def rest_events(request: Request):
     if not _ok(request):
         return _deny()
     try:
-        body       = await request.json()
-        game       = str(body.get("game",       "")).strip()
+        body = await request.json()
+        game = str(body.get("game", "")).strip()
         event_type = str(body.get("event_type", "")).strip()
-        from_date  = str(body.get("from_date",  "")).strip()
-        to_date    = str(body.get("to_date",    "")).strip()
-        limit      = int(body.get("limit", 20))
+        from_date = str(body.get("from_date", "")).strip()
+        to_date = str(body.get("to_date", "")).strip()
+        limit = int(body.get("limit", 20))
         if not game:
             return JSONResponse({"error": "game 파라미터가 필요합니다"}, status_code=400)
         result = _srv.timeline_search(
-            game=game, event_type=event_type,
-            from_date=from_date, to_date=to_date, limit=limit,
+            game=game,
+            event_type=event_type,
+            from_date=from_date,
+            to_date=to_date,
+            limit=limit,
         )
         return JSONResponse(result)
     except Exception as e:
@@ -163,7 +169,7 @@ async def rest_hybrid(request: Request):
     if not _ok(request):
         return _deny()
     try:
-        body  = await request.json()
+        body = await request.json()
         query = str(body.get("query", "")).strip()
         limit = int(body.get("limit", 8))
         if not query:
@@ -177,6 +183,7 @@ async def rest_hybrid(request: Request):
 # ─── /snowflake/* Snowflake External Function 형식 핸들러 ─────────────────────
 # 요청: {"data": [[row_index, param1, param2, ...]]}
 # 응답: {"data": [[row_index, {결과}]]}
+
 
 async def sf_search(request: Request):
     """
@@ -194,11 +201,11 @@ async def sf_search(request: Request):
     try:
         body = await request.json()
         rows = body.get("data", [])
-        out  = []
+        out = []
         for row in rows:
-            idx   = row[0]
+            idx = row[0]
             query = str(row[1]).strip() if len(row) > 1 else ""
-            limit = int(row[2])         if len(row) > 2 else 5
+            limit = int(row[2]) if len(row) > 2 else 5
             try:
                 results = _srv.semantic_search(query=query, limit=limit)
                 out.append([idx, {"results": results, "count": len(results)}])
@@ -226,18 +233,21 @@ async def sf_events(request: Request):
     try:
         body = await request.json()
         rows = body.get("data", [])
-        out  = []
+        out = []
         for row in rows:
-            idx        = row[0]
-            game       = str(row[1]).strip() if len(row) > 1 else ""
+            idx = row[0]
+            game = str(row[1]).strip() if len(row) > 1 else ""
             event_type = str(row[2]).strip() if len(row) > 2 else ""
-            from_date  = str(row[3]).strip() if len(row) > 3 else ""
-            to_date    = str(row[4]).strip() if len(row) > 4 else ""
-            limit      = int(row[5])         if len(row) > 5 else 20
+            from_date = str(row[3]).strip() if len(row) > 3 else ""
+            to_date = str(row[4]).strip() if len(row) > 4 else ""
+            limit = int(row[5]) if len(row) > 5 else 20
             try:
                 result = _srv.timeline_search(
-                    game=game, event_type=event_type,
-                    from_date=from_date, to_date=to_date, limit=limit,
+                    game=game,
+                    event_type=event_type,
+                    from_date=from_date,
+                    to_date=to_date,
+                    limit=limit,
                 )
                 out.append([idx, result])
             except Exception as e:
@@ -263,11 +273,11 @@ async def sf_hybrid(request: Request):
     try:
         body = await request.json()
         rows = body.get("data", [])
-        out  = []
+        out = []
         for row in rows:
-            idx   = row[0]
+            idx = row[0]
             query = str(row[1]).strip() if len(row) > 1 else ""
-            limit = int(row[2])         if len(row) > 2 else 8
+            limit = int(row[2]) if len(row) > 2 else 8
             try:
                 result = _srv.hybrid_search(query=query, limit=limit)
                 out.append([idx, result])
@@ -279,19 +289,21 @@ async def sf_hybrid(request: Request):
 
 
 # ─── Starlette 앱 ─────────────────────────────────────────────────────────────
-app = Starlette(routes=[
-    # 헬스 체크
-    Route("/rest/health",      health,      methods=["GET"]),
-    # 일반 REST
-    Route("/rest/search",      rest_search, methods=["POST"]),
-    Route("/rest/graph",       rest_graph,  methods=["POST"]),
-    Route("/rest/events",      rest_events, methods=["POST"]),
-    Route("/rest/hybrid",      rest_hybrid, methods=["POST"]),
-    # Snowflake External Function 형식
-    Route("/snowflake/search", sf_search,   methods=["POST"]),
-    Route("/snowflake/events", sf_events,   methods=["POST"]),
-    Route("/snowflake/hybrid", sf_hybrid,   methods=["POST"]),
-])
+app = Starlette(
+    routes=[
+        # 헬스 체크
+        Route("/rest/health", health, methods=["GET"]),
+        # 일반 REST
+        Route("/rest/search", rest_search, methods=["POST"]),
+        Route("/rest/graph", rest_graph, methods=["POST"]),
+        Route("/rest/events", rest_events, methods=["POST"]),
+        Route("/rest/hybrid", rest_hybrid, methods=["POST"]),
+        # Snowflake External Function 형식
+        Route("/snowflake/search", sf_search, methods=["POST"]),
+        Route("/snowflake/events", sf_events, methods=["POST"]),
+        Route("/snowflake/hybrid", sf_hybrid, methods=["POST"]),
+    ]
+)
 
 
 # ─── 실행 ─────────────────────────────────────────────────────────────────────
@@ -301,9 +313,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Semantica REST API 서버")
     parser.add_argument("--dept", default="", help="본부 이름 (config/departments.yaml의 key)")
     parser.add_argument("--host", default="0.0.0.0", help="바인딩 호스트 (기본: 0.0.0.0)")
-    parser.add_argument("--port", type=int,
-                        default=int(os.environ.get("SNOWFLAKE_REST_PORT", "8766")),
-                        help="포트 (기본: 8766 또는 SNOWFLAKE_REST_PORT 환경변수)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("SNOWFLAKE_REST_PORT", "8766")),
+        help="포트 (기본: 8766 또는 SNOWFLAKE_REST_PORT 환경변수)",
+    )
     args = parser.parse_args()
 
     # 본부 설정 적용 (COLLECTION_NAME, GRAPH_NAME, DEPT_NAME 갱신)
@@ -323,7 +338,9 @@ if __name__ == "__main__":
     print(f"   통합:  POST {base}/rest/hybrid")
     print("")
     print(f"   Snowflake: POST {base}/snowflake/{{search|events|hybrid}}")
-    print(f"   인증: {'Bearer 토큰 활성화' if _REST_TOKEN else '없음 (SNOWFLAKE_REST_TOKEN 미설정)'}")
+    print(
+        f"   인증: {'Bearer 토큰 활성화' if _REST_TOKEN else '없음 (SNOWFLAKE_REST_TOKEN 미설정)'}"
+    )
     print("=" * 56)
 
     uvicorn.run(app, host=args.host, port=args.port)

@@ -38,13 +38,15 @@ from datetime import UTC, datetime
 try:
     from utils.synonym_resolver import resolve as _resolve_entity
 except ImportError:
+
     def _resolve_entity(name: str) -> str:  # type: ignore[misc]
         return name
 
+
 # ─── Semantica 가용 여부 자동 감지 ──────────────────────────────────────────────
-_SEM_AVAILABLE   = False   # Semantica 패키지 설치 여부
-_KOREAN_OK       = False   # 한국어 엔티티 인식 가능 여부
-_sem_checked     = False   # 한 번만 체크
+_SEM_AVAILABLE = False  # Semantica 패키지 설치 여부
+_KOREAN_OK = False  # 한국어 엔티티 인식 가능 여부
+_sem_checked = False  # 한 번만 체크
 
 
 def _check_semantica_once():
@@ -55,6 +57,7 @@ def _check_semantica_once():
     _sem_checked = True
     try:
         from semantica.semantic_extract import NamedEntityRecognizer
+
         _SEM_AVAILABLE = True
         # 한국어 테스트 문장
         ner = NamedEntityRecognizer(confidence_threshold=0.4)
@@ -63,12 +66,15 @@ def _check_semantica_once():
         status = "한국어 지원 ✅" if _KOREAN_OK else "한국어 미지원 ⚠️ (영문만 가능)"
         print(f"  [Semantica] NER/RE 감지됨 — {status}")
     except ImportError:
-        print("  [Semantica] 패키지 없음 — fallback 비활성화 (pip install semantica[graph-falkordb])")
+        print(
+            "  [Semantica] 패키지 없음 — fallback 비활성화 (pip install semantica[graph-falkordb])"
+        )
     except Exception as e:
         print(f"  [Semantica] 초기화 실패: {e}")
 
 
 # ─── 1. 엔티티 중복 제거 (MERGE) ─────────────────────────────────────────────
+
 
 def merge_node(graph, entity_name: str, entity_type: str, source_url: str) -> int:
     """
@@ -123,21 +129,43 @@ def merge_node(graph, entity_name: str, entity_type: str, source_url: str) -> in
 # ─── 2. LLM 추출 실패 시 Semantica NER/RE fallback ───────────────────────────
 
 # 의미있는 엔티티 타입만 허용 (날짜·숫자·컬럼명 제외)
-_VALID_NER_TYPES: frozenset = frozenset({
-    "PERSON", "ORG", "PRODUCT", "FAC", "WORK_OF_ART", "EVENT", "NORP",
-    "Entity",          # Semantica 기본 타입
-    "Team", "System", "Process", "Policy", "Document", "Role",  # 커스텀 온톨로지 타입
-})
-_SKIP_NER_TYPES: frozenset = frozenset({
-    "DATE", "TIME", "CARDINAL", "ORDINAL", "PERCENT", "MONEY", "QUANTITY",
-    "LOC", "GPE",      # 지명·국가는 업무 온톨로지에서 불필요
-})
+_VALID_NER_TYPES: frozenset = frozenset(
+    {
+        "PERSON",
+        "ORG",
+        "PRODUCT",
+        "FAC",
+        "WORK_OF_ART",
+        "EVENT",
+        "NORP",
+        "Entity",  # Semantica 기본 타입
+        "Team",
+        "System",
+        "Process",
+        "Policy",
+        "Document",
+        "Role",  # 커스텀 온톨로지 타입
+    }
+)
+_SKIP_NER_TYPES: frozenset = frozenset(
+    {
+        "DATE",
+        "TIME",
+        "CARDINAL",
+        "ORDINAL",
+        "PERCENT",
+        "MONEY",
+        "QUANTITY",
+        "LOC",
+        "GPE",  # 지명·국가는 업무 온톨로지에서 불필요
+    }
+)
 # 날짜/숫자 패턴 엔티티 이름 제외
 _DATE_NUM_RE = re.compile(
-    r"^\d+$"                                      # 순수 숫자
-    r"|^\d{4}[-/.년]\d{1,2}"                      # YYYY-MM, YYYY년MM
-    r"|\d{1,2}시\s*\d{0,2}분?"                    # 시각 (오전 5시 15분)
-    r"|^20\d{2}"                                   # 연도 단독 (2026 등)
+    r"^\d+$"  # 순수 숫자
+    r"|^\d{4}[-/.년]\d{1,2}"  # YYYY-MM, YYYY년MM
+    r"|\d{1,2}시\s*\d{0,2}분?"  # 시각 (오전 5시 15분)
+    r"|^20\d{2}"  # 연도 단독 (2026 등)
 )
 
 
@@ -196,17 +224,17 @@ def _semantica_extract(text: str) -> list:
             return []
 
         relations = rel.extract_relations(text[:3000], entities=entities)
-        triplets  = []
+        triplets = []
         for r in relations:
-            subj_raw = _attr(r, "subject",   "head")
-            obj_raw  = _attr(r, "object",    "tail")
+            subj_raw = _attr(r, "subject", "head")
+            obj_raw = _attr(r, "object", "tail")
             pred_raw = _attr(r, "predicate", "relation")
 
             subj_name = _text(subj_raw)
-            obj_name  = _text(obj_raw)
+            obj_name = _text(obj_raw)
             pred_name = _text(pred_raw)
             subj_type = _etype(subj_raw)
-            obj_type  = _etype(obj_raw)
+            obj_type = _etype(obj_raw)
 
             if not subj_name or not obj_name or not pred_name:
                 continue
@@ -217,11 +245,13 @@ def _semantica_extract(text: str) -> list:
             if not _is_valid_entity(obj_name, obj_type):
                 continue
 
-            triplets.append({
-                "subject":   {"name": subj_name, "type": subj_type},
-                "predicate": {"name": pred_name},
-                "object":    {"name": obj_name,  "type": obj_type},
-            })
+            triplets.append(
+                {
+                    "subject": {"name": subj_name, "type": subj_type},
+                    "predicate": {"name": pred_name},
+                    "object": {"name": obj_name, "type": obj_type},
+                }
+            )
 
         before = len(relations) if hasattr(relations, "__len__") else "?"
         print(f"    [Semantica] 관계 {before}개 → 필터 후 {len(triplets)}개 트리플")
@@ -263,6 +293,7 @@ def extract_with_fallback(llm_extractor_fn, text: str) -> tuple[list, str]:
 
 # ─── 3. 최단 경로 탐색 ────────────────────────────────────────────────────────
 
+
 def find_shortest_path(graph, start_name: str, end_name: str, max_hops: int = 6) -> dict:
     """
     FalkorDB shortestPath Cypher 로 두 엔티티 간 최단 연결 경로를 탐색.
@@ -293,8 +324,12 @@ def find_shortest_path(graph, start_name: str, end_name: str, max_hops: int = 6)
             {"name": end_name},
         )
         if not r_start.result_set or not r_end.result_set:
-            return {"found": False, "start": start_name, "end": end_name,
-                    "reason": "엔티티를 그래프에서 찾을 수 없음"}
+            return {
+                "found": False,
+                "start": start_name,
+                "end": end_name,
+                "reason": "엔티티를 그래프에서 찾을 수 없음",
+            }
 
         s_name = r_start.result_set[0][0]
         e_name = r_end.result_set[0][0]
@@ -309,18 +344,22 @@ def find_shortest_path(graph, start_name: str, end_name: str, max_hops: int = 6)
         )
 
         if not path_r.result_set:
-            return {"found": False, "start": s_name, "end": e_name,
-                    "reason": f"{max_hops}홉 이내 경로 없음"}
+            return {
+                "found": False,
+                "start": s_name,
+                "end": e_name,
+                "reason": f"{max_hops}홉 이내 경로 없음",
+            }
 
         nodes = path_r.result_set[0][0] or []
-        rels  = path_r.result_set[0][1] or []
+        rels = path_r.result_set[0][1] or []
         return {
-            "found":          True,
-            "start":          s_name,
-            "end":            e_name,
-            "path_nodes":     nodes,
+            "found": True,
+            "start": s_name,
+            "end": e_name,
+            "path_nodes": nodes,
             "path_relations": rels,
-            "hops":           len(rels),
+            "hops": len(rels),
         }
 
     except Exception as e:
@@ -330,12 +369,36 @@ def find_shortest_path(graph, start_name: str, end_name: str, max_hops: int = 6)
 # ─── 4-6. 의사결정 추적 (trace_decision_chain) ───────────────────────────────
 
 # 의사결정을 나타내는 한국어 술어 키워드
-DECISION_KEYWORDS: frozenset = frozenset([
-    "승인", "결정", "채택", "선택", "완료", "확정", "검토",
-    "허가", "처리", "배정", "지정", "선정", "의결", "보고",
-    "승낙", "거부", "반려", "취소", "변경", "수정", "합의",
-    "위임", "지시", "요청", "승계", "이관",
-])
+DECISION_KEYWORDS: frozenset = frozenset(
+    [
+        "승인",
+        "결정",
+        "채택",
+        "선택",
+        "완료",
+        "확정",
+        "검토",
+        "허가",
+        "처리",
+        "배정",
+        "지정",
+        "선정",
+        "의결",
+        "보고",
+        "승낙",
+        "거부",
+        "반려",
+        "취소",
+        "변경",
+        "수정",
+        "합의",
+        "위임",
+        "지시",
+        "요청",
+        "승계",
+        "이관",
+    ]
+)
 
 
 def is_decision_triplet(triplet: dict) -> bool:
@@ -377,22 +440,24 @@ def record_decision_node(graph, triplet: dict, source_url: str) -> int:
     Returns:
         FalkorDB node id (실패 시 -1)
     """
-    subj  = triplet.get("subject",   {})
-    pred  = triplet.get("predicate", {})
-    obj   = triplet.get("object",    {})
+    subj = triplet.get("subject", {})
+    pred = triplet.get("predicate", {})
+    obj = triplet.get("object", {})
 
     subj_name = subj.get("name", "") if isinstance(subj, dict) else str(subj)
     pred_name = pred.get("name", "") if isinstance(pred, dict) else str(pred)
-    obj_name  = obj.get("name",  "") if isinstance(obj,  dict) else str(obj)
+    obj_name = obj.get("name", "") if isinstance(obj, dict) else str(obj)
 
     if not subj_name or not pred_name or not obj_name:
         return -1
 
     # 안정적 ID: 출처 + 트리플 내용 기반 uuid5
-    did = str(uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"{source_url}|{subj_name}|{pred_name}|{obj_name}",
-    ))
+    did = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{source_url}|{subj_name}|{pred_name}|{obj_name}",
+        )
+    )
     ts = datetime.now(UTC).isoformat()
 
     try:
@@ -401,8 +466,14 @@ def record_decision_node(graph, triplet: dict, source_url: str) -> int:
             "ON CREATE SET d.subject = $subject, d.action = $action, "
             "              d.outcome = $outcome, d.source_url = $url, d.ts = $ts "
             "RETURN id(d) AS nid",
-            {"did": did, "subject": subj_name, "action": pred_name,
-             "outcome": obj_name, "url": source_url, "ts": ts},
+            {
+                "did": did,
+                "subject": subj_name,
+                "action": pred_name,
+                "outcome": obj_name,
+                "url": source_url,
+                "ts": ts,
+            },
         )
         if not r.result_set:
             return -1
@@ -481,9 +552,9 @@ def trace_decision_chain(graph, entity_name: str, max_depth: int = 4) -> dict:
 
         if not r.result_set:
             return {
-                "entity":       entity_name,
-                "found":        False,
-                "decisions":    [],
+                "entity": entity_name,
+                "found": False,
+                "decisions": [],
                 "chain_summary": [],
             }
 
@@ -518,88 +589,125 @@ def trace_decision_chain(graph, entity_name: str, max_depth: int = 4) -> dict:
                 for ur in (up_r.result_set or [])
             ]
 
-            decisions.append({
-                "decision_id": did,
-                "subject":     subj,
-                "action":      action,
-                "outcome":     outcome,
-                "source_url":  url or "",
-                "ts":          ts or "",
-                "leads_to":    leads_to,
-                "led_by":      led_by,
-            })
+            decisions.append(
+                {
+                    "decision_id": did,
+                    "subject": subj,
+                    "action": action,
+                    "outcome": outcome,
+                    "source_url": url or "",
+                    "ts": ts or "",
+                    "leads_to": leads_to,
+                    "led_by": led_by,
+                }
+            )
 
         # 3. 체인 요약 (시계열 순)
-        chain_summary = [
-            f"{d['subject']} → {d['action']} → {d['outcome']}"
-            for d in decisions
-        ]
+        chain_summary = [f"{d['subject']} → {d['action']} → {d['outcome']}" for d in decisions]
 
         return {
-            "entity":        entity_name,
-            "found":         True,
-            "decisions":     decisions,
+            "entity": entity_name,
+            "found": True,
+            "decisions": decisions,
             "chain_summary": chain_summary,
         }
 
     except Exception as e:
         return {
-            "entity":        entity_name,
-            "found":         False,
-            "decisions":     [],
+            "entity": entity_name,
+            "found": False,
+            "decisions": [],
             "chain_summary": [],
-            "error":         str(e),
+            "error": str(e),
         }
 
 
 # ─── 7. 이벤트 노드 (upsert_event_node) ─────────────────────────────────────
 
-EVENT_TYPES: frozenset = frozenset([
-    "client_update", "server_update", "user_event",
-    "season", "content_release", "maintenance", "incident", "kpi_milestone",
-    # UA 마케팅 이벤트 (ingest.py / sync.py EVENT_EXTRACT_PROMPT와 동기화)
-    "ua_budget", "ua_creative", "ua_channel", "ua_targeting", "ua_abtest",
-    # UA 변경 이력 (Notion DB '변경카테고리' 값)
-    "ua_campaign",
-])
+EVENT_TYPES: frozenset = frozenset(
+    [
+        "client_update",
+        "server_update",
+        "user_event",
+        "season",
+        "content_release",
+        "maintenance",
+        "incident",
+        "kpi_milestone",
+        # UA 마케팅 이벤트 (ingest.py / sync.py EVENT_EXTRACT_PROMPT와 동기화)
+        "ua_budget",
+        "ua_creative",
+        "ua_channel",
+        "ua_targeting",
+        "ua_abtest",
+        # UA 변경 이력 (Notion DB '변경카테고리' 값)
+        "ua_campaign",
+    ]
+)
 
 # ─── DB 속성 키 별칭 ─────────────────────────────────────────────────────────
 # Notion DB 컬럼명은 자유롭게 설정되므로, 소문자 비교(case-insensitive)로 처리한다.
 # ingest.py / sync.py 에서 공통으로 사용하는 단일 정의.
-DB_DATE_KEYS    = {
-    "이벤트날짜", "날짜", "일자", "date", "event_date",
-    "시작일", "시작날짜", "변경일", "적용일",
+DB_DATE_KEYS = {
+    "이벤트날짜",
+    "날짜",
+    "일자",
+    "date",
+    "event_date",
+    "시작일",
+    "시작날짜",
+    "변경일",
+    "적용일",
 }
-DB_GAME_KEYS    = {
-    "게임명", "게임", "game", "product", "서비스명", "서비스",
-    "project",          # RESU UA 히스토리 등 영문 PROJECT 컬럼 지원
+DB_GAME_KEYS = {
+    "게임명",
+    "게임",
+    "game",
+    "product",
+    "서비스명",
+    "서비스",
+    "project",  # RESU UA 히스토리 등 영문 PROJECT 컬럼 지원
 }
-DB_TYPE_KEYS    = {
-    "이벤트유형", "유형", "event_type", "type", "종류",
-    "변경카테고리", "카테고리", "category", "change_type", "변경유형",
+DB_TYPE_KEYS = {
+    "이벤트유형",
+    "유형",
+    "event_type",
+    "type",
+    "종류",
+    "변경카테고리",
+    "카테고리",
+    "category",
+    "change_type",
+    "변경유형",
 }
 DB_MANAGER_KEYS = {
-    "담당자", "담당팀", "manager", "owner", "담당",
-    "생성자", "작성자", "creator",   # Notion DB 생성자·작성자 컬럼 지원
+    "담당자",
+    "담당팀",
+    "manager",
+    "owner",
+    "담당",
+    "생성자",
+    "작성자",
+    "creator",  # Notion DB 생성자·작성자 컬럼 지원
 }
 
 # 변경카테고리 원문 → EVENT_TYPES 정규값 매핑
 # 매핑에 없는 값은 그대로 event_type 으로 사용 (EVENT_TYPES 에 없으면 ua_campaign 으로 폴백)
 _CATEGORY_TO_EVENT_TYPE: dict[str, str] = {
-    "캠페인조정":  "ua_campaign",
+    "캠페인조정": "ua_campaign",
     "캠페인 조정": "ua_campaign",
-    "소재변경":    "ua_creative",
-    "소재 변경":   "ua_creative",
-    "예산변경":    "ua_budget",
-    "예산 변경":   "ua_budget",
-    "국가변경":    "ua_targeting",
-    "국가 변경":   "ua_targeting",
-    "타겟변경":    "ua_targeting",
-    "타겟 변경":   "ua_targeting",
-    "채널변경":    "ua_channel",
-    "채널 변경":   "ua_channel",
-    "ab테스트":    "ua_abtest",
-    "a/b테스트":   "ua_abtest",
+    "소재변경": "ua_creative",
+    "소재 변경": "ua_creative",
+    "예산변경": "ua_budget",
+    "예산 변경": "ua_budget",
+    "국가변경": "ua_targeting",
+    "국가 변경": "ua_targeting",
+    "타겟변경": "ua_targeting",
+    "타겟 변경": "ua_targeting",
+    "채널변경": "ua_channel",
+    "채널 변경": "ua_channel",
+    "ab테스트": "ua_abtest",
+    "a/b테스트": "ua_abtest",
 }
 
 
@@ -633,7 +741,7 @@ def event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | N
     if not date:
         return None  # 날짜 없으면 이벤트 아님
 
-    game     = _first(DB_GAME_KEYS) or "기타"
+    game = _first(DB_GAME_KEYS) or "기타"
     raw_type = _first(DB_TYPE_KEYS) or ""
     # 변경카테고리 → EVENT_TYPES 정규값 변환
     event_type = _CATEGORY_TO_EVENT_TYPE.get(raw_type.strip(), raw_type.strip())
@@ -643,19 +751,20 @@ def event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | N
     manager_raw = _first(DB_MANAGER_KEYS) or ""
 
     return {
-        "game":        game,
-        "event_type":  event_type,
-        "date":        date[:10],
-        "title":       title,
+        "game": game,
+        "event_type": event_type,
+        "date": date[:10],
+        "title": title,
         "description": "",
-        "manager":     manager_raw,
-        "source_url":  source_url,
+        "manager": manager_raw,
+        "source_url": source_url,
     }
 
 
 def _date_to_ts(date_str: str) -> int:
     """ISO 8601 날짜 문자열 → Unix timestamp (UTC 기준). 실패 시 0 반환."""
     from datetime import datetime
+
     for fmt in ("%Y-%m-%d", "%y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
         try:
             dt = datetime.strptime(date_str.strip(), fmt).replace(tzinfo=UTC)
@@ -695,14 +804,14 @@ def upsert_event_node(graph, event: dict) -> int:
     """
     from datetime import datetime
 
-    game        = str(event.get("game",        "")).strip()
-    event_type  = str(event.get("event_type",  "")).strip()
-    date        = str(event.get("date",        "")).strip()
-    title       = str(event.get("title",       "")).strip()
+    game = str(event.get("game", "")).strip()
+    event_type = str(event.get("event_type", "")).strip()
+    date = str(event.get("date", "")).strip()
+    title = str(event.get("title", "")).strip()
     description = str(event.get("description", ""))
-    target      = str(event.get("target",      ""))
-    manager     = str(event.get("manager",     ""))
-    source_url  = str(event.get("source_url",  ""))
+    target = str(event.get("target", ""))
+    manager = str(event.get("manager", ""))
+    source_url = str(event.get("source_url", ""))
 
     if not (game and date and title):
         return -1
@@ -717,16 +826,16 @@ def upsert_event_node(graph, event: dict) -> int:
         return -1
 
     try:
-        dt      = datetime.fromtimestamp(date_ts, tz=UTC)
-        year    = dt.year
-        month   = dt.month
+        dt = datetime.fromtimestamp(date_ts, tz=UTC)
+        year = dt.year
+        month = dt.month
         quarter = _month_to_quarter(month)
     except Exception:
         year, month, quarter = 0, 0, ""
 
     # 안정적 ID: game | event_type | date
     event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{game}|{event_type}|{date}"))
-    ts       = datetime.now(UTC).isoformat()
+    ts = datetime.now(UTC).isoformat()
 
     # ── 1. :Event 노드 MERGE ────────────────────────────────────────────────
     try:
@@ -740,11 +849,19 @@ def upsert_event_node(graph, event: dict) -> int:
             "  e.source_url = $url, e.ts = $ts "
             "RETURN id(e) AS nid",
             {
-                "eid":     event_id,  "game":    game,    "etype":   event_type,
-                "date":    date,      "date_ts": date_ts, "year":    year,
-                "month":   month,     "quarter": quarter, "title":   title,
-                "desc":    description, "target": target,
-                "url":     source_url,  "ts":     ts,
+                "eid": event_id,
+                "game": game,
+                "etype": event_type,
+                "date": date,
+                "date_ts": date_ts,
+                "year": year,
+                "month": month,
+                "quarter": quarter,
+                "title": title,
+                "desc": description,
+                "target": target,
+                "url": source_url,
+                "ts": ts,
             },
         )
         if not r.result_set:
@@ -757,8 +874,7 @@ def upsert_event_node(graph, event: dict) -> int:
     # ── 2. :Game 노드 MERGE + HAD_EVENT 엣지 ───────────────────────────────
     try:
         graph.query(
-            "MERGE (g:Game {name: $name}) ON CREATE SET g.source_url = $url "
-            "RETURN id(g)",
+            "MERGE (g:Game {name: $name}) ON CREATE SET g.source_url = $url RETURN id(g)",
             {"name": game, "url": source_url},
         )
         graph.query(
@@ -794,7 +910,7 @@ def upsert_event_node(graph, event: dict) -> int:
             {"game": game, "ts": date_ts},
         )
         if prev_r.result_set:
-            prev_eid  = prev_r.result_set[0][0]
+            prev_eid = prev_r.result_set[0][0]
             prev_ts_v = prev_r.result_set[0][1]
             days_diff = round((date_ts - prev_ts_v) / 86400)
             graph.query(
@@ -810,7 +926,7 @@ def upsert_event_node(graph, event: dict) -> int:
             {"game": game, "ts": date_ts},
         )
         if next_r.result_set:
-            next_eid  = next_r.result_set[0][0]
+            next_eid = next_r.result_set[0][0]
             next_ts_v = next_r.result_set[0][1]
             days_diff = round((next_ts_v - date_ts) / 86400)
             graph.query(
@@ -826,12 +942,13 @@ def upsert_event_node(graph, event: dict) -> int:
 
 # ─── 8. 이벤트 체인 조회 (get_event_chain) ──────────────────────────────────
 
+
 def get_event_chain(
     graph,
     game: str,
     event_type: str | None = None,
-    from_date:  str | None = None,
-    to_date:    str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
     limit: int = 20,
 ) -> dict:
     """
@@ -862,7 +979,7 @@ def get_event_chain(
         }
     """
     from_ts = _date_to_ts(from_date) if from_date else 0
-    to_ts   = _date_to_ts(to_date)   if to_date   else 9_999_999_999
+    to_ts = _date_to_ts(to_date) if to_date else 9_999_999_999
 
     try:
         # 게임명 부분 일치로 실제 이름 확인
@@ -906,49 +1023,49 @@ def get_event_chain(
 
         if not r.result_set:
             return {
-                "game": actual_game, "found": False,
-                "total": 0, "events": [], "timeline_summary": [],
+                "game": actual_game,
+                "found": False,
+                "total": 0,
+                "events": [],
+                "timeline_summary": [],
             }
 
         # row: [event_id, game, event_type, date, title, description,
         #       target, source_url, prev_title, prev_date, next_title, next_date]
         events = [
             {
-                "event_id":    row[0],
-                "game":        row[1],
-                "event_type":  row[2],
-                "date":        row[3],
-                "title":       row[4],
+                "event_id": row[0],
+                "game": row[1],
+                "event_type": row[2],
+                "date": row[3],
+                "title": row[4],
                 "description": row[5] or "",
-                "target":      row[6] or "",
-                "source_url":  row[7] or "",
-                "prev_event":  {"title": row[8],  "date": row[9]}  if row[8]  else None,
-                "next_event":  {"title": row[10], "date": row[11]} if row[10] else None,
+                "target": row[6] or "",
+                "source_url": row[7] or "",
+                "prev_event": {"title": row[8], "date": row[9]} if row[8] else None,
+                "next_event": {"title": row[10], "date": row[11]} if row[10] else None,
             }
             for row in r.result_set
         ]
 
-        timeline_summary = [
-            f"{e['date']}: [{e['event_type']}] {e['title']}"
-            for e in events
-        ]
+        timeline_summary = [f"{e['date']}: [{e['event_type']}] {e['title']}" for e in events]
 
         return {
-            "game":             actual_game,
-            "found":            True,
-            "total":            len(events),
-            "events":           events,
+            "game": actual_game,
+            "found": True,
+            "total": len(events),
+            "events": events,
             "timeline_summary": timeline_summary,
         }
 
     except Exception as ex:
         return {
-            "game":             game,
-            "found":            False,
-            "total":            0,
-            "events":           [],
+            "game": game,
+            "found": False,
+            "total": 0,
+            "events": [],
             "timeline_summary": [],
-            "error":            str(ex),
+            "error": str(ex),
         }
 
 
@@ -961,23 +1078,80 @@ def get_event_chain(
 #
 # 결정론적 규칙 기반 — AI 호출 없음, 처리 비용 0.
 
-_CORE_TITLE_KEYWORDS: frozenset = frozenset([
-    "전략", "기획", "의사결정", "결정", "승인", "회의록", "회의", "미팅",
-    "ua", "마케팅", "예산", "목표", "kpi", "매출", "dau", "arpu",
-    "분석", "인사이트", "보고서", "계획", "방향", "로드맵", "okr",
-    "이슈", "리스크", "문제", "개선", "제안", "검토", "결론",
-])
-_CORE_BODY_KEYWORDS: frozenset = frozenset([
-    "의사결정", "결정함", "승인됨", "예산", "목표", "kpi", "전략",
-    "ua", "마케팅", "매출", "인사이트", "이슈", "리스크",
-])
-_DEFER_TITLE_SIGNALS: frozenset = frozenset([
-    "링크 모음", "참고 자료", "자료 모음", "업무 연락", "단순 안내",
-    "일정 공유", "todo", "체크리스트",
-])
-_EXCLUDED_TITLE_PATTERNS: frozenset = frozenset([
-    "테스트", "test", "임시", "draft", "삭제 예정", "미사용", "untitled",
-])
+_CORE_TITLE_KEYWORDS: frozenset = frozenset(
+    [
+        "전략",
+        "기획",
+        "의사결정",
+        "결정",
+        "승인",
+        "회의록",
+        "회의",
+        "미팅",
+        "ua",
+        "마케팅",
+        "예산",
+        "목표",
+        "kpi",
+        "매출",
+        "dau",
+        "arpu",
+        "분석",
+        "인사이트",
+        "보고서",
+        "계획",
+        "방향",
+        "로드맵",
+        "okr",
+        "이슈",
+        "리스크",
+        "문제",
+        "개선",
+        "제안",
+        "검토",
+        "결론",
+    ]
+)
+_CORE_BODY_KEYWORDS: frozenset = frozenset(
+    [
+        "의사결정",
+        "결정함",
+        "승인됨",
+        "예산",
+        "목표",
+        "kpi",
+        "전략",
+        "ua",
+        "마케팅",
+        "매출",
+        "인사이트",
+        "이슈",
+        "리스크",
+    ]
+)
+_DEFER_TITLE_SIGNALS: frozenset = frozenset(
+    [
+        "링크 모음",
+        "참고 자료",
+        "자료 모음",
+        "업무 연락",
+        "단순 안내",
+        "일정 공유",
+        "todo",
+        "체크리스트",
+    ]
+)
+_EXCLUDED_TITLE_PATTERNS: frozenset = frozenset(
+    [
+        "테스트",
+        "test",
+        "임시",
+        "draft",
+        "삭제 예정",
+        "미사용",
+        "untitled",
+    ]
+)
 
 
 def classify_page(body: str, meta: dict, word_count: int) -> str:
@@ -1036,6 +1210,7 @@ def classify_page(body: str, meta: dict, word_count: int) -> str:
 
 # ─── 10. 본문 해시 (content_hash) ────────────────────────────────────────────
 
+
 def content_hash(text: str) -> str:
     """
     텍스트의 SHA-256 해시 앞 16자를 반환합니다.
@@ -1049,16 +1224,48 @@ def content_hash(text: str) -> str:
 
 # ─── 11. 실현 상태 판정 (detect_realization_status) ──────────────────────────
 
-_PLANNED_SIGNALS: frozenset = frozenset([
-    "예정", "할 예정", "진행 예정", "검토 중", "검토 예정", "계획",
-    "예정입니다", "할 계획", "가능성", "논의 중", "준비 중",
-    "예정으로", "검토하고", "진행할", "배포 예정", "오픈 예정",
-])
-_APPLIED_SIGNALS: frozenset = frozenset([
-    "완료", "적용됨", "배포됨", "출시", "오픈됨", "시행됨", "확정됨",
-    "실시됨", "반영됨", "실행됨", "시작됨", "완료되었", "됩니다",
-    "했습니다", "출시됨", "배포 완료", "오픈 완료", "적용 완료",
-])
+_PLANNED_SIGNALS: frozenset = frozenset(
+    [
+        "예정",
+        "할 예정",
+        "진행 예정",
+        "검토 중",
+        "검토 예정",
+        "계획",
+        "예정입니다",
+        "할 계획",
+        "가능성",
+        "논의 중",
+        "준비 중",
+        "예정으로",
+        "검토하고",
+        "진행할",
+        "배포 예정",
+        "오픈 예정",
+    ]
+)
+_APPLIED_SIGNALS: frozenset = frozenset(
+    [
+        "완료",
+        "적용됨",
+        "배포됨",
+        "출시",
+        "오픈됨",
+        "시행됨",
+        "확정됨",
+        "실시됨",
+        "반영됨",
+        "실행됨",
+        "시작됨",
+        "완료되었",
+        "됩니다",
+        "했습니다",
+        "출시됨",
+        "배포 완료",
+        "오픈 완료",
+        "적용 완료",
+    ]
+)
 
 
 def find_evidence_chunk_id(

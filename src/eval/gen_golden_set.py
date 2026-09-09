@@ -33,49 +33,49 @@ if _env.exists():
             k, _, v = line.partition("=")
             os.environ.setdefault(k.strip(), v.strip())
 
-GCP_PROJECT   = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION      = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
-QDRANT_URL    = os.environ.get("QDRANT_URL", "http://localhost:6333")
+GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
-CLAUDE_MODEL  = "claude-sonnet-4-6@default"
+CLAUDE_MODEL = "claude-sonnet-4-6@default"
 
 # 카테고리별 목표 문항 수
 CATEGORY_TARGETS = {
-    "담당자":   5,
+    "담당자": 5,
     "정책/규정": 4,
-    "관계":     5,
-    "문서위치":  3,
-    "복합":     3,
+    "관계": 5,
+    "문서위치": 3,
+    "복합": 3,
 }
 DIFFICULTY_DIST = {"easy": 0.3, "medium": 0.5, "hard": 0.2}
 
 # ─── 인수 파싱 ────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--dept",  default="", help="본부 키 (config/departments.yaml)")
+parser.add_argument("--dept", default="", help="본부 키 (config/departments.yaml)")
 parser.add_argument("--count", type=int, default=20, help="목표 문항 수 (기본 20)")
-parser.add_argument("--sample-pages", type=int, default=60,
-                    help="Qdrant 샘플 페이지 수 (기본 60)")
-parser.add_argument("--sample-rels",  type=int, default=80,
-                    help="FalkorDB 샘플 관계 수 (기본 80)")
-parser.add_argument("--out", default="",
-                    help="출력 파일 경로 (기본: data/eval/golden_set_YYYYMMDD.json)")
+parser.add_argument("--sample-pages", type=int, default=60, help="Qdrant 샘플 페이지 수 (기본 60)")
+parser.add_argument("--sample-rels", type=int, default=80, help="FalkorDB 샘플 관계 수 (기본 80)")
+parser.add_argument(
+    "--out", default="", help="출력 파일 경로 (기본: data/eval/golden_set_YYYYMMDD.json)"
+)
 parser.add_argument("--seed", type=int, default=42, help="난수 시드")
 args = parser.parse_args()
 
 random.seed(args.seed)
 
 COLLECTION_NAME = "joycity_pages"
-GRAPH_NAME      = "joycity_kg"
-DEPT_LABEL      = "legacy"
+GRAPH_NAME = "joycity_kg"
+DEPT_LABEL = "legacy"
 
 if args.dept:
     sys.path.insert(0, str(ROOT / "src" / "pipeline"))
     from dept_config import load_dept as _ld
+
     _cfg = _ld(args.dept)
     COLLECTION_NAME = _cfg["qdrant_collection"]
-    GRAPH_NAME      = _cfg["falkordb_graph"]
-    DEPT_LABEL      = f"{_cfg['name']} ({args.dept})"
+    GRAPH_NAME = _cfg["falkordb_graph"]
+    DEPT_LABEL = f"{_cfg['name']} ({args.dept})"
 
 OUT_PATH = args.out or str(
     ROOT / "data" / "eval" / f"golden_set_{datetime.now(UTC).strftime('%Y%m%d')}.json"
@@ -86,7 +86,9 @@ print("  골든셋 자동 생성")
 print("=" * 60)
 print(f"  본부:     {DEPT_LABEL}")
 print(f"  컬렉션:   {COLLECTION_NAME}  그래프: {GRAPH_NAME}")
-print(f"  목표:     {args.count}문항 ({', '.join(f'{c}:{n}' for c,n in CATEGORY_TARGETS.items())})")
+print(
+    f"  목표:     {args.count}문항 ({', '.join(f'{c}:{n}' for c, n in CATEGORY_TARGETS.items())})"
+)
 print(f"  출력:     {OUT_PATH}")
 print()
 
@@ -100,10 +102,10 @@ from qdrant_client import QdrantClient  # noqa: E402
 import falkordb as _fdb  # noqa: E402
 
 embed_client = _genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
-qdrant       = QdrantClient(url=QDRANT_URL)
-_db          = _fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
-graph        = _db.select_graph(GRAPH_NAME)
-claude       = AnthropicVertex(project_id=GCP_PROJECT, region=LOCATION)
+qdrant = QdrantClient(url=QDRANT_URL)
+_db = _fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
+graph = _db.select_graph(GRAPH_NAME)
+claude = AnthropicVertex(project_id=GCP_PROJECT, region=LOCATION)
 print("✅ 완료\n")
 
 
@@ -133,7 +135,7 @@ while len(pages) < args.sample_pages:
         break
 
 random.shuffle(pages)
-pages = pages[:args.sample_pages]
+pages = pages[: args.sample_pages]
 print(f"  수집: {len(pages)}개 페이지\n")
 
 
@@ -148,11 +150,11 @@ try:
     )
     relations = [
         {
-            "subject":   row[0] or "",
+            "subject": row[0] or "",
             "predicate": row[1] or "",
-            "object":    row[2] or "",
+            "object": row[2] or "",
             "condition": row[3] or "",
-            "url":       row[4] or "",
+            "url": row[4] or "",
         }
         for row in rel_result.result_set
     ]
@@ -218,7 +220,7 @@ REL_QA_PROMPT = """다음 지식 그래프 관계들을 보고 평가용 Q&A를 
 
 def parse_qa_response(text: str) -> list:
     """Claude 응답에서 JSON Q&A 추출"""
-    m = re.search(r'\[.*?\]', text, re.DOTALL)
+    m = re.search(r"\[.*?\]", text, re.DOTALL)
     if not m:
         return []
     try:
@@ -290,18 +292,18 @@ def verify_by_search(question: str, answer: str, search_limit: int = 7) -> bool:
         context = ""
         for h in result.points:
             p = h.payload or {}
-            context += f"[{p.get('title','')}]\n{p.get('text','')[:600]}\n\n"
+            context += f"[{p.get('title', '')}]\n{p.get('text', '')[:600]}\n\n"
 
         # 2. 답변 생성
         gen = claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=200,
-            messages=[{
-                "role": "user",
-                "content": _ANSWER_PROMPT.format(
-                    context=context[:4000], question=question
-                ),
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": _ANSWER_PROMPT.format(context=context[:4000], question=question),
+                }
+            ],
         )
         response = gen.content[0].text.strip()
 
@@ -309,15 +311,17 @@ def verify_by_search(question: str, answer: str, search_limit: int = 7) -> bool:
         judge = claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=100,
-            messages=[{
-                "role": "user",
-                "content": _SCORE_PROMPT.format(
-                    question=question, answer=answer, response=response[:500]
-                ),
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": _SCORE_PROMPT.format(
+                        question=question, answer=answer, response=response[:500]
+                    ),
+                }
+            ],
         )
         text = judge.content[0].text.strip()
-        m = re.search(r'\{.*?\}', text, re.DOTALL)
+        m = re.search(r"\{.*?\}", text, re.DOTALL)
         if m:
             verdict = json.loads(m.group()).get("verdict", "fail")
             return verdict == "pass"
@@ -336,24 +340,26 @@ cat_counts = dict.fromkeys(CATEGORY_TARGETS, 0)
 for i, page in enumerate(pages):
     # 목표 달성 시 중단 (관계 제외)
     non_rel_done = all(
-        cat_counts[c] >= CATEGORY_TARGETS[c] * 2   # 후보 2배 수집 후 선별
+        cat_counts[c] >= CATEGORY_TARGETS[c] * 2  # 후보 2배 수집 후 선별
         for c in ("담당자", "정책/규정", "문서위치", "복합")
     )
     if non_rel_done:
         break
 
-    print(f"  [{i+1}/{len(pages)}] {page['title'][:40]}", end="", flush=True)
+    print(f"  [{i + 1}/{len(pages)}] {page['title'][:40]}", end="", flush=True)
     try:
         msg = claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=600,
-            messages=[{
-                "role": "user",
-                "content": PAGE_QA_PROMPT.format(
-                    title=page["title"],
-                    text=page["text"],
-                ),
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": PAGE_QA_PROMPT.format(
+                        title=page["title"],
+                        text=page["text"],
+                    ),
+                }
+            ],
         )
         items = parse_qa_response(msg.content[0].text)
 
@@ -385,21 +391,23 @@ if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
     for chunk_start in range(0, min(len(relations), 30), 5):
         if cat_counts.get("관계", 0) >= CATEGORY_TARGETS["관계"] * 3:
             break
-        chunk = relations[chunk_start:chunk_start + 5]
+        chunk = relations[chunk_start : chunk_start + 5]
         rel_text = "\n".join(
             f"- {r['subject']} →[{r['predicate']}]→ {r['object']}"
             + (f" (조건: {r['condition']})" if r.get("condition") else "")
             for r in chunk
         )
-        print(f"  관계 묶음 [{chunk_start+1}~{chunk_start+len(chunk)}]...", end="", flush=True)
+        print(f"  관계 묶음 [{chunk_start + 1}~{chunk_start + len(chunk)}]...", end="", flush=True)
         try:
             msg = claude.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=400,
-                messages=[{
-                    "role": "user",
-                    "content": REL_QA_PROMPT.format(relations=rel_text),
-                }],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": REL_QA_PROMPT.format(relations=rel_text),
+                    }
+                ],
             )
             items = parse_qa_response(msg.content[0].text)
             verified = 0
@@ -448,10 +456,7 @@ for cat, target in CATEGORY_TARGETS.items():
             by_diff[d].append(item)
 
     # 난이도 목표 수 계산
-    diff_targets = {
-        d: max(1, round(target * ratio))
-        for d, ratio in DIFFICULTY_DIST.items()
-    }
+    diff_targets = {d: max(1, round(target * ratio)) for d, ratio in DIFFICULTY_DIST.items()}
     # 합이 target과 다르면 medium에서 보정
     diff_sum = sum(diff_targets.values())
     diff_targets["medium"] += target - diff_sum
@@ -466,19 +471,21 @@ for cat, target in CATEGORY_TARGETS.items():
     if len(selected) < target:
         remaining = [x for x in pool if x not in selected]
         random.shuffle(remaining)
-        selected.extend(remaining[:target - len(selected)])
+        selected.extend(remaining[: target - len(selected)])
 
     selected = selected[:target]
     for item in selected:
-        final_set.append({
-            "id":       f"Q{qid:02d}",
-            "category": item["category"],
-            "difficulty": item.get("difficulty", "medium"),
-            "question": item["question"],
-            "answer":   item["answer"],
-            "source_url":   item.get("source_url", ""),
-            "source_title": item.get("source_title", ""),
-        })
+        final_set.append(
+            {
+                "id": f"Q{qid:02d}",
+                "category": item["category"],
+                "difficulty": item.get("difficulty", "medium"),
+                "question": item["question"],
+                "answer": item["answer"],
+                "source_url": item.get("source_url", ""),
+                "source_title": item.get("source_title", ""),
+            }
+        )
         qid += 1
 
     print(f"  {cat:<10}: {len(selected)}개 선택 (후보 {len(pool)}개)")
@@ -490,19 +497,20 @@ print(f"\n  최종 선정: {len(final_set)}문항\n")
 Path(OUT_PATH).parent.mkdir(parents=True, exist_ok=True)
 meta = {
     "generated_at": datetime.now(UTC).isoformat(),
-    "dept":         args.dept,
-    "collection":   COLLECTION_NAME,
-    "graph":        GRAPH_NAME,
-    "total":        len(final_set),
-    "category_counts": {c: sum(1 for q in final_set if q["category"] == c)
-                        for c in CATEGORY_TARGETS},
+    "dept": args.dept,
+    "collection": COLLECTION_NAME,
+    "graph": GRAPH_NAME,
+    "total": len(final_set),
+    "category_counts": {
+        c: sum(1 for q in final_set if q["category"] == c) for c in CATEGORY_TARGETS
+    },
 }
 output = {"meta": meta, "questions": final_set}
-Path(OUT_PATH).write_text(
-    json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8"
-)
+Path(OUT_PATH).write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
 print(f"💾 저장 완료: {OUT_PATH}")
 print()
 print("  다음 단계:")
 print(f"  1. 파일 검토 및 수동 수정: {OUT_PATH}")
-print(f"  2. 평가 실행: python src/eval/evaluate.py --dept {args.dept or 'strategic'} --golden {OUT_PATH}")
+print(
+    f"  2. 평가 실행: python src/eval/evaluate.py --dept {args.dept or 'strategic'} --golden {OUT_PATH}"
+)

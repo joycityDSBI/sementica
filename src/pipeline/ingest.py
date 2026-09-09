@@ -34,7 +34,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 try:
     from db_logger import upsert_notion_page as _upsert_notion_page
 except Exception:
-    def _upsert_notion_page(*a, **kw): pass   # PostgreSQL 없으면 no-op
+
+    def _upsert_notion_page(*a, **kw):
+        pass  # PostgreSQL 없으면 no-op
+
 
 from semantica_helper import (
     classify_page,
@@ -59,31 +62,31 @@ if _env_path.exists():
             os.environ.setdefault(_k.strip(), _v.strip())
 
 # ─── 경로 설정 ────────────────────────────────────────────────────────────────
-ROOT_DIR  = Path(__file__).parent.parent.parent
-LOGS_DIR  = ROOT_DIR / "data" / "logs"
+ROOT_DIR = Path(__file__).parent.parent.parent
+LOGS_DIR = ROOT_DIR / "data" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # 하위 호환: --dept 없을 때 기존 notion_samples 사용
 _LEGACY_SAMPLES_DIR = ROOT_DIR / "data" / "notion_samples"
 
 # ─── Qdrant / FalkorDB 설정 (--dept 로 덮어씀) ───────────────────────────────
-QDRANT_URL       = os.environ.get("QDRANT_URL", "http://localhost:6333")
-FALKORDB_HOST    = os.environ.get("FALKORDB_HOST", "localhost")
-FALKORDB_PORT    = int(os.environ.get("FALKORDB_PORT", "6379"))
-COLLECTION_NAME  = "joycity_pages"   # --dept 없을 때 기본값
-GRAPH_NAME       = "joycity_kg"      # --dept 없을 때 기본값
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
+FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
+FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
+COLLECTION_NAME = "joycity_pages"  # --dept 없을 때 기본값
+GRAPH_NAME = "joycity_kg"  # --dept 없을 때 기본값
 # Vertex AI 다국어 임베딩 (한국어 지원, 768차원)
 EMBED_MODEL_NAME = "text-multilingual-embedding-002"
-EMBED_DIM        = 768
-EMBED_BATCH_SIZE = 50   # Vertex AI 배치 최대 권장 크기 (최대 250, 안전 수치 50)
+EMBED_DIM = 768
+EMBED_BATCH_SIZE = 50  # Vertex AI 배치 최대 권장 크기 (최대 250, 안전 수치 50)
 
 # ─── Vertex AI / LLM 설정 ────────────────────────────────────────────────────
-GCP_PROJECT      = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION         = os.environ.get("VERTEX_AI_LOCATION", "us-east5")    # 임베딩 리전
+GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")  # 임베딩 리전
 ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")  # Claude LLM 리전
-MODEL            = os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@default")
+MODEL = os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@default")
 # 트리플/이벤트 추출: Haiku 사용 (Sonnet 대비 3~5배 빠름, 추출 품질 충분)
-HAIKU_MODEL      = "claude-haiku-4-5@20251001"
+HAIKU_MODEL = "claude-haiku-4-5@20251001"
 
 # ─── 트리플 추출 프롬프트 ────────────────────────────────────────────────────
 EXTRACT_PROMPT = """\
@@ -212,14 +215,14 @@ EVENT_EXTRACT_PROMPT = """\
 
 
 # ─── 스레드 안전 잠금 ────────────────────────────────────────────────────────
-_qdrant_lock   = threading.Lock()   # Qdrant 동시 쓰기 보호
-_falkordb_lock = threading.Lock()   # FalkorDB 동시 쓰기 보호
+_qdrant_lock = threading.Lock()  # Qdrant 동시 쓰기 보호
+_falkordb_lock = threading.Lock()  # FalkorDB 동시 쓰기 보호
 
 # ─── 클라이언트 초기화 ────────────────────────────────────────────────────────
-_llm_client    = None
-_embed_model   = None
-_qdrant_store  = None
-_falkordb      = None
+_llm_client = None
+_embed_model = None
+_qdrant_store = None
+_falkordb = None
 
 
 def init_llm():
@@ -228,6 +231,7 @@ def init_llm():
         return True
     try:
         from anthropic import AnthropicVertex
+
         _llm_client = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
         print(f"  ✅ Claude on Vertex AI — {MODEL}")
         return True
@@ -242,6 +246,7 @@ def init_embed():
         return True
     try:
         from google import genai
+
         client = genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
         _embed_model = client
         print(f"  ✅ Vertex AI 임베딩 초기화 — {EMBED_MODEL_NAME} (dim={EMBED_DIM})")
@@ -255,6 +260,7 @@ def init_qdrant(reset: bool = False):
     global _qdrant_store
     try:
         from semantica.vector_store.qdrant_store import QdrantStore
+
         store = QdrantStore(url=QDRANT_URL)
         store.connect()
 
@@ -262,6 +268,7 @@ def init_qdrant(reset: bool = False):
             try:
                 # 기존 컬렉션 삭제 (reset 모드)
                 from qdrant_client import QdrantClient
+
                 qc = QdrantClient(url=QDRANT_URL)
                 if COLLECTION_NAME in [c.name for c in qc.get_collections().collections]:
                     qc.delete_collection(COLLECTION_NAME)
@@ -292,6 +299,7 @@ def init_falkordb(reset: bool = False):
     global _falkordb
     try:
         import falkordb as _fdb_lib
+
         db = _fdb_lib.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
 
         if reset:
@@ -319,7 +327,13 @@ def parse_md(path: Path) -> dict:
     db_properties 줄이 있으면 JSON으로 파싱해 meta에 포함합니다.
     """
     content = path.read_text(encoding="utf-8")
-    meta = {"title": path.stem, "notion_url": "", "page_id": "", "last_edited_time": "", "db_properties": {}}
+    meta = {
+        "title": path.stem,
+        "notion_url": "",
+        "page_id": "",
+        "last_edited_time": "",
+        "db_properties": {},
+    }
     body = content
     if content.startswith("---"):
         end = content.find("---", 3)
@@ -334,7 +348,7 @@ def parse_md(path: Path) -> dict:
                             meta["db_properties"] = json.loads(v)
                     else:
                         meta[k] = v
-            body = content[end + 3:].strip()
+            body = content[end + 3 :].strip()
     return {"meta": meta, "body": body, "file": str(path)}
 
 
@@ -371,7 +385,7 @@ def extract_events_from_text(text: str) -> list[dict]:
         return []
     try:
         resp = _llm_client.messages.create(
-            model=HAIKU_MODEL,   # Sonnet → Haiku (3~5배 빠름)
+            model=HAIKU_MODEL,  # Sonnet → Haiku (3~5배 빠름)
             max_tokens=1024,
             messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=text[:3000])}],
         )
@@ -383,10 +397,7 @@ def extract_events_from_text(text: str) -> list[dict]:
         raw = raw.strip()
         parsed = json.loads(raw)
         if isinstance(parsed, list):
-            return [
-                e for e in parsed
-                if isinstance(e, dict) and e.get("game") and e.get("date")
-            ]
+            return [e for e in parsed if isinstance(e, dict) and e.get("game") and e.get("date")]
         return []
     except Exception:
         return []
@@ -399,7 +410,7 @@ def extract_triplets(text: str) -> list:
     raw = ""
     try:
         resp = _llm_client.messages.create(
-            model=HAIKU_MODEL,   # Sonnet → Haiku
+            model=HAIKU_MODEL,  # Sonnet → Haiku
             max_tokens=2048,
             messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=text[:3000])}],
         )
@@ -418,21 +429,23 @@ def extract_triplets(text: str) -> list:
                 continue
             eq = (t.get("evidence_quote") or "").strip()
             if not eq:
-                continue   # evidence_quote 없는 트리플은 환각으로 간주, 제외
-            result.append({
-                "subject":        _norm_node(t.get("subject", "")),
-                "predicate":      _norm_pred(t.get("predicate", "")),
-                "object":         _norm_node(t.get("object", "")),
-                "evidence_quote": eq,
-            })
+                continue  # evidence_quote 없는 트리플은 환각으로 간주, 제외
+            result.append(
+                {
+                    "subject": _norm_node(t.get("subject", "")),
+                    "predicate": _norm_pred(t.get("predicate", "")),
+                    "object": _norm_node(t.get("object", "")),
+                    "evidence_quote": eq,
+                }
+            )
         return result
     except Exception:
         return []
 
 
 # ─── 청킹 유틸 ───────────────────────────────────────────────────────────────
-CHUNK_SIZE    = 800   # 청크 크기 (자)
-CHUNK_OVERLAP = 200   # 청크 간 겹침 (자)
+CHUNK_SIZE = 800  # 청크 크기 (자)
+CHUNK_OVERLAP = 200  # 청크 간 겹침 (자)
 
 
 def _make_chunks(text: str) -> list[str]:
@@ -457,7 +470,7 @@ def _embed_batch(chunks: list[str]) -> list[list[float]]:
     """
     all_vecs = []
     for i in range(0, len(chunks), EMBED_BATCH_SIZE):
-        batch = chunks[i:i + EMBED_BATCH_SIZE]
+        batch = chunks[i : i + EMBED_BATCH_SIZE]
         result = _embed_model.models.embed_content(
             model=EMBED_MODEL_NAME,
             contents=batch,
@@ -475,7 +488,7 @@ def store_vector(page: dict) -> int:
     body = page["body"]
     if not body.strip():
         return 0
-    meta     = page["meta"]
+    meta = page["meta"]
     base_url = meta.get("notion_url") or page["file"]
 
     chunks = _make_chunks(body)
@@ -490,19 +503,21 @@ def store_vector(page: dict) -> int:
         return 0
 
     # 2. 전체 ID·페이로드 구성
-    all_ids      = []
+    all_ids = []
     all_payloads = []
     for i, chunk in enumerate(chunks):
         all_ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, f"{base_url}#chunk{i}")))
-        all_payloads.append({
-            "title":       meta.get("title", ""),
-            "source_url":  meta.get("notion_url", ""),
-            "page_id":     meta.get("page_id", ""),
-            "text":        chunk,
-            "chunk_index": i,
-            "chunk_total": len(chunks),
-            "file":        page["file"],
-        })
+        all_payloads.append(
+            {
+                "title": meta.get("title", ""),
+                "source_url": meta.get("notion_url", ""),
+                "page_id": meta.get("page_id", ""),
+                "text": chunk,
+                "chunk_index": i,
+                "chunk_total": len(chunks),
+                "file": page["file"],
+            }
+        )
 
     # 3. 한 번에 Qdrant 저장 (락으로 동시 쓰기 보호)
     try:
@@ -552,11 +567,13 @@ def store_graph(
 
     for t in triplets:
         subj_id = get_or_create_node(t["subject"])
-        obj_id  = get_or_create_node(t["object"])
+        obj_id = get_or_create_node(t["object"])
         if subj_id < 0 or obj_id < 0:
             continue
 
-        nodes_created += 2 - list(node_cache.values()).count(subj_id) - list(node_cache.values()).count(obj_id)
+        nodes_created += (
+            2 - list(node_cache.values()).count(subj_id) - list(node_cache.values()).count(obj_id)
+        )
 
         pred = t["predicate"]
         # FalkorDB rel_type은 ASCII만 허용 → "REL" 고정, 한국어 이름은 속성으로 저장
@@ -567,7 +584,7 @@ def store_graph(
         # v2: 근거 인용문 + 실현 상태 + 청크 직접 링크
         eq = (t.get("evidence_quote") or "").strip()
         if eq:
-            rel_props["evidence_quote"]     = eq
+            rel_props["evidence_quote"] = eq
             rel_props["realization_status"] = detect_realization_status(eq)
             # evidence_chunk_id: Qdrant 청크 UUID → MCP graph_search에서 직접 조회 가능
             cid = find_evidence_chunk_id(eq, chunks or [], source_url)
@@ -605,8 +622,7 @@ def store_graph(
                     "MATCH (s)-[r:REL]->(o) "
                     "WHERE r.rel_name = $_rn AND r.source_url = $_url "
                     "RETURN id(r) LIMIT 1",
-                    {"_s": subj_id, "_o": obj_id,
-                     "_rn": rel_props["rel_name"], "_url": source_url},
+                    {"_s": subj_id, "_o": obj_id, "_rn": rel_props["rel_name"], "_url": source_url},
                 )
                 should_create = not existing.result_set
             if should_create:
@@ -639,8 +655,8 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
     # .md 파일의 db_properties frontmatter를 읽어 body를 재합성한다.
     db_props_meta = meta.get("db_properties", {})
     if db_props_meta and word_count < 30:
-        prop_text  = "\n".join(f"{k}: {v}" for k, v in db_props_meta.items())
-        body       = (prop_text + ("\n\n" + body if body.strip() else "")).strip()
+        prop_text = "\n".join(f"{k}: {v}" for k, v in db_props_meta.items())
+        body = (prop_text + ("\n\n" + body if body.strip() else "")).strip()
         word_count = len(body.split())
         if word_count > 0:
             print(f"     🔧 DB 속성에서 텍스트 합성 ({word_count} 단어)")
@@ -649,16 +665,17 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
     print(f"     URL: {meta.get('notion_url', '-')}")
 
     # ── Phase 1-① 경로 분류 ─────────────────────────────────────────────────
-    route            = classify_page(body, meta, word_count)
-    body_hash        = content_hash(body)
-    has_html_attach  = "[첨부 HTML:" in body
+    route = classify_page(body, meta, word_count)
+    body_hash = content_hash(body)
+    has_html_attach = "[첨부 HTML:" in body
     print(f"     경로: {route}")
 
     if route == "excluded":
         print("     ⚠️  excluded 판정 — 건너뜀")
         if not dry_run and meta.get("page_id"):
             _upsert_notion_page(
-                page_id=meta["page_id"], dept=dept,
+                page_id=meta["page_id"],
+                dept=dept,
                 notion_url=meta.get("notion_url", ""),
                 title=meta.get("title", ""),
                 last_edited_time=meta.get("last_edited_time"),
@@ -672,29 +689,30 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
         return {"file": str(path), "skipped": True, "reason": "excluded"}
 
     result = {
-        "file":       str(path),
-        "title":      meta.get("title", ""),
+        "file": str(path),
+        "title": meta.get("title", ""),
         "source_url": meta.get("notion_url", ""),
         "word_count": word_count,
-        "skipped":    False,
+        "skipped": False,
     }
 
     if not dry_run:
         # 1. 벡터 저장 (청킹) — defer·core 모두 실행
         chunk_count = store_vector(page)
         result["vector_stored"] = chunk_count > 0
-        result["chunk_count"]   = chunk_count
+        result["chunk_count"] = chunk_count
         print(f"     벡터: {'✅' if chunk_count > 0 else '❌'} {chunk_count}개 청크 저장")
 
         if route == "defer":
             # defer: 벡터만, LLM 추출 건너뜀
             print("     ↩️  defer 경로 — LLM 추출 생략 (정보 밀도 낮음)")
             result["triplet_count"] = 0
-            result["graph"]         = {"nodes": 0, "edges": 0}
-            result["event_count"]   = 0
+            result["graph"] = {"nodes": 0, "edges": 0}
+            result["event_count"] = 0
             if meta.get("page_id"):
                 _upsert_notion_page(
-                    page_id=meta["page_id"], dept=dept,
+                    page_id=meta["page_id"],
+                    dept=dept,
                     notion_url=meta.get("notion_url", ""),
                     title=meta.get("title", ""),
                     last_edited_time=meta.get("last_edited_time"),
@@ -718,7 +736,9 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
         _chunks_for_graph = _make_chunks(body)
         if triplets:
             with _falkordb_lock:
-                stats = store_graph(triplets, meta.get("notion_url", ""), chunks=_chunks_for_graph, reset=reset)
+                stats = store_graph(
+                    triplets, meta.get("notion_url", ""), chunks=_chunks_for_graph, reset=reset
+                )
             result["graph"] = stats
             print(f"     그래프: 노드 {stats['nodes']}개, 엣지 {stats['edges']}개 저장")
         else:
@@ -726,9 +746,9 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
             print("     그래프: 트리플 없음 — 건너뜀")
 
         # 4. 이벤트 저장 (DB 속성 우선 → 없으면 LLM 텍스트 추출)
-        source_url  = meta.get("notion_url", "")
-        db_props    = meta.get("db_properties", {})
-        ev_stored   = 0
+        source_url = meta.get("notion_url", "")
+        db_props = meta.get("db_properties", {})
+        ev_stored = 0
         skip_llm_ev = False
 
         # 4a. Notion DB 속성에서 직접 생성 (LLM 없이, 정확도 100%)
@@ -738,8 +758,8 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
                 with _falkordb_lock:
                     nid = upsert_event_node(_falkordb, ev)
                 if nid >= 0:
-                    ev_stored   += 1
-                    skip_llm_ev  = True
+                    ev_stored += 1
+                    skip_llm_ev = True
                     print(f"     이벤트: DB 속성에서 직접 생성 ({ev['game']} / {ev['date']})")
 
         # 4b. DB 속성에 이벤트 없으면 LLM으로 텍스트 추출 (API 호출, 락 불필요)
@@ -786,17 +806,25 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
 # ─── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Semantica 인제스천 파이프라인")
-    parser.add_argument("--dept",    default="",
-                        help="본부 이름 (config/departments.yaml의 key). 미지정 시 legacy 모드(data/notion_samples)")
+    parser.add_argument(
+        "--dept",
+        default="",
+        help="본부 이름 (config/departments.yaml의 key). 미지정 시 legacy 모드(data/notion_samples)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="연결 확인만 (저장 안 함)")
-    parser.add_argument("--reset",   action="store_true", help="기존 데이터 삭제 후 재인제스천")
-    parser.add_argument("--workers", type=int, default=10,
-                        help="병렬 처리 워커 수 (기본: 10). Vertex AI 쿼터에 따라 조정")
+    parser.add_argument("--reset", action="store_true", help="기존 데이터 삭제 후 재인제스천")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=10,
+        help="병렬 처리 워커 수 (기본: 10). Vertex AI 쿼터에 따라 조정",
+    )
     args = parser.parse_args()
 
     # ── 비즈니스 용어집 사전 미리 로드 (동의어 해결기 워밍업) ────────────────
     try:
         from utils.synonym_resolver import preload as _syn_preload
+
         _syn_preload()
     except Exception:
         pass  # 로드 실패해도 인제스트는 계속 진행
@@ -808,16 +836,16 @@ def main():
     if args.dept:
         sys.path.insert(0, str(Path(__file__).parent))
         from dept_config import load_dept
+
         dept_cfg = load_dept(args.dept)
         COLLECTION_NAME = dept_cfg["qdrant_collection"]
-        GRAPH_NAME      = dept_cfg["falkordb_graph"]
-        samples_dir     = dept_cfg["data_dir"] / "notion_pages"
+        GRAPH_NAME = dept_cfg["falkordb_graph"]
+        samples_dir = dept_cfg["data_dir"] / "notion_pages"
         print(f"\n  본부: {dept_cfg['name']} ({args.dept})")
         print(f"  컬렉션: {COLLECTION_NAME}  그래프: {GRAPH_NAME}")
         print(f"  데이터: {samples_dir}")
     else:
         print("\n  ⚠️  --dept 없음 → legacy 모드 (data/notion_samples, joycity_pages)")
-
 
     print("\n" + "=" * 60)
     print("🚀 Semantica 인제스천 파이프라인")
@@ -825,8 +853,8 @@ def main():
 
     # ── 클라이언트 초기화 ───────────────────────────────────────────────────
     print("\n[1/4] 클라이언트 초기화")
-    ok_llm    = init_llm()
-    ok_embed  = init_embed()
+    ok_llm = init_llm()
+    ok_embed = init_embed()
     ok_qdrant = init_qdrant(reset=args.reset) if not args.dry_run else True
     ok_falkor = init_falkordb(reset=args.reset) if not args.dry_run else True
 
@@ -835,6 +863,7 @@ def main():
         # 간단히 연결만 시도
         try:
             from qdrant_client import QdrantClient
+
             qc = QdrantClient(url=QDRANT_URL, timeout=3)
             qc.get_collections()
             print("  ✅ Qdrant 연결 확인")
@@ -843,6 +872,7 @@ def main():
 
         try:
             import redis
+
             r = redis.Redis(host=FALKORDB_HOST, port=FALKORDB_PORT, socket_timeout=3)
             r.ping()
             print("  ✅ FalkorDB 연결 확인")
@@ -851,6 +881,7 @@ def main():
 
         try:
             from google import genai
+
             client = genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
             test = client.models.embed_content(model=EMBED_MODEL_NAME, contents=["테스트"])
             print(f"  ✅ Vertex AI 임베딩 확인 (dim={len(test.embeddings[0].values)})")
@@ -865,8 +896,11 @@ def main():
         sys.exit(1)
 
     # ── 파일 목록 수집 ──────────────────────────────────────────────────────
-    md_files = [f for f in samples_dir.glob("*.md")
-                if f.name not in ("README.md", "golden_set.md", "fetch_summary.json")]
+    md_files = [
+        f
+        for f in samples_dir.glob("*.md")
+        if f.name not in ("README.md", "golden_set.md", "fetch_summary.json")
+    ]
     md_files.sort()
 
     print(f"\n[2/4] 인제스천 대상: {len(md_files)}개 파일")
@@ -876,11 +910,14 @@ def main():
     workers = args.workers
     print(f"\n[3/4] 페이지 인제스천 시작 (워커: {workers}개 병렬)")
     print(f"       임베딩: 배치 {EMBED_BATCH_SIZE}개씩 / 트리플: Haiku / DB 쓰기: 락 보호")
-    results  = []
+    results = []
     _t_start = time.time()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(ingest_page, f, args.dry_run, args.dept, args.reset): f for f in md_files}
+        futures = {
+            executor.submit(ingest_page, f, args.dry_run, args.dept, args.reset): f
+            for f in md_files
+        }
         for done, future in enumerate(as_completed(futures), start=1):
             f = futures[future]
             try:
@@ -898,13 +935,13 @@ def main():
     # ── 결과 요약 ────────────────────────────────────────────────────────────
     print("\n[4/4] 결과 요약")
     print("=" * 60)
-    stored      = [r for r in results if not r.get("skipped") and r.get("vector_stored")]
-    skipped     = [r for r in results if r.get("skipped")]
-    total_chunks= sum(r.get("chunk_count", 0) for r in results)
-    total_tri   = sum(r.get("triplet_count", 0) for r in results)
-    total_nod   = sum(r.get("graph", {}).get("nodes", 0) for r in results)
-    total_edg   = sum(r.get("graph", {}).get("edges", 0) for r in results)
-    total_ev    = sum(r.get("event_count", 0) for r in results)
+    stored = [r for r in results if not r.get("skipped") and r.get("vector_stored")]
+    skipped = [r for r in results if r.get("skipped")]
+    total_chunks = sum(r.get("chunk_count", 0) for r in results)
+    total_tri = sum(r.get("triplet_count", 0) for r in results)
+    total_nod = sum(r.get("graph", {}).get("nodes", 0) for r in results)
+    total_edg = sum(r.get("graph", {}).get("edges", 0) for r in results)
+    total_ev = sum(r.get("event_count", 0) for r in results)
 
     print(f"  페이지:  {len(stored)}/{len(md_files)} 저장 완료")
     print(f"  청크:    {total_chunks}개 벡터 저장 (800자 단위, 200자 겹침)")

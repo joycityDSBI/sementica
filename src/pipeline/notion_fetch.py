@@ -41,8 +41,8 @@ try:
 except ImportError:
     raise SystemExit("httpx가 필요합니다: pip install httpx") from None
 
-NOTION_VERSION   = "2022-06-28"
-RATE_LIMIT_DELAY = 0.34   # 3 req/s 준수
+NOTION_VERSION = "2022-06-28"
+RATE_LIMIT_DELAY = 0.34  # 3 req/s 준수
 
 
 # ─── Notion API 헬퍼 ─────────────────────────────────────────────────────────
@@ -99,8 +99,10 @@ def fetch_all_pages(client: httpx.Client, token: str, limit: int = 0) -> list:
 
         results = data.get("results", [])
         pages.extend(results)
-        print(f"  페이지 {page_num}: {len(results)}개 수집 (누적 {len(pages)}개)"
-              + (f" / 목표 {limit}개" if limit else ""))
+        print(
+            f"  페이지 {page_num}: {len(results)}개 수집 (누적 {len(pages)}개)"
+            + (f" / 목표 {limit}개" if limit else "")
+        )
 
         if not data.get("has_more"):
             break
@@ -148,9 +150,9 @@ def query_database(
     Returns:
         Notion page 객체 목록 (각 항목은 page 객체, db_properties 포함)
     """
-    items  = []
+    items = []
     cursor = None
-    batch  = 1
+    batch = 1
     # 하이픈 제거 — API는 양쪽 포맷을 허용하지만 일관성 유지
     db_id = database_id.replace("-", "")
 
@@ -211,11 +213,11 @@ def blocks_to_text(blocks: list, depth: int = 0) -> str:
     """블록 → 마크다운 텍스트"""
     lines = []
     for block in blocks:
-        btype   = block.get("type", "")
+        btype = block.get("type", "")
         content = block.get(btype, {})
-        rich    = content.get("rich_text", [])
-        text    = "".join(t.get("plain_text", "") for t in rich)
-        indent  = "  " * depth
+        rich = content.get("rich_text", [])
+        text = "".join(t.get("plain_text", "") for t in rich)
+        indent = "  " * depth
 
         if btype == "paragraph":
             if text:
@@ -261,13 +263,32 @@ class _HTMLStripper(HTMLParser):
     # _skip_depth가 증가만 하고 감소하지 않아 이후 모든 body 내용이 스킵됩니다.
     # → script/style/head/noscript/template만 스킵 (void 요소 제외)
     _SKIP_TAGS: ClassVar[set] = {
-        "script", "style", "head", "noscript", "template",
+        "script",
+        "style",
+        "head",
+        "noscript",
+        "template",
     }
     _BLOCK_TAGS: ClassVar[set] = {
-        "p", "div", "br", "tr", "li",
-        "h1", "h2", "h3", "h4", "h5", "h6",
-        "table", "thead", "tbody", "section",
-        "article", "header", "footer", "blockquote",
+        "p",
+        "div",
+        "br",
+        "tr",
+        "li",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "table",
+        "thead",
+        "tbody",
+        "section",
+        "article",
+        "header",
+        "footer",
+        "blockquote",
     }
 
     def __init__(self):
@@ -293,7 +314,7 @@ class _HTMLStripper(HTMLParser):
 
     def result(self) -> str:
         raw = "".join(self._parts)
-        raw = re.sub(r"[ \t]+", " ", raw)        # 연속 공백 → 단일 스페이스
+        raw = re.sub(r"[ \t]+", " ", raw)  # 연속 공백 → 단일 스페이스
         raw = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", raw)  # 3줄 이상 → 2줄
         return raw.strip()
 
@@ -352,10 +373,10 @@ def _extract_attached_html(client, block: dict) -> str:
     Returns:
         추출된 평문 텍스트. HTML이 아니거나 다운로드 실패 시 "".
     """
-    btype   = block.get("type", "")
+    btype = block.get("type", "")
     content = block.get(btype, {})
 
-    is_html_by_name  = False
+    is_html_by_name = False
     is_notion_s3_emb = False
 
     if btype == "file":
@@ -366,7 +387,7 @@ def _extract_attached_html(client, block: dict) -> str:
             return ""
         is_html_by_name = True
         inner = content.get("file") or content.get("external") or {}
-        url   = inner.get("url", "")
+        url = inner.get("url", "")
 
     elif btype == "embed":
         url = content.get("url", "")
@@ -376,7 +397,7 @@ def _extract_attached_html(client, block: dict) -> str:
         if is_s3:
             is_notion_s3_emb = True
         elif not (url_lower.endswith(".html") or url_lower.endswith(".htm")):
-            return ""   # YouTube 등 일반 외부 embed — 건너뜀
+            return ""  # YouTube 등 일반 외부 embed — 건너뜀
     else:
         return ""
 
@@ -394,7 +415,7 @@ def _extract_attached_html(client, block: dict) -> str:
         elif is_notion_s3_emb:
             # Notion S3 embed: 실제 내용으로 HTML 여부 판단
             if not _is_html_content(resp):
-                return ""   # 이미지·PDF·XML 오류 응답 등 — 건너뜀
+                return ""  # 이미지·PDF·XML 오류 응답 등 — 건너뜀
         else:
             # 외부 .html URL embed
             ctype = resp.headers.get("content-type", "").lower()
@@ -428,7 +449,7 @@ def _table_to_md(client, token, table_block: dict) -> str:
 
     lines = []
     for i, row in enumerate(rows):
-        cells      = row.get("table_row", {}).get("cells", [])
+        cells = row.get("table_row", {}).get("cells", [])
         cell_texts = [" ".join(t.get("plain_text", "") for t in cell) for cell in cells]
         lines.append("| " + " | ".join(cell_texts) + " |")
         # 헤더 행 다음 구분선 삽입
@@ -495,53 +516,64 @@ def fetch_blocks_recursive(client, token, block_id, depth=0, max_depth=4) -> str
 # 각 함수는 val 딕셔너리를 받아 추출된 값 또는 None(미설정) 반환.
 # checkbox는 False도 의미 있는 값이므로 항상 반환.
 
+
 def _prop_select(val: dict):
     sel = val.get("select")
     return sel["name"] if sel else None
+
 
 def _prop_multi_select(val: dict):
     items = val.get("multi_select", [])
     return [s["name"] for s in items] or None
 
+
 def _prop_date(val: dict):
     dt = val.get("date")
     return dt["start"][:10] if dt and dt.get("start") else None  # YYYY-MM-DD
 
+
 def _prop_people(val: dict):
     people = val.get("people", [])
-    names  = [p.get("name", "") for p in people if p.get("name")]
+    names = [p.get("name", "") for p in people if p.get("name")]
     return names or None
+
 
 def _prop_rich_text(val: dict):
     texts = val.get("rich_text", [])
     return "".join(t.get("plain_text", "") for t in texts).strip() or None
 
+
 def _prop_number(val: dict):
     return val.get("number")  # 0도 유효한 값; None이면 미설정
+
 
 def _prop_checkbox(val: dict):
     return val.get("checkbox", False)  # False도 의미 있는 값
 
+
 def _prop_url(val: dict):
     return val.get("url") or None
+
 
 def _prop_email(val: dict):
     return val.get("email") or None
 
+
 def _prop_phone(val: dict):
     return val.get("phone_number") or None
 
+
 # relation은 ID만 있어 이름이 없으므로 생략
 _PROP_EXTRACTORS: dict = {
-    "select":       _prop_select,
+    "select": _prop_select,
     "multi_select": _prop_multi_select,
-    "date":         _prop_date,
-    "people":       _prop_people,
-    "rich_text":    _prop_rich_text,
-    "number":       _prop_number,
-    "checkbox":     _prop_checkbox,
-    "url":          _prop_url,
-    "email":        _prop_email,
+    "date": _prop_date,
+    "people": _prop_people,
+    "rich_text": _prop_rich_text,
+    "number": _prop_number,
+    "checkbox": _prop_checkbox,
+    "url": _prop_url,
+    "email": _prop_email,
     "phone_number": _prop_phone,
 }
 
@@ -558,7 +590,7 @@ def extract_db_properties(page: dict) -> dict:
     Returns:
         {"게임명": "POTC", "이벤트날짜": "2026-04-12", "담당자": ["김도형"], ...}
     """
-    props  = page.get("properties", {})
+    props = page.get("properties", {})
     result = {}
 
     for key, val in props.items():
@@ -591,7 +623,7 @@ def page_title(page: dict) -> str:
     for val in props.values():
         if val.get("type") == "title":
             rt = val.get("title", [])
-            t  = "".join(t.get("plain_text", "") for t in rt).strip()
+            t = "".join(t.get("plain_text", "") for t in rt).strip()
             if t:
                 return t
     return page.get("id", "untitled")
@@ -602,19 +634,18 @@ def safe_filename(title: str) -> str:
 
 
 # ─── 페이지 저장 ──────────────────────────────────────────────────────────────
-def save_page(client, token, page, idx, output_dir: Path,
-              min_words: int = 30) -> dict:
+def save_page(client, token, page, idx, output_dir: Path, min_words: int = 30) -> dict:
     """Notion 페이지를 .md 로 저장합니다.
 
     Args:
         min_words: 이 단어 수 미만인 페이지는 .md 파일을 저장하지 않고 건너뜁니다.
                    기본값 30. --min-words CLI 인수로 조정 가능.
     """
-    page_id      = page["id"].replace("-", "")
-    title        = page_title(page)
-    url          = page.get("url", "")
-    last_edited  = page.get("last_edited_time", "")   # ISO 8601 문자열
-    db_props     = extract_db_properties(page)   # DB 항목이면 속성 추출, 일반 페이지면 {}
+    page_id = page["id"].replace("-", "")
+    title = page_title(page)
+    url = page.get("url", "")
+    last_edited = page.get("last_edited_time", "")  # ISO 8601 문자열
+    db_props = extract_db_properties(page)  # DB 항목이면 속성 추출, 일반 페이지면 {}
 
     print(f"  [{idx:03d}] {title[:60]}")
     print(f"        {url}")
@@ -622,7 +653,7 @@ def save_page(client, token, page, idx, output_dir: Path,
         print(f"        DB 속성: {list(db_props.keys())}")
 
     try:
-        text       = fetch_blocks_recursive(client, token, page_id)
+        text = fetch_blocks_recursive(client, token, page_id)
         word_count = len(text.split())
 
         # ── DB 항목: page body가 비어있으면 속성값에서 텍스트 합성 ──────────
@@ -630,8 +661,8 @@ def save_page(client, token, page, idx, output_dir: Path,
         # 이 경우 속성값을 줄글로 합성해 벡터 임베딩과 LLM 추출에 활용한다.
         if db_props and word_count < min_words:
             prop_lines = [f"{k}: {v}" for k, v in db_props.items()]
-            prop_text  = "\n".join(prop_lines)
-            text       = (prop_text + ("\n\n" + text if text.strip() else "")).strip()
+            prop_text = "\n".join(prop_lines)
+            text = (prop_text + ("\n\n" + text if text.strip() else "")).strip()
             word_count = len(text.split())
             if word_count >= min_words:
                 print(f"        🔧 DB 속성에서 텍스트 합성 ({word_count} 단어)")
@@ -642,9 +673,17 @@ def save_page(client, token, page, idx, output_dir: Path,
         effective_min = 1 if db_props else min_words
         if word_count < effective_min:
             print(f"        ⏭️  건너뜀: {word_count} 단어 (최소 {effective_min} 단어 미만)")
-            return {"idx": idx, "title": title, "url": url, "page_id": page_id,
-                    "word_count": word_count, "file": None, "meaningful": False,
-                    "db_properties": db_props, "skip_reason": "텍스트 부족"}
+            return {
+                "idx": idx,
+                "title": title,
+                "url": url,
+                "page_id": page_id,
+                "word_count": word_count,
+                "file": None,
+                "meaningful": False,
+                "db_properties": db_props,
+                "skip_reason": "텍스트 부족",
+            }
 
         # frontmatter 구성 — DB 속성이 있으면 db_properties 줄 추가
         frontmatter = (
@@ -658,14 +697,21 @@ def save_page(client, token, page, idx, output_dir: Path,
             frontmatter += f"db_properties: {json.dumps(db_props, ensure_ascii=False)}\n"
         frontmatter += "---\n\n"
 
-        fname    = f"{idx:03d}_{safe_filename(title)}.md"
+        fname = f"{idx:03d}_{safe_filename(title)}.md"
         out_path = output_dir / fname
         out_path.write_text(frontmatter + text, encoding="utf-8")
 
         print(f"        저장: {fname} ({word_count} 단어) ✅")
-        return {"idx": idx, "title": title, "url": url, "page_id": page_id,
-                "word_count": word_count, "file": str(out_path), "meaningful": True,
-                "db_properties": db_props}
+        return {
+            "idx": idx,
+            "title": title,
+            "url": url,
+            "page_id": page_id,
+            "word_count": word_count,
+            "file": str(out_path),
+            "meaningful": True,
+            "db_properties": db_props,
+        }
     except Exception as e:
         print(f"        ❌ 오류: {e}")
         return {"idx": idx, "title": title, "url": url, "meaningful": False, "error": str(e)}
@@ -674,23 +720,36 @@ def save_page(client, token, page, idx, output_dir: Path,
 # ─── 메인 ─────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Notion 페이지 전체 수집기 (멀티 본부 지원)")
-    parser.add_argument("--dept",       default="strategic",
-                        help="본부 이름 (config/departments.yaml 의 key, 기본: strategic)")
-    parser.add_argument("--search",     default="",
-                        help="검색어 지정 시 해당 키워드 페이지만 수집 (미지정 시 전체 수집)")
-    parser.add_argument("--page-id",    help="특정 페이지 ID 직접 지정")
-    parser.add_argument("--list-depts", action="store_true",
-                        help="사용 가능한 본부 목록 출력 후 종료")
-    parser.add_argument("--limit",      type=int, default=0,
-                        help="수집 최대 페이지 수 (0=무제한, 기본: 0)")
-    parser.add_argument("--min-words",  type=int, default=30,
-                        help="저장할 최소 단어 수 (기본: 30). 미만인 페이지는 .md 파일을 만들지 않음")
+    parser.add_argument(
+        "--dept",
+        default="strategic",
+        help="본부 이름 (config/departments.yaml 의 key, 기본: strategic)",
+    )
+    parser.add_argument(
+        "--search",
+        default="",
+        help="검색어 지정 시 해당 키워드 페이지만 수집 (미지정 시 전체 수집)",
+    )
+    parser.add_argument("--page-id", help="특정 페이지 ID 직접 지정")
+    parser.add_argument(
+        "--list-depts", action="store_true", help="사용 가능한 본부 목록 출력 후 종료"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=0, help="수집 최대 페이지 수 (0=무제한, 기본: 0)"
+    )
+    parser.add_argument(
+        "--min-words",
+        type=int,
+        default=30,
+        help="저장할 최소 단어 수 (기본: 30). 미만인 페이지는 .md 파일을 만들지 않음",
+    )
     args = parser.parse_args()
 
     # 본부 목록 출력
     if args.list_depts:
         sys.path.insert(0, str(Path(__file__).parent))
         from dept_config import list_depts
+
         depts = list_depts()
         print("사용 가능한 본부:")
         for d in depts:
@@ -700,9 +759,10 @@ def main():
     # 본부 설정 로드
     sys.path.insert(0, str(Path(__file__).parent))
     from dept_config import load_dept
+
     dept_cfg = load_dept(args.dept)
 
-    token      = dept_cfg["notion_token"]
+    token = dept_cfg["notion_token"]
     output_dir = dept_cfg["data_dir"] / "notion_pages"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -748,7 +808,7 @@ def main():
                 print(f"\n📂 Notion DB 직접 쿼리 ({len(notion_databases)}개 DB)")
                 offset = len(results)
                 for db_entry in notion_databases:
-                    db_id   = db_entry["id"] if isinstance(db_entry, dict) else str(db_entry)
+                    db_id = db_entry["id"] if isinstance(db_entry, dict) else str(db_entry)
                     db_name = db_entry.get("name", db_id) if isinstance(db_entry, dict) else db_id
                     print(f"\n  🗄️  {db_name} ({db_id})")
                     try:
@@ -756,8 +816,9 @@ def main():
                         print(f"     총 {len(db_items)}개 항목")
                         for j, item in enumerate(db_items, 1):
                             results.append(
-                                save_page(client, token, item, offset + j,
-                                          output_dir, min_words=min_words)
+                                save_page(
+                                    client, token, item, offset + j, output_dir, min_words=min_words
+                                )
                             )
                             print()
                         offset += len(db_items)
@@ -765,9 +826,9 @@ def main():
                         print(f"     ❌ DB 쿼리 실패: {e}")
 
     # 결과 요약
-    meaningful   = [r for r in results if r.get("meaningful")]
+    meaningful = [r for r in results if r.get("meaningful")]
     skipped_text = [r for r in results if r.get("skip_reason") == "텍스트 부족"]
-    errored      = [r for r in results if r.get("error")]
+    errored = [r for r in results if r.get("error")]
 
     print("\n" + "=" * 60)
     print(f"📊 수집 완료 — {dept_cfg['name']}")
@@ -781,13 +842,17 @@ def main():
     # 요약 저장
     summary_path = output_dir / "fetch_summary.json"
     summary_path.write_text(
-        json.dumps({
-            "dept": args.dept,
-            "name": dept_cfg["name"],
-            "total": len(results),
-            "meaningful": len(meaningful),
-            "results": results,
-        }, ensure_ascii=False, indent=2),
+        json.dumps(
+            {
+                "dept": args.dept,
+                "name": dept_cfg["name"],
+                "total": len(results),
+                "meaningful": len(meaningful),
+                "results": results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
     print(f"\n결과: {summary_path}")

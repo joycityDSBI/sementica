@@ -36,8 +36,8 @@ ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT / "src" / "pipeline"))
 sys.path.insert(0, str(ROOT / "src" / "ops"))
 
-POSTGRES_URL  = os.environ.get("POSTGRES_URL", "")
-QDRANT_URL    = os.environ.get("QDRANT_URL", "http://localhost:6333")
+POSTGRES_URL = os.environ.get("POSTGRES_URL", "")
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 
@@ -50,9 +50,7 @@ except ImportError:
     raise SystemExit("pip install fastapi uvicorn") from None
 
 app = FastAPI(title="Semantica Ops", version="1.0")
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ─── 잡 저장소 ────────────────────────────────────────────────────────────────
 _jobs: dict[str, dict] = {}
@@ -90,16 +88,16 @@ def _load_jobs_history() -> None:
             if not jid or jid in _jobs:
                 continue
             if entry.get("status") == "running":
-                entry["status"]     = "error"   # 재시작으로 인한 강제 중단
+                entry["status"] = "error"  # 재시작으로 인한 강제 중단
                 entry["returncode"] = -1
-            entry.setdefault("proc",  None)
+            entry.setdefault("proc", None)
             entry.setdefault("lines", [])
             _jobs[jid] = entry
     except Exception:
         pass
 
 
-_load_jobs_history()   # 앱 기동 시 이전 이력 복원
+_load_jobs_history()  # 앱 기동 시 이전 이력 복원
 
 
 # ─── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -108,6 +106,7 @@ def _pg_conn():
         return None
     try:
         import psycopg2
+
         return psycopg2.connect(POSTGRES_URL)
     except Exception:
         return None
@@ -138,6 +137,7 @@ def _rows(cur) -> list[dict]:
 def api_depts():
     try:
         from dept_config import list_depts
+
         return {"depts": list_depts()}
     except Exception:
         return {"depts": ["strategic"]}
@@ -147,7 +147,9 @@ def api_depts():
 @app.get("/api/status")
 def api_status():
     out: dict = {
-        "postgres": False, "qdrant": False, "falkordb": False,
+        "postgres": False,
+        "qdrant": False,
+        "falkordb": False,
         "timestamp": datetime.now(UTC).isoformat(),
     }
     conn = _pg_conn()
@@ -156,6 +158,7 @@ def api_status():
         conn.close()
     try:
         from qdrant_client import QdrantClient
+
         cols = QdrantClient(url=QDRANT_URL, timeout=3).get_collections().collections
         out["qdrant"] = True
         out["qdrant_collections"] = [c.name for c in cols]
@@ -163,6 +166,7 @@ def api_status():
         pass
     try:
         import redis as _r
+
         _r.Redis(host=FALKORDB_HOST, port=FALKORDB_PORT, socket_timeout=3).ping()
         out["falkordb"] = True
     except Exception:
@@ -173,18 +177,25 @@ def api_status():
 # ─── 페이지 현황 ──────────────────────────────────────────────────────────────
 @app.get("/api/pages")
 def api_pages(
-    dept:     str = "strategic",
-    page:     int = 1,
+    dept: str = "strategic",
+    page: int = 1,
     per_page: int = 200,
-    search:   str = "",
+    search: str = "",
 ):
     conn = _pg_conn()
     if not conn:
-        return {"error": "PostgreSQL 없음", "pages": [], "stats": {}, "totals": {},
-                "total_count": 0, "page": page, "per_page": per_page}
+        return {
+            "error": "PostgreSQL 없음",
+            "pages": [],
+            "stats": {},
+            "totals": {},
+            "total_count": 0,
+            "page": page,
+            "per_page": per_page,
+        }
     try:
         offset = (max(page, 1) - 1) * per_page
-        like   = f"%{search}%" if search else None
+        like = f"%{search}%" if search else None
 
         # 상태별 집계 (검색어 무관 — 전체 기준)
         with conn.cursor() as cur:
@@ -203,19 +214,19 @@ def api_pages(
             )
             row = cur.fetchone()
             totals = {
-                "chunks":   int(row[0] or 0),
+                "chunks": int(row[0] or 0),
                 "triplets": int(row[1] or 0),
-                "events":   int(row[2] or 0),
+                "events": int(row[2] or 0),
             }
 
         # 검색 조건
         if like:
-            where  = "dept=%s AND title ILIKE %s"
-            p_cnt  = (dept, like)
+            where = "dept=%s AND title ILIKE %s"
+            p_cnt = (dept, like)
             p_list = (dept, like, per_page, offset)
         else:
-            where  = "dept=%s"
-            p_cnt  = (dept,)
+            where = "dept=%s"
+            p_cnt = (dept,)
             p_list = (dept, per_page, offset)
 
         with conn.cursor() as cur:
@@ -236,17 +247,24 @@ def api_pages(
 
         conn.close()
         return {
-            "pages":       pages,
-            "stats":       stats,
-            "totals":      totals,
+            "pages": pages,
+            "stats": stats,
+            "totals": totals,
             "total_count": total_count,
-            "page":        page,
-            "per_page":    per_page,
+            "page": page,
+            "per_page": per_page,
         }
     except Exception as e:
         conn.close()
-        return {"error": str(e), "pages": [], "stats": {}, "totals": {},
-                "total_count": 0, "page": page, "per_page": per_page}
+        return {
+            "error": str(e),
+            "pages": [],
+            "stats": {},
+            "totals": {},
+            "total_count": 0,
+            "page": page,
+            "per_page": per_page,
+        }
 
 
 # ─── sync 이력 ────────────────────────────────────────────────────────────────
@@ -310,16 +328,19 @@ def api_mcp_log(dept: str = "strategic", limit: int = 50):
 def api_qdrant_stats():
     try:
         from qdrant_client import QdrantClient
+
         qc = QdrantClient(url=QDRANT_URL, timeout=5)
         result = []
         for c in qc.get_collections().collections:
             info = qc.get_collection(c.name)
-            result.append({
-                "name": c.name,
-                "points": info.points_count or 0,
-                "vectors": info.vectors_count or 0,
-                "status": str(info.status),
-            })
+            result.append(
+                {
+                    "name": c.name,
+                    "points": info.points_count or 0,
+                    "vectors": info.vectors_count or 0,
+                    "status": str(info.status),
+                }
+            )
         return {"collections": result}
     except Exception as e:
         return {"error": str(e), "collections": []}
@@ -331,9 +352,11 @@ def api_qdrant_chunks(page_id: str, dept: str = "strategic"):
     """특정 page_id에 속한 모든 Qdrant 청크를 chunk_index 순으로 반환."""
     try:
         from dept_config import load_dept
+
         collection = load_dept(dept)["qdrant_collection"]
         from qdrant_client import QdrantClient
         from qdrant_client.models import FieldCondition, Filter, MatchValue
+
         qc = QdrantClient(url=QDRANT_URL, timeout=10)
         results, _ = qc.scroll(
             collection_name=collection,
@@ -347,17 +370,23 @@ def api_qdrant_chunks(page_id: str, dept: str = "strategic"):
         chunks = []
         for point in results:
             p = point.payload or {}
-            chunks.append({
-                "id":          str(point.id),
-                "chunk_index": p.get("chunk_index", 0),
-                "chunk_total": p.get("chunk_total", 0),
-                "text":        p.get("text", ""),
-                "title":       p.get("title", ""),
-                "source_url":  p.get("source_url", ""),
-            })
+            chunks.append(
+                {
+                    "id": str(point.id),
+                    "chunk_index": p.get("chunk_index", 0),
+                    "chunk_total": p.get("chunk_total", 0),
+                    "text": p.get("text", ""),
+                    "title": p.get("title", ""),
+                    "source_url": p.get("source_url", ""),
+                }
+            )
         chunks.sort(key=lambda x: x["chunk_index"])
-        return {"page_id": page_id, "collection": collection,
-                "count": len(chunks), "chunks": chunks}
+        return {
+            "page_id": page_id,
+            "collection": collection,
+            "count": len(chunks),
+            "chunks": chunks,
+        }
     except Exception as e:
         return {"error": str(e), "chunks": []}
 
@@ -367,18 +396,22 @@ def api_qdrant_chunks(page_id: str, dept: str = "strategic"):
 def api_graph_stats(dept: str = "strategic"):
     try:
         from dept_config import load_dept
+
         graph_name = load_dept(dept)["falkordb_graph"]
         import falkordb as fdb
+
         g = fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT).select_graph(graph_name)
+
         def _q(cypher):
             r = g.query(cypher)
             return r.result_set[0][0] if r.result_set else 0
+
         return {
-            "graph":   graph_name,
-            "nodes":   _q("MATCH (n) RETURN count(n)"),
-            "edges":   _q("MATCH ()-[r]->() RETURN count(r)"),
-            "events":  _q("MATCH (e:Event) RETURN count(e)"),
-            "games":   _q("MATCH (g:Game) RETURN count(g)"),
+            "graph": graph_name,
+            "nodes": _q("MATCH (n) RETURN count(n)"),
+            "edges": _q("MATCH ()-[r]->() RETURN count(r)"),
+            "events": _q("MATCH (e:Event) RETURN count(e)"),
+            "games": _q("MATCH (g:Game) RETURN count(g)"),
             "decisions": _q("MATCH (d:Decision) RETURN count(d)"),
         }
     except Exception as e:
@@ -387,22 +420,22 @@ def api_graph_stats(dept: str = "strategic"):
 
 # ─── 배치 실행 ────────────────────────────────────────────────────────────────
 _BATCH_CMDS = {
-    "fetch":        ("src/pipeline/notion_fetch.py", []),
-    "ingest":       ("src/pipeline/ingest.py",       []),
-    "ingest_reset": ("src/pipeline/ingest.py",       ["--reset"]),
-    "sync":         ("src/pipeline/sync.py",         []),
-    "sync_full":    ("src/pipeline/sync.py",         ["--full"]),
-    "sync_dry":     ("src/pipeline/sync.py",         ["--dry-run"]),
-    "reconcile":    ("src/pipeline/sync.py",         ["--reconcile"]),
+    "fetch": ("src/pipeline/notion_fetch.py", []),
+    "ingest": ("src/pipeline/ingest.py", []),
+    "ingest_reset": ("src/pipeline/ingest.py", ["--reset"]),
+    "sync": ("src/pipeline/sync.py", []),
+    "sync_full": ("src/pipeline/sync.py", ["--full"]),
+    "sync_dry": ("src/pipeline/sync.py", ["--dry-run"]),
+    "reconcile": ("src/pipeline/sync.py", ["--reconcile"]),
 }
 _BATCH_LABELS = {
-    "fetch":        "Notion 전체 수집",
-    "ingest":       "인제스천",
+    "fetch": "Notion 전체 수집",
+    "ingest": "인제스천",
     "ingest_reset": "인제스천 (전체 초기화)",
-    "sync":         "증분 동기화",
-    "sync_full":    "전체 재동기화",
-    "sync_dry":     "동기화 Dry-run",
-    "reconcile":    "삭제 페이지 정리",
+    "sync": "증분 동기화",
+    "sync_full": "전체 재동기화",
+    "sync_dry": "동기화 Dry-run",
+    "reconcile": "삭제 페이지 정리",
 }
 
 
@@ -424,28 +457,32 @@ def batch_run(req: BatchRequest):
 
     script, extra = _BATCH_CMDS[req.type]
     venv_py = ROOT / ".venv" / "bin" / "python"
-    python  = str(venv_py) if venv_py.exists() else sys.executable
-    cmd     = [python, script, "--dept", req.dept, *extra]
+    python = str(venv_py) if venv_py.exists() else sys.executable
+    cmd = [python, script, "--dept", req.dept, *extra]
 
     try:
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, cwd=str(ROOT),
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd=str(ROOT),
         )
     except Exception as e:
         raise HTTPException(500, str(e)) from e
 
     job_id = str(uuid.uuid4())[:8]
     job = {
-        "job_id":     job_id,
-        "proc":       proc,
-        "lines":      [],
-        "status":     "running",
+        "job_id": job_id,
+        "proc": proc,
+        "lines": [],
+        "status": "running",
         "started_at": datetime.now(UTC).isoformat(),
-        "cmd":        " ".join(cmd),
-        "type":       req.type,
-        "label":      _BATCH_LABELS.get(req.type, req.type),
-        "dept":       req.dept,
+        "cmd": " ".join(cmd),
+        "type": req.type,
+        "label": _BATCH_LABELS.get(req.type, req.type),
+        "dept": req.dept,
     }
     _jobs[job_id] = job
 
@@ -454,10 +491,10 @@ def batch_run(req: BatchRequest):
             _jobs[job_id]["lines"].append(line.rstrip("\n"))
         proc.wait()
         rc = proc.returncode
-        _jobs[job_id]["status"]      = "done" if rc == 0 else "error"
-        _jobs[job_id]["returncode"]  = rc
+        _jobs[job_id]["status"] = "done" if rc == 0 else "error"
+        _jobs[job_id]["returncode"] = rc
         _jobs[job_id]["finished_at"] = datetime.now(UTC).isoformat()
-        _persist_job(_jobs[job_id])   # 완료 즉시 파일에 영속화
+        _persist_job(_jobs[job_id])  # 완료 즉시 파일에 영속화
 
     threading.Thread(target=_read, daemon=True).start()
     return {"job_id": job_id, "label": job["label"]}
@@ -469,9 +506,9 @@ def batch_output(job_id: str, from_line: int = 0):
     if not job:
         raise HTTPException(404, "잡을 찾을 수 없습니다.")
     return {
-        "lines":      job["lines"][from_line:],
-        "total":      len(job["lines"]),
-        "status":     job["status"],
+        "lines": job["lines"][from_line:],
+        "total": len(job["lines"]),
+        "status": job["status"],
         "returncode": job.get("returncode"),
     }
 
@@ -484,7 +521,7 @@ def batch_cancel(job_id: str):
     if job["status"] == "running":
         job["proc"].terminate()
         job["status"] = "cancelled"
-        _persist_job(job)   # 취소 이력도 영속화
+        _persist_job(job)  # 취소 이력도 영속화
     return {"status": job["status"]}
 
 
@@ -500,7 +537,7 @@ def list_jobs():
 # ─── 검색 테스트 ──────────────────────────────────────────────────────────────
 class SearchRequest(BaseModel):
     query: str
-    dept:  str = "strategic"
+    dept: str = "strategic"
     limit: int = 5
 
 
@@ -508,9 +545,11 @@ class SearchRequest(BaseModel):
 def search_test(req: SearchRequest):
     try:
         from dept_config import load_dept
+
         collection = load_dept(req.dept)["qdrant_collection"]
 
         from google import genai
+
         embed_client = genai.Client(
             project=os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
             location=os.environ.get("VERTEX_AI_LOCATION", "us-east5"),
@@ -522,6 +561,7 @@ def search_test(req: SearchRequest):
         vec = list(res.embeddings[0].values)
 
         from qdrant_client import QdrantClient
+
         result = QdrantClient(url=QDRANT_URL).query_points(
             collection_name=collection,
             query=vec,
@@ -530,13 +570,13 @@ def search_test(req: SearchRequest):
         )
         hits = result.points
         return {
-            "query":   req.query,
+            "query": req.query,
             "results": [
                 {
-                    "score":       round(h.score, 4),
-                    "title":       h.payload.get("title", ""),
-                    "source_url":  h.payload.get("source_url", ""),
-                    "text":        h.payload.get("text", "")[:400],
+                    "score": round(h.score, 4),
+                    "title": h.payload.get("title", ""),
+                    "source_url": h.payload.get("source_url", ""),
+                    "text": h.payload.get("text", "")[:400],
                     "chunk_index": h.payload.get("chunk_index", 0),
                     "chunk_total": h.payload.get("chunk_total", 0),
                 }
@@ -549,11 +589,11 @@ def search_test(req: SearchRequest):
 
 # ─── 골든셋 ──────────────────────────────────────────────────────────────────
 class GoldenItem(BaseModel):
-    dept:     str
-    query:    str
-    expected: list[str]          # 기대 문서 제목 목록
-    top_k:    int = 5
-    notes:    str = ""
+    dept: str
+    query: str
+    expected: list[str]  # 기대 문서 제목 목록
+    top_k: int = 5
+    notes: str = ""
 
 
 @app.get("/api/golden")
@@ -617,26 +657,26 @@ def golden_delete(item_id: int):
 
 def _embed_query(query: str) -> list[float]:
     from google import genai
+
     client = genai.Client(
         project=os.environ.get("GOOGLE_CLOUD_PROJECT", ""),
         location=os.environ.get("VERTEX_AI_LOCATION", "us-east5"),
         vertexai=True,
     )
-    res = client.models.embed_content(
-        model="text-multilingual-embedding-002", contents=[query]
-    )
+    res = client.models.embed_content(model="text-multilingual-embedding-002", contents=[query])
     return list(res.embeddings[0].values)
 
 
 def _qdrant_search(collection: str, vec: list[float], top_k: int):
     from qdrant_client import QdrantClient
+
     result = QdrantClient(url=QDRANT_URL).query_points(
         collection_name=collection,
         query=vec,
         limit=top_k,
         with_payload=True,
     )
-    return result.points   # ScoredPoint 리스트 반환 (deprecated .search() 대체)
+    return result.points  # ScoredPoint 리스트 반환 (deprecated .search() 대체)
 
 
 @app.post("/api/golden/run")
@@ -661,6 +701,7 @@ def golden_run(dept: str = "strategic"):
 
     try:
         from dept_config import load_dept
+
         collection = load_dept(dept)["qdrant_collection"]
     except Exception as e:
         conn.close()
@@ -668,47 +709,53 @@ def golden_run(dept: str = "strategic"):
 
     detail = []
     scores = []
-    for (gid, query, expected, top_k) in items:
+    for gid, query, expected, top_k in items:
         try:
-            vec  = _embed_query(query)
+            vec = _embed_query(query)
             hits = _qdrant_search(collection, vec, top_k)
             result_titles = [h.payload.get("title", "") for h in hits]
             result_scores = [round(h.score, 4) for h in hits]
 
             # 기대 제목 중 하나라도 결과 제목에 포함되면 Pass (부분 매칭)
             matched = [
-                exp for exp in expected
-                if any(exp.lower() in rt.lower() or rt.lower() in exp.lower()
-                       for rt in result_titles)
+                exp
+                for exp in expected
+                if any(
+                    exp.lower() in rt.lower() or rt.lower() in exp.lower() for rt in result_titles
+                )
             ]
-            passed      = len(matched) > 0
-            best_score  = result_scores[0] if result_scores else 0.0
+            passed = len(matched) > 0
+            best_score = result_scores[0] if result_scores else 0.0
             scores.append(best_score)
-            detail.append({
-                "golden_id": gid,
-                "query":     query,
-                "passed":    passed,
-                "score":     best_score,
-                "matched":   matched,
-                "expected":  expected,
-                "results":   [
-                    {"title": t, "score": s}
-                    for t, s in zip(result_titles, result_scores, strict=False)
-                ],
-            })
+            detail.append(
+                {
+                    "golden_id": gid,
+                    "query": query,
+                    "passed": passed,
+                    "score": best_score,
+                    "matched": matched,
+                    "expected": expected,
+                    "results": [
+                        {"title": t, "score": s}
+                        for t, s in zip(result_titles, result_scores, strict=False)
+                    ],
+                }
+            )
         except Exception as ex:
-            detail.append({
-                "golden_id": gid,
-                "query":     query,
-                "passed":    False,
-                "score":     0.0,
-                "matched":   [],
-                "expected":  expected,
-                "error":     str(ex),
-                "results":   [],
-            })
+            detail.append(
+                {
+                    "golden_id": gid,
+                    "query": query,
+                    "passed": False,
+                    "score": 0.0,
+                    "matched": [],
+                    "expected": expected,
+                    "error": str(ex),
+                    "results": [],
+                }
+            )
 
-    total  = len(detail)
+    total = len(detail)
     passed = sum(1 for d in detail if d["passed"])
     failed = total - passed
     avg_score = round(sum(scores) / len(scores), 4) if scores else None
@@ -716,6 +763,7 @@ def golden_run(dept: str = "strategic"):
     # 실행 이력 저장
     try:
         import json as _json
+
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO golden_run_log (dept, total, passed, failed, avg_score, detail) "
@@ -728,8 +776,13 @@ def golden_run(dept: str = "strategic"):
     finally:
         conn.close()
 
-    return {"total": total, "passed": passed, "failed": failed,
-            "avg_score": avg_score, "detail": detail}
+    return {
+        "total": total,
+        "passed": passed,
+        "failed": failed,
+        "avg_score": avg_score,
+        "detail": detail,
+    }
 
 
 @app.post("/api/golden/generate")
@@ -755,9 +808,7 @@ def golden_generate(dept: str = "strategic", count: int = 5):
     if not pages:
         return {"cases": [], "error": "인제스트된 페이지가 없습니다. (ingest 먼저 실행하세요)"}
 
-    page_list = "\n".join(
-        f"{i + 1}. {p['title']}" for i, p in enumerate(pages)
-    )
+    page_list = "\n".join(f"{i + 1}. {p['title']}" for i, p in enumerate(pages))
     prompt = f"""아래는 사내 업무 문서 목록입니다.
 각 문서를 찾기 위해 실무자가 실제로 검색창에 입력할 법한 자연스러운 한국어 검색 쿼리를 하나씩 생성하세요.
 
@@ -800,14 +851,16 @@ def golden_generate(dept: str = "strategic", count: int = 5):
         idx = int(item.get("index", 1)) - 1
         if 0 <= idx < len(pages):
             p = pages[idx]
-            cases.append({
-                "query":      item.get("query", "").strip(),
-                "expected":   [p["title"]],
-                "top_k":      5,
-                "notes":      f"자동생성 ← {p['title']}",
-                "title":      p["title"],
-                "notion_url": p.get("notion_url", ""),
-            })
+            cases.append(
+                {
+                    "query": item.get("query", "").strip(),
+                    "expected": [p["title"]],
+                    "top_k": 5,
+                    "notes": f"자동생성 ← {p['title']}",
+                    "title": p["title"],
+                    "notion_url": p.get("notion_url", ""),
+                }
+            )
 
     return {"cases": cases}
 
