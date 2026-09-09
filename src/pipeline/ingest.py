@@ -523,8 +523,14 @@ def store_graph(
     triplets: list,
     source_url: str,
     chunks: "list[str] | None" = None,
+    reset: bool = False,
 ) -> dict:
-    """타입 트리플 → FalkorDB 노드/엣지 저장"""
+    """타입 트리플 → FalkorDB 노드/엣지 저장
+
+    reset=True: --reset 재인제스트 모드.
+      그래프가 이미 비어 있으므로 DB 수준 중복 체크를 건너뜁니다.
+      in-memory seen_edges 만으로 동일 페이지 내 중복을 차단합니다.
+    """
     nodes_created = 0
     edges_created = 0
 
@@ -587,20 +593,23 @@ def store_graph(
             set_clause = ("SET " + ", ".join(set_parts)) if set_parts else ""
 
             # ── DB 수준 중복 체크: (rel_name + source_url) 기준 ─────────────
-            # 같은 페이지를 재인제스트해도 엣지가 하나만 유지됩니다.
-            # 다른 페이지에서 동일 관계가 추출되면 별도 엣지로 보존합니다.
+            # reset=True: 그래프가 비어 있으므로 DB 조회 생략 → in-memory로만 차단
+            # reset=False: 재인제스트 없는 추가 실행 시 크로스-페이지 중복 방지
             # ※ FalkorDB: 관계 패턴 MATCH 후 WHERE id() 조건은 신뢰할 수 없음.
             #   CREATE와 동일하게 노드를 먼저 각각 MATCH 후 관계를 조회합니다.
-            existing = _falkordb.query(
-                "MATCH (s) WHERE id(s) = $_s "
-                "MATCH (o) WHERE id(o) = $_o "
-                "MATCH (s)-[r:REL]->(o) "
-                "WHERE r.rel_name = $_rn AND r.source_url = $_url "
-                "RETURN id(r) LIMIT 1",
-                {"_s": subj_id, "_o": obj_id,
-                 "_rn": rel_props["rel_name"], "_url": source_url},
-            )
-            if not existing.result_set:
+            should_create = True
+            if not reset:
+                existing = _falkordb.query(
+                    "MATCH (s) WHERE id(s) = $_s "
+                    "MATCH (o) WHERE id(o) = $_o "
+                    "MATCH (s)-[r:REL]->(o) "
+                    "WHERE r.rel_name = $_rn AND r.source_url = $_url "
+                    "RETURN id(r) LIMIT 1",
+                    {"_s": subj_id, "_o": obj_id,
+                     "_rn": rel_props["rel_name"], "_url": source_url},
+                )
+                should_create = not existing.result_set
+            if should_create:
                 _falkordb.query(
                     "MATCH (s) WHERE id(s) = $_s "
                     "MATCH (o) WHERE id(o) = $_o "
@@ -619,7 +628,7 @@ def store_graph(
 
 
 # ─── 페이지 인제스천 ─────────────────────────────────────────────────────────
-def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
+def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool = False) -> dict:
     page = parse_md(path)
     meta = page["meta"]
     body = page["body"]
@@ -709,7 +718,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "") -> dict:
         _chunks_for_graph = _make_chunks(body)
         if triplets:
             with _falkordb_lock:
-                stats = store_graph(triplets, meta.get("notion_url", ""), chunks=_chunks_for_graph)
+                stats = store_graph(triplets, meta.get("notion_url", ""), chunks=_chunks_for_graph, reset=reset)
             result["graph"] = stats
             print(f"     그래프: 노드 {stats['nodes']}개, 엣지 {stats['edges']}개 저장")
         else:
@@ -781,8 +790,8 @@ def main():
                         help="본부 이름 (config/departments.yaml의 key). 미지정 시 legacy 모드(data/notion_samples)")
     parser.add_argument("--dry-run", action="store_true", help="연결 확인만 (저장 안 함)")
     parser.add_argument("--reset",   action="store_true", help="기존 데이터 삭제 후 재인제스천")
-    parser.add_argument("--workers", type=int, default=5,
-                        help="병렬 처리 워커 수 (기본: 5). Vertex AI 쿼터에 따라 조정")
+    parser.add_argument("--workers", type=int, default=10,
+                        help="병렬 처리 워커 수 (기본: 10). Vertex AI 쿼터에 따라 조정")
     args = parser.parse_args()
 
     # ── 비즈니스 용어집 사전 미리 로드 (동의어 해결기 워밍업) ────────────────
@@ -871,7 +880,7 @@ def main():
     _t_start = time.time()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(ingest_page, f, args.dry_run, args.dept): f for f in md_files}
+        futures = {executor.submit(ingest_page, f, args.dry_run, args.dept, args.reset): f for f in md_files}
         for done, future in enumerate(as_completed(futures), start=1):
             f = futures[future]
             try:
