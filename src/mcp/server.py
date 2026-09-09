@@ -409,11 +409,19 @@ def _search_event_timeline(query: str, limit: int = 20) -> dict:
     이전에는 timeline_search 가 별도 도구로만 존재해, 호출자가 그 도구를
     직접 고르지 않으면 :Event 노드에 아예 접근하지 못했습니다.
 
-    호출 조건 (둘 다 충족해야 함 — 오탐 방지):
-      ① 질문에 그래프의 게임/서비스 이름이 등장
-      ② 날짜 표현 또는 시계열 키워드가 존재
-    "점검 시작은 어느 팀 담당?" 처럼 키워드만 걸리는 질문은
-    게임명이 없으므로 호출되지 않습니다.
+    호출 조건:
+      ① 날짜 표현 또는 시계열 키워드가 존재 (필수)
+      ② 게임명이 매칭되거나, 주체 후보(부서·조직 등) 또는 날짜가 잡힘
+
+    주체 결정 순서:
+      1) :Game / :Event.game 에 이름이 있으면 그 게임으로 조회
+      2) 아니면 질문에 등장하는 그래프 노드 이름을 keywords 로 조회
+         — 게임명이 없는 이벤트는 game="기타" 로 저장되므로 부서명으로는
+           game 매칭이 안 됩니다. 제목·설명·카테고리·담당자에서 찾습니다.
+      3) 키워드도 없고 날짜만 있으면 그 기간 전체 이벤트를 조회
+
+    "점검 시작은 어느 팀 담당?" 처럼 시계열 키워드만 걸리고 날짜도
+    주체도 없는 질문은 get_event_chain 이 빈 결과를 반환합니다.
 
     Returns:
         get_event_chain() 결과 dict. 조건 미충족·조회 실패 시 {}.
@@ -422,23 +430,34 @@ def _search_event_timeline(query: str, limit: int = 20) -> dict:
         return {}
     try:
         from utils.datespan import extract_date_range, has_timeline_intent
+        from utils.korean import match_nodes_in_text
 
         if not has_timeline_intent(query):
             return {}
 
         graph = _get_falkordb()
-        games = _detect_games(graph, query)
-        if not games:
-            return {}
-
         from_date, to_date = extract_date_range(query)
+
+        games = _detect_games(graph, query)
+        game_arg: str | None = games[0] if games else None
+        keywords: list[str] = []
+
+        if not game_arg:
+            # 게임이 아닌 주체 — 질문에 등장하는 그래프 노드 이름을 키워드로 사용.
+            # 노드 이름을 쓰면 "업무", "일정" 같은 일반 명사가 키워드로 들어가
+            # 무관한 이벤트를 끌어오는 것을 막을 수 있습니다.
+            keywords = [name for name, _t in match_nodes_in_text(graph, query, limit=5)]
+            if not keywords and not (from_date or to_date):
+                return {}  # 주체도 날짜도 없으면 조회 의미 없음
+
         result = _get_event_chain(
             graph,
-            game=games[0],
+            game=game_arg,
             event_type=None,  # 질문에서 유형까지 추정하지 않음 — 전체 조회 후 LLM이 판단
             from_date=from_date or None,
             to_date=to_date or None,
             limit=limit,
+            keywords=keywords or None,
         )
         if not result or not result.get("events"):
             return {}
@@ -1115,6 +1134,8 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
             _result["timeline_results"] = {
                 "game": timeline.get("game", ""),
                 "total": timeline.get("total", 0),
+                # 어떤 조건으로 조회된 이벤트인지 (게임 / 키워드 / 기간)
+                "filter": timeline.get("filter", {}),
                 "events": timeline["events"],
             }
             _result["timeline_summary"] = timeline.get("timeline_summary", [])
@@ -1281,14 +1302,16 @@ def decision_trace(entity: str, max_depth: int = 4) -> dict[str, Any]:
 
 @mcp.tool()
 def timeline_search(
-    game: str,
+    game: str = "",
     event_type: str = "",
     from_date: str = "",
     to_date: str = "",
     limit: int = 20,
+    keyword: str = "",
 ) -> dict[str, Any]:
     """
-    게임/서비스의 시계열 이벤트 이력을 날짜 오름차순으로 조회합니다.
+    시계열 이벤트 이력을 날짜 오름차순으로 조회합니다.
+    게임/서비스뿐 아니라 부서·조직의 업무 일정도 조회할 수 있습니다.
     업데이트·이벤트·점검·장애·시즌 등 날짜 기반 운영 이력이 필요할 때 사용합니다.
 
     【이 도구를 사용해야 하는 경우】
@@ -1300,10 +1323,19 @@ def timeline_search(
     - "~서비스에 장애가 발생했던 시점은?"
     - 질문에 게임 이름 + 날짜/기간/분기/이벤트 유형이 포함된 경우
 
+    【부서·조직의 업무 일정 조회】
+    - "재무실 업무 일정 알려줘"
+      → timeline_search(keyword="재무실")
+    - "재무실 6월 일정"
+      → timeline_search(keyword="재무실", from_date="2026-06-01", to_date="2026-06-30")
+    게임명이 없는 이벤트는 game="기타" 로 저장되므로 부서명을 game 에 넣으면
+    조회되지 않습니다. 반드시 keyword 로 전달하세요.
+
     【이 도구를 사용하면 안 되는 경우】
-    - 게임 이벤트가 아닌 팀·사람·정책 관계 → graph_search 사용
+    - 날짜와 무관한 팀·사람·정책 관계 구조 → graph_search 사용
     - 이벤트 관련 Notion 문서 본문이 필요할 때 → semantic_search 사용
-    - 게임명 없이 일반 업무 문서 검색 → semantic_search 또는 hybrid_search 사용
+    - 주체·날짜 모두 없는 일반 업무 문서 검색 → hybrid_search 사용
+      (hybrid_search 는 날짜 기반 질문이면 이벤트를 자동으로 함께 조회합니다)
 
     【이벤트 유형(event_type) 선택 기준】
     - client_update   : 클라이언트 패치, 앱 버전 업데이트
@@ -1329,6 +1361,7 @@ def timeline_search(
     Args:
         game:       게임/서비스 이름. 부분 일치 가능.
                     예: "POTC", "파이럿" → 모두 POTC 매칭
+                    게임이 아닌 주체(부서·조직)라면 비우고 keyword 를 쓰세요.
         event_type: 이벤트 유형 필터. 위 목록 중 하나 또는 빈 문자열(전체).
                     유형을 모르거나 전체가 필요하면 빈 문자열로 두세요.
         from_date:  조회 시작 날짜. YYYY-MM-DD 형식.
@@ -1337,6 +1370,16 @@ def timeline_search(
                     예: "2026-06-30" / 제한 없으면 빈 문자열.
         limit:      최대 반환 이벤트 수 (기본값: 20).
                     전체 이력을 보고 싶으면 50~100으로 늘리세요.
+        keyword:    게임이 아닌 주체를 찾을 때 사용. 이벤트의 제목·설명·
+                    카테고리·담당자·주체명에서 부분 일치로 검색합니다.
+                    예: keyword="재무실" → 재무실 업무 일정
+                    쉼표로 여러 개 지정 가능: "재무실,결산"
+                    ※ 게임명이 없는 이벤트는 내부적으로 game="기타" 로
+                      저장되므로, 부서명은 game 이 아니라 keyword 로
+                      전달해야 조회됩니다.
+
+    ※ game·keyword·날짜가 모두 비어 있으면 전체 이벤트 스캔이 되므로
+      조회하지 않고 빈 결과를 반환합니다. 최소 하나는 지정하세요.
 
     Returns:
         {
@@ -1369,16 +1412,19 @@ def timeline_search(
     try:
         if _get_event_chain is None:
             return {
-                "game": game,
+                "game": game or "",
                 "found": False,
                 "error": "timeline_search 모듈을 로드할 수 없습니다",
             }
         graph = _get_falkordb()
 
+        # keyword: 쉼표 구분 다중 지정 지원 ("재무실,결산")
+        kw_list = [k.strip() for k in keyword.split(",") if k.strip()] if keyword else []
+
         # 동의어 → canonical 정규화: "드래곤슈퍼" → "DS"
         # ingest 시 canonical로 저장되므로 canonical로 조회해야 이벤트가 연결됩니다.
         # 구버전 데이터 호환: canonical로 결과가 없으면 원본 이름으로 재시도합니다.
-        game_canonical = _syn_resolve(game)
+        game_canonical = _syn_resolve(game) if game else None
         _result = _get_event_chain(
             graph,
             game=game_canonical,
@@ -1386,8 +1432,9 @@ def timeline_search(
             from_date=from_date or None,
             to_date=to_date or None,
             limit=limit,
+            keywords=kw_list or None,
         )
-        if (not _result.get("events")) and game_canonical != game:
+        if (not _result.get("events")) and game and game_canonical != game:
             # 구버전 데이터(비정규 이름으로 저장된 경우) 폴백
             _result = _get_event_chain(
                 graph,
@@ -1396,6 +1443,7 @@ def timeline_search(
                 from_date=from_date or None,
                 to_date=to_date or None,
                 limit=limit,
+                keywords=kw_list or None,
             )
 
         # ── source_url → 벡터 DB 원문 연결 (Explicit Parent Document Retrieval) ──

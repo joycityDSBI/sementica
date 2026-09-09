@@ -21,8 +21,9 @@ Semantica 프레임워크 통합 헬퍼
                              :Game 노드 자동 연결 (HAD_EVENT 엣지)
                              시간 순서대로 FOLLOWED_BY 엣지 자동 생성
 
-8. get_event_chain()       — 게임/서비스의 시계열 이벤트 이력 조회
-                             날짜 범위 필터, 이벤트 유형 필터 지원
+8. get_event_chain()       — 시계열 이벤트 이력 조회
+                             게임/서비스 또는 부서·조직(keywords) 기준,
+                             날짜 범위·이벤트 유형 필터 지원
 
 의존성:
   pip install semantica[graph-falkordb]   # NER/RE fallback 사용 시
@@ -999,22 +1000,35 @@ def upsert_event_node(graph, event: dict) -> int:
 
 def get_event_chain(
     graph,
-    game: str,
+    game: str | None = None,
     event_type: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
     limit: int = 20,
+    keywords: list[str] | None = None,
 ) -> dict:
     """
-    게임/서비스의 시계열 이벤트를 날짜순으로 조회.
+    시계열 이벤트를 날짜순으로 조회.
+
+    game 으로 특정 게임을 조회하거나, keywords 로 게임이 아닌 주체
+    (부서·조직 등)의 일정을 조회할 수 있습니다.
+
+    ※ game 이 없는 이벤트는 인제스트 시 game="기타" 로 저장되므로
+      부서명으로는 game 매칭이 되지 않습니다. keywords 경로가 그 경우를
+      제목·설명·카테고리·담당자에서 찾아 보완합니다.
 
     Args:
         graph:      FalkorDB graph 객체
-        game:       게임/서비스 이름 (부분 일치)
+        game:       게임/서비스 이름 (부분 일치). None 이면 게임 필터 없음.
         event_type: 필터링할 이벤트 유형 (None이면 전체)
         from_date:  시작 날짜 YYYY-MM-DD (None이면 제한 없음)
         to_date:    종료 날짜 YYYY-MM-DD (None이면 제한 없음)
         limit:      최대 반환 개수 (기본 20)
+        keywords:   제목·설명·카테고리·담당자·game 에서 찾을 키워드 목록.
+                    2자 미만은 무시됩니다. 예: ["재무실"]
+
+    ※ game·keywords·날짜가 모두 없으면 전체 Event 스캔이 되므로
+      조회하지 않고 빈 결과를 반환합니다.
 
     Returns:
         {
@@ -1036,37 +1050,62 @@ def get_event_chain(
     """
     from_ts = _date_to_ts(from_date) if from_date else 0
     to_ts = _date_to_ts(to_date) if to_date else 9_999_999_999
+    kws = [str(k).strip() for k in (keywords or []) if k and len(str(k).strip()) >= 2]
+    has_date = bool(from_date or to_date)
+
+    def _empty(label: str = "") -> dict:
+        return {
+            "game": label,
+            "found": False,
+            "total": 0,
+            "events": [],
+            "timeline_summary": [],
+        }
+
+    # game·keywords·날짜가 모두 없으면 전체 Event 스캔이 되므로 조회하지 않습니다.
+    if not game and not kws and not has_date:
+        return _empty()
 
     try:
-        # 게임명 부분 일치로 실제 이름 확인
-        game_r = graph.query(
-            "MATCH (g:Game) WHERE g.name CONTAINS $name RETURN g.name LIMIT 1",
-            {"name": game},
-        )
-        # 게임 노드가 없으면 event.game 필드에서 직접 탐색
-        if game_r.result_set:
-            actual_game = game_r.result_set[0][0]
-        else:
-            ev_r = graph.query(
-                "MATCH (e:Event) WHERE e.game CONTAINS $name RETURN e.game LIMIT 1",
+        where_parts = ["e.date_ts >= $from_ts", "e.date_ts <= $to_ts"]
+        params: dict = {"from_ts": from_ts, "to_ts": to_ts}
+        actual_game = ""
+
+        if game:
+            # 게임명 부분 일치로 실제 이름 확인
+            game_r = graph.query(
+                "MATCH (g:Game) WHERE g.name CONTAINS $name RETURN g.name LIMIT 1",
                 {"name": game},
             )
-            actual_game = ev_r.result_set[0][0] if ev_r.result_set else game
+            # 게임 노드가 없으면 event.game 필드에서 직접 탐색
+            if game_r.result_set:
+                actual_game = game_r.result_set[0][0]
+            else:
+                ev_r = graph.query(
+                    "MATCH (e:Event) WHERE e.game CONTAINS $name RETURN e.game LIMIT 1",
+                    {"name": game},
+                )
+                actual_game = ev_r.result_set[0][0] if ev_r.result_set else game
+            where_parts.append("e.game = $game")
+            params["game"] = actual_game
 
-        # 이벤트 유형 필터 조건 분기 (FalkorDB IS NULL 파라미터 미지원 대응)
+        # 이벤트 유형 필터 (FalkorDB IS NULL 파라미터 미지원 → 조건 분기로 처리)
         if event_type:
-            type_clause = "AND e.event_type = $etype "
-            params = {"game": actual_game, "etype": event_type, "from_ts": from_ts, "to_ts": to_ts}
-        else:
-            type_clause = ""
-            params = {"game": actual_game, "from_ts": from_ts, "to_ts": to_ts}
+            where_parts.append("e.event_type = $etype")
+            params["etype"] = event_type
+
+        # 키워드 조회 — 게임명이 특정되지 않는 주체(부서·조직 등)를 위한 경로.
+        # game 속성이 "기타"로 뭉개진 이벤트도 제목·설명·카테고리로 찾을 수 있습니다.
+        if kws:
+            where_parts.append(
+                "ANY(k IN $kws WHERE e.title CONTAINS k OR e.description CONTAINS k "
+                "OR e.game CONTAINS k OR e.category CONTAINS k OR e.manager CONTAINS k)"
+            )
+            params["kws"] = kws
 
         # OPTIONAL MATCH 으로 prev/next 를 단일 쿼리에서 조회 (이벤트당 2회 N+1 제거)
         cypher = (
-            "MATCH (e:Event) "
-            "WHERE e.game = $game "
-            f"  {type_clause}"
-            "  AND e.date_ts >= $from_ts AND e.date_ts <= $to_ts "
+            "MATCH (e:Event) WHERE " + " AND ".join(where_parts) + " "
             "OPTIONAL MATCH (prev:Event)-[:FOLLOWED_BY]->(e) "
             "OPTIONAL MATCH (e)-[:FOLLOWED_BY]->(nxt:Event) "
             "RETURN e.event_id, e.game, e.event_type, e.date, "
@@ -1081,13 +1120,7 @@ def get_event_chain(
         r = graph.query(cypher, params)
 
         if not r.result_set:
-            return {
-                "game": actual_game,
-                "found": False,
-                "total": 0,
-                "events": [],
-                "timeline_summary": [],
-            }
+            return _empty(actual_game)
 
         # row: [event_id, game, event_type, date, title, description,
         #       target, source_url, prev_title, prev_date, next_title, next_date,
@@ -1113,9 +1146,16 @@ def get_event_chain(
 
         # 요약 줄에 category 를 함께 노출 — "어떤 변경 카테고리인가?" 류 질문에
         # events 상세를 파싱하지 않고 요약만으로 답할 수 있게 합니다.
-        timeline_summary = [
-            f"{e['date']}: [{e['category'] or e['event_type']}] {e['title']}" for e in events
-        ]
+        # game 필터가 없으면 여러 주체가 섞이므로 주체명도 함께 표시합니다.
+        if actual_game:
+            timeline_summary = [
+                f"{e['date']}: [{e['category'] or e['event_type']}] {e['title']}" for e in events
+            ]
+        else:
+            timeline_summary = [
+                f"{e['date']}: ({e['game']}) [{e['category'] or e['event_type']}] {e['title']}"
+                for e in events
+            ]
 
         return {
             "game": actual_game,
@@ -1123,11 +1163,19 @@ def get_event_chain(
             "total": len(events),
             "events": events,
             "timeline_summary": timeline_summary,
+            # 어떤 조건으로 조회된 결과인지 — 호출자가 근거를 판단할 수 있게 함
+            "filter": {
+                "game": actual_game,
+                "keywords": kws,
+                "event_type": event_type or "",
+                "from_date": from_date or "",
+                "to_date": to_date or "",
+            },
         }
 
     except Exception as ex:
         return {
-            "game": game,
+            "game": game or "",
             "found": False,
             "total": 0,
             "events": [],

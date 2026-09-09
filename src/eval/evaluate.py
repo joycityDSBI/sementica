@@ -342,6 +342,8 @@ def timeline_lookup(graph, query: str, limit: int = 20) -> dict:
     if not has_timeline_intent(query):
         return {}
 
+    from_date, to_date = extract_date_range(query)
+
     # 질문에 이름이 등장하는 게임 탐색 (:Game 우선, 없으면 :Event.game)
     names: list = []
     for cypher in (
@@ -357,22 +359,30 @@ def timeline_lookup(graph, query: str, limit: int = 20) -> dict:
         names = [str(r[0]) for r in res.result_set if r and r[0] and len(str(r[0])) >= 2]
         if names:
             break
-    if not names:
-        return {}
     names.sort(key=len, reverse=True)
+
+    # 게임이 아닌 주체(부서·조직)는 그래프 노드 이름을 키워드로 조회합니다.
+    # game 이 없는 이벤트는 game="기타" 로 저장되므로 game 매칭이 안 됩니다.
+    keywords: list = []
+    if not names:
+        from utils.korean import match_nodes_in_text
+
+        keywords = [n for n, _t in match_nodes_in_text(graph, query, limit=5)]
+        if not keywords and not (from_date or to_date):
+            return {}
 
     try:
         sys.path.insert(0, str(ROOT / "src" / "pipeline"))
         from semantica_helper import get_event_chain
 
-        from_date, to_date = extract_date_range(query)
         result = get_event_chain(
             graph,
-            game=names[0],
+            game=names[0] if names else None,
             event_type=None,
             from_date=from_date or None,
             to_date=to_date or None,
             limit=limit,
+            keywords=keywords or None,
         )
         return result if result and result.get("events") else {}
     except Exception:
@@ -597,8 +607,12 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
 
     # 이벤트 타임라인 — 날짜·카테고리·담당자를 명시해 날짜 기반 질문에 답하게 함
     timeline_text = ""
+    # game 필터 없이 조회된 경우 여러 주체가 섞이므로 주체명을 함께 표기
+    show_scope = not timeline.get("game")
     for ev in (timeline.get("events") or [])[:20]:
         parts = [f"- {ev.get('date', '')}"]
+        if show_scope and ev.get("game"):
+            parts.append(f"({ev['game']})")
         if ev.get("category"):
             parts.append(f"[{ev['category']}]")
         elif ev.get("event_type"):
@@ -619,8 +633,9 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
     # 타임라인은 날짜 질문의 직접 근거이므로 문서보다 앞에 배치합니다.
     context_parts = ["=== 그래프 관계 ===\n" + graph_text]
     if timeline_text:
-        game_label = timeline.get("game", "")
-        context_parts.append(f"=== 이벤트 이력 ({game_label}) ===\n" + timeline_text)
+        flt = timeline.get("filter") or {}
+        label = timeline.get("game") or ", ".join(flt.get("keywords") or []) or "전체"
+        context_parts.append(f"=== 이벤트 이력 ({label}) ===\n" + timeline_text)
     context_parts.append("=== 관련 문서 ===\n" + vector_text)
 
     return {
