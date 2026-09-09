@@ -1,7 +1,7 @@
 # Semantica — 프로젝트 전체 요약
 
 > JoyCity 전략사업본부 Notion 기반 온톨로지 검색 솔루션  
-> 최종 업데이트: 2026-09-07 (HTML 첨부 추출, has_html_attachment 대시보드, 그래프→벡터 크로스링킹)
+> 최종 업데이트: 2026-09-09 (Entity Linking, FalkorDB 엣지 중복 수정, 재인제스트 성능 개선, Event 노드 개선)
 
 ---
 
@@ -127,11 +127,28 @@ python tools/backfill_html_flag.py --dept strategic    # DB 백필
 ### 4-2. 전체 인제스트 (Full Ingest)
 ```bash
 python src/pipeline/ingest.py --dept strategic
+python src/pipeline/ingest.py --dept strategic --reset      # 완전 초기화 후 재구축
+python src/pipeline/ingest.py --dept strategic --workers 15 # 워커 수 조정 (기본: 10)
 ```
 - `.md` 파일 읽기 → 텍스트 청크 분할 → 임베딩 → Qdrant 저장
 - LLM으로 트리플(주어-관계-목적어) 추출 → FalkorDB 저장
 - PostgreSQL `notion_pages` 테이블 UPSERT
 - `--reset`: Qdrant 컬렉션 + FalkorDB 그래프 삭제 후 재구축
+
+**FalkorDB 엣지 중복 방지 (2026-09-09 수정)**:
+
+| 레이어 | 방식 | 적용 조건 |
+|--------|------|---------|
+| in-memory `seen_edges` | `(subj_id, rel_name, obj_id, source_url)` 4-tuple set | 항상 |
+| DB 중복 체크 | 3-MATCH 패턴으로 기존 엣지 확인 후 CREATE | `--reset` 없이 실행 시만 |
+| `--reset` 스킵 | 그래프 초기화 직후이므로 DB 체크 불필요 | `--reset` 시 |
+
+**중복 판단 기준**: `(subj, rel_name, obj, source_url)` 동일 → 같은 페이지 내 중복 (1개 유지)  
+다른 `source_url`에서 같은 관계 추출 → 독립 증거로 각각 저장 (`evidence_chunk_id` → Qdrant 링크 보존)
+
+**`--reset` 성능 개선**:
+- DB 체크 생략 (`reset=True` 파라미터로 전달)
+- 기본 워커 수 5 → 10 (Vertex AI 쿼터 내에서 병렬도 증가)
 
 ### 4-3. 완전 초기화 후 재인제스트
 ```bash
@@ -167,6 +184,46 @@ python src/pipeline/sync.py --dept strategic
   - 동일하면 skip
 - 처리 결과를 `sync_log`에 기록
 
+### 4-5. Entity Linking — 동의어 해결기 (`src/utils/synonym_resolver.py`)
+
+회사 비즈니스 용어집 API를 통해 엔티티 이름을 정규화하고, 검색 시 동의어를 자동 확장합니다.
+
+```
+https://catalog.joycityplay.com/api/glossary/all  (인증 없음)
+→ { "terms": [{ "term": "MAU", "synonyms": ["월간활성유저", "월별활성사용자"] }, ...] }
+```
+
+**동작 원리**
+
+| 함수 | 사용 시점 | 역할 |
+|------|---------|------|
+| `resolve(name)` | 인제스트 시 `merge_node()` 직전 | alias → canonical 정규화 (예: "드래곤슈퍼" → "DS") |
+| `expand(name)` | 검색 시 `graph_search()`, `timeline_search()` | canonical 또는 alias → 모든 표현 확장 (쿼리 포괄 검색) |
+| `preload()` | `ingest.py` / `sync.py` / `server.py` 시작 | TTL(1시간) 캐시 강제 갱신 |
+
+**FalkorDB 노드 정규화 흐름**:
+```
+LLM 추출 → "드래곤슈퍼" → resolve() → "DS" → merge_node() → FalkorDB (:Team {name: "DS"})
+```
+
+**MCP 검색 확장 흐름**:
+```
+query: "DS" → expand() → ["DS", "드래곤슈퍼", "Dragon Super"]
+                → MATCH (n) WHERE ANY(form IN $forms WHERE n.name CONTAINS form)
+```
+
+**LLM 할루시네이션 방지 (EXTRACT_PROMPT 규칙 ②)**:
+```
+② 조직명은 약칭보다 공식 명칭 우선 — 단, 공식 명칭을 확실히 알 때만 변환할 것
+   ※ 중요: 약칭의 원형을 모른다면 반드시 약칭 그대로 사용할 것.
+      예) "데사실"의 원형을 모른다면 → "데사실" 그대로 사용
+          (절대 "데이터전략실" 등으로 추론·변환 금지)
+```
+
+> 미등록 약칭("데사실")을 LLM이 "데이터전략실"로 추론해 존재하지 않는 노드를 생성하는 문제 수정.
+
+---
+
 ### 4-5. 노드/엣지 구조 (FalkorDB)
 
 **엔티티 타입 (8종 고정)**
@@ -181,10 +238,30 @@ python src/pipeline/sync.py --dept strategic
 | `Issue` | 문제/리스크 | 이탈율 상승 |
 | `Insight` | 분석 결과 | 세그먼트별 LTV 차이 |
 
-**이벤트 노드 주요 속성**
+**이벤트 노드 주요 속성** (2026-09-09 개선)
 ```
-:Event { title, date, date_ts, year, month, quarter,
-         game, event_type, source, page_id }
+:Event {
+    event_id,        # uuid5(source_url) — Notion 행마다 고유
+    title,           # DB "메모" 컬럼 우선, 없으면 meta title
+    date,            # "YYYY-MM-DD"
+    date_ts,         # Unix timestamp (쿼리 범위 필터용)
+    year, month, quarter,
+    game,            # PROJECT 컬럼 (예: "RESU")
+    event_type,      # 정규화된 유형 (ua_campaign, ua_creative 등)
+    category,        # 변경카테고리 원문 (예: "캠페인조정") — 신규
+    source_url,      # Notion 개별 행 URL
+}
+```
+
+**이벤트 노드 개선 이유**:
+- `title` = page ID 문제: `meta["title"]`(= 파일명 = page_id)이 아닌 DB "메모" 컬럼 우선 사용
+- `event_id` 충돌: 기존 `uuid5(game|event_type|date)` → 같은 날 같은 유형 N건이 1개로 덮임  
+  → `uuid5(source_url)` 로 변경 (Notion 행마다 고유 URL)
+- `category` 신규: "캠페인조정", "소재 변경" 등 원문 보존 (event_type 변환 전 값)
+
+**`DB_TITLE_KEYS` 우선순위** (메모 컬럼 추출):
+```
+메모 > memo > 제목 > 이벤트명 > 이벤트제목 > 내용 > description > 설명 > name > 이름
 ```
 
 **관계 어휘 (20종 고정)**
@@ -492,10 +569,14 @@ nohup python src/mcp/server.py --dept strategic \
 
 ### 7-3. FalkorDB 수동 초기화
 
-`ingest.py --reset` 의 FalkorDB 삭제는 예외를 묵음 처리하므로 실패해도 알 수 없음.
-완전 초기화가 필요할 때는 수동으로 삭제:
+`ingest.py --reset`의 FalkorDB 삭제는 `graph.delete()` 를 사용합니다 (2026-09-09 수정).
 
 ```bash
+# --reset 실행 시 출력 예시 (정상)
+#   🗑️  FalkorDB 그래프 삭제: strategic_kg
+#   ✅ FalkorDB 연결 완료 — 그래프: strategic_kg
+
+# 수동 초기화 (필요 시)
 python3 -c "
 import falkordb
 falkordb.FalkorDB(host='localhost', port=6379).select_graph('strategic_kg').delete()
@@ -503,7 +584,16 @@ print('FalkorDB 삭제 완료')
 "
 ```
 
-> `delete_graph()` 메서드 없음 → `select_graph().delete()` 사용
+> ⚠️ `db.delete_graph()` 메서드는 falkordb 1.x에 없음 → `select_graph().delete()` 사용  
+> `--reset` 로그에 `🗑️  FalkorDB 그래프 삭제` 메시지가 없으면 삭제 실패 → 수동 삭제 필요
+
+**중복 엣지 확인 쿼리** (재인제스트 후 검증용):
+```cypher
+MATCH (s)-[r:REL]->(o)
+WITH s.name AS subj, o.name AS obj, r.rel_name AS rel, r.source_url AS url, COUNT(r) AS cnt
+WHERE cnt > 1
+RETURN subj, obj, rel, url, cnt ORDER BY cnt DESC LIMIT 20
+```
 
 ### 7-4. ngrok 상태 확인 및 재시작
 
@@ -556,10 +646,18 @@ curl http://localhost:4040/api/tunnels
 | 14 | Notion HTML 첨부 자동 추출 | ✅ | `notion_fetch.py` `_extract_attached_html()`, 2026-09-07 |
 | 15 | has_html_attachment 대시보드 컬럼 | ✅ | PostgreSQL + 웹 대시보드 📎 아이콘, 2026-09-07 |
 | 16 | 그래프→벡터 크로스링킹 | ✅ | `server.py` `_fetch_pages_by_source_urls()`, timeline/hybrid, 2026-09-07 |
-| 17 | Cortex Analyst YAML 모델 | 🔜 | KPI/매출 테이블 시맨틱 모델 작성 필요 |
-| 18 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
-| 19 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
-| 20 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
+| 17 | Entity Linking (동의어 해결기) | ✅ | `synonym_resolver.py`, Business Glossary API, 2026-09-09 |
+| 18 | FalkorDB 엣지 중복 생성 수정 | ✅ | 3단계 수정 (쿼리 패턴 · graph.delete() · --reset 스킵), 2026-09-09 |
+| 19 | Event 노드 title·category·event_id 개선 | ✅ | 메모 컬럼 우선, source_url 기반 ID, category 보존, 2026-09-09 |
+| 20 | 재인제스트 성능 개선 | ✅ | DB 체크 스킵 + 워커 10, 2026-09-09 |
+| 21 | sync.py 코드 검증 및 수정 | ✅ | DB 체크 제거(항상 무의미), seen_edges 타입 수정, preload 추가, 2026-09-09 |
+| 22 | LLM 할루시네이션 방지 | ✅ | EXTRACT_PROMPT 규칙 ② 수정 — 약칭 원형 추측 금지, 2026-09-09 |
+| 23 | Cortex Analyst YAML 모델 | 🔜 | KPI/매출 테이블 시맨틱 모델 작성 필요 |
+| 24 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
+| 25 | LLM 결과 캐싱 | 🔜 | content_hash 기반 triplets 캐시 → --reset 속도 대폭 단축 |
+| 26 | 동의어 사전 "데사실" 등록 | 🔜 | Business Glossary API에 데사실 → 데이터사이언스실 추가 필요 |
+| 27 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
+| 28 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
 
 ---
 
@@ -638,6 +736,14 @@ SNOWFLAKE_REST_PORT=8766
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-09 | Entity Linking 추가 (`synonym_resolver.py`) — Business Glossary API 기반 동의어 해결, `resolve()` / `expand()` / `preload()` |
+| 2026-09-09 | FalkorDB 엣지 중복 생성 근본 원인 수정 — ① 쿼리 패턴 3-MATCH 분리, ② `db.delete_graph()` → `graph.delete()`, ③ `--reset` 시 DB 체크 스킵 |
+| 2026-09-09 | `ingest.py` `--workers` 기본값 5 → 10, `--reset` 시 DB 중복 체크 건너뜀으로 재인제스트 성능 개선 |
+| 2026-09-09 | `sync.py` DB 체크 제거 — `delete_page_edges()` 이후 항상 빈 결과이므로 불필요, `seen_edges` 타입 4-tuple 수정, `preload()` 추가 |
+| 2026-09-09 | Event 노드 title 개선 (`semantica_helper.py`) — `DB_TITLE_KEYS`/"메모" 컬럼 우선, page_id 사용 방지 |
+| 2026-09-09 | Event 노드 `event_id` 충돌 수정 — `uuid5(game\|event_type\|date)` → `uuid5(source_url)`, 같은 날 같은 유형 중복 방지 |
+| 2026-09-09 | Event 노드 `category` 필드 추가 — 변경카테고리 원문 보존, `ON MATCH SET` 재동기화 지원 |
+| 2026-09-09 | ruff lint/format 전체 적용 — `synonym_resolver.py` RUF005 (`[canonical] + synonyms` → `[canonical, *synonyms]`) 외 |
 | 2026-09-07 | `_HTMLStripper._SKIP_TAGS` void 요소 버그 수정 — `meta`, `link` 제거로 `<body>` 내용 스킵 문제 해결 |
 | 2026-09-07 | Notion HTML 첨부 자동 추출 (`notion_fetch.py`) — `file`/`embed` 블록, Notion S3 URL 지원, `[첨부 HTML:]` 마커 포함 |
 | 2026-09-07 | `has_html_attachment` DB 컬럼 추가 — PostgreSQL, `ingest.py`, `sync.py`, `db_logger.py` |
