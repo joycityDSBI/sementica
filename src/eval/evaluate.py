@@ -46,6 +46,17 @@ LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")  # 임베딩 리전
 # 임베딩 리전(us-central1 등)을 넘기면 "not servable in region" 400 오류가 발생합니다.
 ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")
 EMBED_MODEL = "text-multilingual-embedding-002"
+
+# ── 컨텍스트 예산 ────────────────────────────────────────────────────────────
+# 실제 서비스(server.py)와 조건을 일치시킵니다. 이전에는 페이지당 2000자,
+# 전체 5000자로 잘라 벡터를 8건 검색해도 LLM은 2건만 보았고, 검색이 성공한
+# 문항도 전달 단계에서 실패했습니다(평가가 시스템을 과소평가).
+PAGE_MAX_CHARS = 4000  # server.py `_fetch_full_pages(max_chars=4000)` 와 동일
+TOP_PAGES = 6  # 컨텍스트에 넣을 페이지 수 (4000자 x 6 = 24000자)
+TOP_RELATIONS = 15  # 컨텍스트에 넣을 그래프 관계 수
+CONTEXT_MAX_CHARS = 26000  # 문서 24000자 + 그래프 요약 여유분
+ANSWER_MAX_TOKENS = 800  # 나열형 답변이 중간에 끊기지 않도록
+SCORE_RESPONSE_CHARS = 2500  # 채점 시 응답을 자르는 한도
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
@@ -263,7 +274,63 @@ def embed(client, text: str) -> list:
 
 
 # ─── 검색 함수 ────────────────────────────────────────────────────────────────
+def _fetch_full_pages(qdrant, page_ids: list, max_chars: int = PAGE_MAX_CHARS) -> dict:
+    """page_id 목록의 모든 청크를 chunk_index 순으로 이어붙여 전체 본문을 반환합니다.
+
+    Parent Document Retrieval — server.py `_fetch_full_pages()`와 동일한 방식입니다.
+    평가가 실제 서비스와 다른 정보량으로 측정되지 않도록 조건을 일치시킵니다.
+    """
+    if not page_ids:
+        return {}
+
+    from qdrant_client.models import FieldCondition, Filter, MatchAny
+
+    pages: dict = {}
+    offset = None
+    while True:
+        rows, next_offset = qdrant.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="page_id", match=MatchAny(any=page_ids))]
+            ),
+            limit=500,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in rows:
+            p = point.payload or {}
+            pid = p.get("page_id", "")
+            if not pid:
+                continue
+            if pid not in pages:
+                pages[pid] = {
+                    "title": p.get("title", ""),
+                    "url": p.get("source_url", ""),
+                    "chunks": [],
+                }
+            pages[pid]["chunks"].append(
+                {"index": p.get("chunk_index", 9999), "text": p.get("text", "")}
+            )
+        offset = next_offset
+        if offset is None:
+            break
+
+    out: dict = {}
+    for pid, page in pages.items():
+        ordered = sorted(page["chunks"], key=lambda c: c["index"])
+        full = "\n\n".join(c["text"] for c in ordered)
+        out[pid] = {
+            "title": page["title"],
+            "url": page["url"],
+            "text": full[:max_chars],
+            "chunk_count": len(ordered),
+        }
+    return out
+
+
 def semantic_search(embed_client, qdrant, query: str, limit: int = 5) -> list:
+    """청크로 검색한 뒤 해당 페이지 전문을 조립해 반환 (Parent Document Retrieval)."""
     vec = embed(embed_client, query)
     result = qdrant.query_points(
         collection_name=COLLECTION_NAME,
@@ -271,17 +338,40 @@ def semantic_search(embed_client, qdrant, query: str, limit: int = 5) -> list:
         limit=limit,
         with_payload=True,
     )
-    out = []
+
+    # 청크 → page_id 단위로 최고 점수 집계
+    page_scores: dict = {}
+    fallback: dict = {}
     for h in result.points:
         p = h.payload or {}
-        out.append(
-            {
+        pid = p.get("page_id", "")
+        score = round(h.score, 4)
+        if not pid:
+            continue
+        if pid not in page_scores or score > page_scores[pid]:
+            page_scores[pid] = score
+            fallback[pid] = {
                 "title": p.get("title", ""),
-                "text": p.get("text", "")[:2000],
-                "score": round(h.score, 4),
+                "text": p.get("text", ""),
                 "url": p.get("source_url", ""),
             }
+
+    full_pages = _fetch_full_pages(qdrant, list(page_scores.keys()))
+
+    out = []
+    for pid, score in page_scores.items():
+        # 전문 조립 실패 시 청크 본문으로 폴백
+        page = full_pages.get(pid) or fallback.get(pid, {})
+        out.append(
+            {
+                "title": page.get("title", ""),
+                "text": page.get("text", ""),
+                "score": score,
+                "url": page.get("url", ""),
+                "chunk_count": page.get("chunk_count", 1),
+            }
         )
+    out.sort(key=lambda x: x["score"], reverse=True)
     return out
 
 
@@ -448,12 +538,14 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
 
     # ── 4. 컨텍스트 합성 ───────────────────────────────────────────────────
     graph_text = ""
-    for r in all_graph[:10]:
+    for r in all_graph[:TOP_RELATIONS]:
         cond = f" (조건: {r['condition']})" if r.get("condition") else ""
         graph_text += f"- {r['subject']} →[{r['predicate']}]→ {r['object']}{cond}\n"
 
+    # 상위 TOP_PAGES 건만 — 무제한이면 CONTEXT_MAX_CHARS 에서 뒤쪽이 잘려
+    # 하위 순위 문서가 상위 문서를 밀어내는 문제가 생깁니다.
     vector_text = ""
-    for s in sem_final:
+    for s in sem_final[:TOP_PAGES]:
         vector_text += f"[{s['title']}]\n{s['text']}\n\n"
 
     return {
@@ -489,7 +581,7 @@ def score_with_claude(claude, question: str, answer: str, response: str) -> dict
     prompt = SCORE_PROMPT.format(
         question=question,
         answer=answer,
-        response=response[:1000],
+        response=response[:SCORE_RESPONSE_CHARS],
     )
     try:
         msg = claude.messages.create(
@@ -513,7 +605,7 @@ def generate_response(context: str, question: str, claude) -> str:
     prompt = f"""아래 컨텍스트를 바탕으로 질문에 답하세요. 컨텍스트에 없는 내용은 답하지 마세요.
 
 컨텍스트:
-{context[:5000]}
+{context[:CONTEXT_MAX_CHARS]}
 
 질문: {question}
 
@@ -521,7 +613,7 @@ def generate_response(context: str, question: str, claude) -> str:
     try:
         msg = claude.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=300,
+            max_tokens=ANSWER_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         )
         return msg.content[0].text.strip()
