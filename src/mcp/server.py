@@ -424,22 +424,39 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
     def _do_graph() -> list:
         gph: list = []
         try:
+            from utils.korean import entity_candidates, match_nodes_in_text
+
             graph = _get_falkordb()
-            words = [w for w in sub_query.split() if len(w) >= 2]
             seen: set = set()
-            for word in words[:3]:
-                nodes = graph.query(
-                    "MATCH (n) WHERE n.name CONTAINS $name RETURN n.name LIMIT 2",
-                    {"name": word},
-                )
-                for row in nodes.result_set:
-                    entity_name = row[0]
-                    if entity_name in seen:
+            matched: list[str] = []
+
+            # ① 역방향 매칭 — 질문 문장에 이름이 등장하는 노드를 찾습니다.
+            #    한국어 조사와 무관하게 동작합니다:
+            #    "데사실은 어느 부서와…" CONTAINS "데사실" → 매칭 성공
+            #    (기존 방식은 n.name CONTAINS "데사실은" 이라 항상 실패했습니다)
+            matched.extend(name for name, _ in match_nodes_in_text(graph, sub_query, limit=5))
+
+            # ② 보완 — 역방향이 비었으면 조사를 제거한 토큰으로 부분 일치 검색
+            if not matched:
+                for word in entity_candidates(sub_query, limit=6):
+                    try:
+                        nodes = graph.query(
+                            "MATCH (n) WHERE n.name CONTAINS $name RETURN n.name LIMIT 2",
+                            {"name": word},
+                        )
+                        matched.extend(str(row[0]) for row in nodes.result_set if row and row[0])
+                    except Exception:
                         continue
-                    seen.add(entity_name)
-                    g = graph_search(entity_name, depth=1)
-                    if g.get("found"):
-                        gph.append(g)
+
+            for entity_name in matched:
+                if entity_name in seen:
+                    continue
+                seen.add(entity_name)
+                g = graph_search(entity_name, depth=1)
+                if g.get("found"):
+                    gph.append(g)
+                if len(gph) >= 3:
+                    break
         except Exception:
             pass
         return gph

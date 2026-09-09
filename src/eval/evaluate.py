@@ -286,32 +286,54 @@ def semantic_search(embed_client, qdrant, query: str, limit: int = 5) -> list:
 
 
 def graph_search(graph, entity: str) -> list:
-    """엔티티와 연결된 모든 관계 탐색"""
-    relations = []
-    # 이름으로 노드 찾기 (부분 일치)
-    words = [w for w in entity.split() if len(w) >= 2][:3]
-    seen = set()
-    for word in words:
-        q = (
-            "MATCH (n)-[r:REL]->(m) WHERE n.name CONTAINS $w OR m.name CONTAINS $w "
-            "RETURN n.name, r.rel_name, m.name, r.condition LIMIT 10"
-        )
+    """엔티티(또는 질문 문장)와 연결된 관계 탐색.
+
+    ※ 한국어 조사 처리: 질문을 .split() 한 토큰에는 조사가 붙어 있어
+      (예: "데사실은") n.name CONTAINS 매칭이 항상 실패합니다.
+      먼저 역방향 매칭(질문 문장에 노드 이름이 등장하는지)으로 엔티티를
+      확정하고, 실패 시 조사 제거 토큰으로 부분 일치를 시도합니다.
+    """
+    from utils.korean import entity_candidates, match_nodes_in_text
+
+    relations: list = []
+    seen: set = set()
+
+    def _collect(cypher: str, params: dict) -> None:
         try:
-            res = graph.query(q, {"w": word})
-            for row in res.result_set:
-                key = (row[0], row[1], row[2])
-                if key not in seen:
-                    seen.add(key)
-                    relations.append(
-                        {
-                            "subject": row[0],
-                            "predicate": row[1],
-                            "object": row[2],
-                            "condition": row[3] if len(row) > 3 else "",
-                        }
-                    )
+            res = graph.query(cypher, params)
         except Exception:
-            pass
+            return
+        for row in res.result_set:
+            key = (row[0], row[1], row[2])
+            if key in seen:
+                continue
+            seen.add(key)
+            relations.append(
+                {
+                    "subject": row[0],
+                    "predicate": row[1],
+                    "object": row[2],
+                    "condition": row[3] if len(row) > 3 else "",
+                }
+            )
+
+    # ① 역방향 매칭으로 엔티티 확정 → 정확한 이름으로 관계 조회
+    for name, _type in match_nodes_in_text(graph, entity, limit=5):
+        _collect(
+            "MATCH (n)-[r:REL]->(m) WHERE n.name = $n OR m.name = $n "
+            "RETURN n.name, r.rel_name, m.name, r.condition LIMIT 15",
+            {"n": name},
+        )
+
+    # ② 보완 — 매칭 실패 시 조사 제거 토큰으로 부분 일치
+    if not relations:
+        for word in entity_candidates(entity, limit=6):
+            _collect(
+                "MATCH (n)-[r:REL]->(m) WHERE n.name CONTAINS $w OR m.name CONTAINS $w "
+                "RETURN n.name, r.rel_name, m.name, r.condition LIMIT 10",
+                {"w": word},
+            )
+
     return relations
 
 
