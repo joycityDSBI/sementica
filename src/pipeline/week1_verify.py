@@ -6,7 +6,8 @@ Premise 3 합격 기준:
 
 환경변수 (.env 파일):
   GOOGLE_CLOUD_PROJECT=datahub-478802
-  VERTEX_AI_LOCATION=us-east5          # Claude 지원 리전
+  VERTEX_AI_LOCATION=us-east5          # 임베딩 리전
+  ANTHROPIC_VERTEX_REGION=global       # Claude 리전 (임베딩과 별개)
   VERTEX_AI_MODEL=claude-sonnet-4-6@20250514
   GOOGLE_APPLICATION_CREDENTIALS=C:\\sementica\\service-account-key.json
 
@@ -37,7 +38,9 @@ LOGS_DIR = Path(__file__).parent.parent.parent / "data" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
+LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")  # 임베딩 리전
+# Claude 리전은 임베딩과 별개 — ingest.py와 동일한 환경변수를 사용
+ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")
 MODEL = os.environ.get("VERTEX_AI_MODEL", "claude-sonnet-4-6@20250514")
 
 # ─── AnthropicVertex 클라이언트 초기화 ───────────────────────────────────────
@@ -54,9 +57,9 @@ def _init_client():
     try:
         from anthropic import AnthropicVertex
 
-        _client = AnthropicVertex(project_id=GCP_PROJECT, region=LOCATION)
+        _client = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
         print("✅ Claude on Vertex AI 초기화 완료")
-        print(f"   프로젝트: {GCP_PROJECT} | 모델: {MODEL} | 리전: {LOCATION}")
+        print(f"   프로젝트: {GCP_PROJECT} | 모델: {MODEL} | 리전: {ANTHROPIC_REGION}")
         return True
     except Exception as e:
         print(f"❌ AnthropicVertex 초기화 실패: {e}")

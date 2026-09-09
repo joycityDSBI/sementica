@@ -41,7 +41,10 @@ if _env.exists():
 import argparse as _argparse  # noqa: E402
 
 GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
+LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")  # 임베딩 리전
+# Claude 리전은 임베딩과 별개 — ingest.py와 동일한 환경변수를 사용.
+# 임베딩 리전(us-central1 등)을 넘기면 "not servable in region" 400 오류가 발생합니다.
+ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")
 EMBED_MODEL = "text-multilingual-embedding-002"
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
@@ -249,7 +252,7 @@ def init_clients():
     qdrant = QdrantClient(url=QDRANT_URL)
     db = fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
     graph = db.select_graph(GRAPH_NAME)
-    claude = AnthropicVertex(project_id=GCP_PROJECT, region=LOCATION)
+    claude = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
 
     return embed_client, qdrant, graph, claude
 

@@ -325,6 +325,17 @@ def _judge_verdict(prompt: str, max_tokens: int = 150) -> bool:
     return json.loads(m.group()).get("verdict", "fail") == "pass"
 
 
+# API 오류를 조용히 삼키면 모든 문항이 탈락해도 원인을 알 수 없으므로
+# 첫 실패만 표면화합니다 (리전 설정 오류 등의 진단용).
+_err_shown: set[str] = set()
+
+
+def _warn_once(kind: str, exc: Exception) -> None:
+    if kind not in _err_shown:
+        _err_shown.add(kind)
+        print(f"\n  ⚠️  {kind} LLM 호출 실패 — 이후 동일 오류는 생략합니다:\n     {exc}\n")
+
+
 def verify_grounded(question: str, answer: str, source_text: str) -> bool:
     """★ 채택 기준 — 정답이 소스 원문으로 뒷받침되는지 확인.
 
@@ -339,7 +350,8 @@ def verify_grounded(question: str, answer: str, source_text: str) -> bool:
                 answer=answer,
             )
         )
-    except Exception:
+    except Exception as e:
+        _warn_once("근거 검증", e)
         return False
 
 
@@ -382,7 +394,8 @@ def baseline_search_pass(question: str, answer: str, search_limit: int = 7) -> b
             _SCORE_PROMPT.format(question=question, answer=answer, response=response[:500]),
             max_tokens=100,
         )
-    except Exception:
+    except Exception as e:
+        _warn_once("baseline 검색", e)
         return False
 
 
