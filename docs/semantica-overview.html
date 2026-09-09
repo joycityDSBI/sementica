@@ -1,0 +1,928 @@
+
+<title>Semantica 온톨로지</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@700&family=Noto+Sans+KR:wght@400;500;700&family=Inter+Tight:wght@400;500;600;700&display=swap">
+
+<style>
+:root {
+  --bg:          #F7F9FD;
+  --bg-card:     #FFFFFF;
+  --bg-alt:      #EEF3FA;
+  --text:        #1B2536;
+  --text-muted:  #5A708A;
+  --border:      #D1DDEC;
+  --accent:      #1D6FE8;
+  --accent-soft: #E8F0FE;
+
+  --notion:      #E46135;
+  --notion-soft: #FFF0EB;
+  --vector:      #059669;
+  --vector-soft: #ECFDF5;
+  --graph:       #D97706;
+  --graph-soft:  #FFFBEB;
+  --snowflake:   #0284C7;
+  --snowflake-soft: #F0F9FF;
+  --mcp:         #7C3AED;
+  --mcp-soft:    #F5F3FF;
+  --llm:         #DB2777;
+  --llm-soft:    #FDF2F8;
+
+  --r: 8px;
+  --font: 'Noto Sans KR', sans-serif;
+  --font-label: 'Inter Tight', 'Noto Sans KR', sans-serif;
+  --font-display: 'Noto Serif KR', serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:          #0D1825;
+    --bg-card:     #172031;
+    --bg-alt:      #121F30;
+    --text:        #D6E5F5;
+    --text-muted:  #6B8BAD;
+    --border:      #243451;
+    --accent:      #4D9EF8;
+    --accent-soft: #0F2447;
+    --notion:      #FF8256;  --notion-soft: #2A1509;
+    --vector:      #34D399;  --vector-soft: #062318;
+    --graph:       #FBC43A;  --graph-soft:  #271900;
+    --snowflake:   #38BDF8;  --snowflake-soft: #041829;
+    --mcp:         #A78BFA;  --mcp-soft:    #1A0F38;
+    --llm:         #F472B6;  --llm-soft:    #2A0A1F;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0D1825; --bg-card: #172031; --bg-alt: #121F30;
+  --text: #D6E5F5; --text-muted: #6B8BAD; --border: #243451;
+  --accent: #4D9EF8; --accent-soft: #0F2447;
+  --notion: #FF8256; --notion-soft: #2A1509;
+  --vector: #34D399; --vector-soft: #062318;
+  --graph: #FBC43A; --graph-soft: #271900;
+  --snowflake: #38BDF8; --snowflake-soft: #041829;
+  --mcp: #A78BFA; --mcp-soft: #1A0F38;
+  --llm: #F472B6; --llm-soft: #2A0A1F;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Header ── */
+.header {
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  padding: 28px 32px 0;
+  max-width: 100%;
+}
+.header-top {
+  max-width: 860px;
+  margin: 0 auto;
+  padding-bottom: 24px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.header-title {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.header-eyebrow {
+  font-family: var(--font-label);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.header h1 {
+  font-family: var(--font-display);
+  font-size: clamp(20px, 3.5vw, 28px);
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.25;
+  text-wrap: balance;
+}
+.header-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+  max-width: 520px;
+  line-height: 1.65;
+}
+
+/* ── Tab carousel ── */
+.tab-rail {
+  max-width: 860px;
+  margin: 0 auto;
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-bottom: 0;
+}
+.tab-rail::-webkit-scrollbar { display: none; }
+
+.tab-btn {
+  flex-shrink: 0;
+  font-family: var(--font-label);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 10px 18px 12px;
+  border-bottom: 2px solid transparent;
+  transition: color .15s, border-color .15s;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  line-height: 1;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.tab-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* ── Panel ── */
+.panels {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 36px 32px 60px;
+}
+
+.panel { display: none; animation: fadeIn .2s ease; }
+.panel.active { display: block; }
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+/* ── Section title ── */
+.panel-title {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.panel-desc {
+  font-size: 13.5px;
+  color: var(--text-muted);
+  max-width: 640px;
+  line-height: 1.75;
+  margin-bottom: 28px;
+}
+
+/* ── System badges ── */
+.badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 28px; }
+.badge {
+  font-family: var(--font-label);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 100px;
+  border: 1px solid;
+}
+.b-notion  { color: var(--notion);    border-color: var(--notion);    background: var(--notion-soft); }
+.b-vector  { color: var(--vector);    border-color: var(--vector);    background: var(--vector-soft); }
+.b-graph   { color: var(--graph);     border-color: var(--graph);     background: var(--graph-soft); }
+.b-snow    { color: var(--snowflake); border-color: var(--snowflake); background: var(--snowflake-soft); }
+.b-mcp     { color: var(--mcp);       border-color: var(--mcp);       background: var(--mcp-soft); }
+.b-llm     { color: var(--llm);       border-color: var(--llm);       background: var(--llm-soft); }
+.b-accent  { color: var(--accent);    border-color: var(--accent);    background: var(--accent-soft); }
+
+/* ── Flow: vertical ── */
+.vflow { display: flex; flex-direction: column; }
+.vf-step {
+  display: flex;
+  gap: 14px;
+  position: relative;
+}
+.vf-step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: 18px; top: 38px;
+  width: 2px; height: calc(100% - 14px);
+  background: var(--border);
+}
+.vf-dot {
+  flex-shrink: 0;
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-label);
+  font-size: 11px; font-weight: 700;
+  position: relative; z-index: 1;
+}
+.vf-body { padding: 6px 0 24px; flex: 1; }
+.vf-title { font-weight: 700; font-size: 13.5px; margin-bottom: 4px; color: var(--text); }
+.vf-desc { font-size: 12.5px; color: var(--text-muted); line-height: 1.7; }
+
+.d-notion   { background: var(--notion-soft);    color: var(--notion); }
+.d-vector   { background: var(--vector-soft);    color: var(--vector); }
+.d-graph    { background: var(--graph-soft);     color: var(--graph); }
+.d-snow     { background: var(--snowflake-soft); color: var(--snowflake); }
+.d-mcp      { background: var(--mcp-soft);       color: var(--mcp); }
+.d-llm      { background: var(--llm-soft);       color: var(--llm); }
+.d-accent   { background: var(--accent-soft);    color: var(--accent); }
+.d-neutral  { background: var(--bg-alt);         color: var(--text-muted); border: 1px solid var(--border); }
+
+/* ── Flow: horizontal ── */
+.hflow {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  gap: 0;
+  padding-bottom: 4px;
+}
+.hf-step {
+  flex: 1; min-width: 120px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 14px 12px;
+}
+.hf-label {
+  font-family: var(--font-label);
+  font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em;
+  margin-bottom: 5px;
+}
+.hf-title { font-weight: 700; font-size: 12.5px; margin-bottom: 4px; color: var(--text); line-height: 1.3; }
+.hf-desc { font-size: 11.5px; color: var(--text-muted); line-height: 1.6; }
+.hf-arrow {
+  flex-shrink: 0;
+  display: flex; align-items: center;
+  padding: 0 5px; color: var(--text-muted); font-size: 14px;
+}
+
+.hf-notion   .hf-label { color: var(--notion); }
+.hf-vector   .hf-label { color: var(--vector); }
+.hf-graph    .hf-label { color: var(--graph); }
+.hf-snow     .hf-label { color: var(--snowflake); }
+.hf-mcp      .hf-label { color: var(--mcp); }
+.hf-llm      .hf-label { color: var(--llm); }
+.hf-accent   .hf-label { color: var(--accent); }
+
+/* ── Cards grid ── */
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+@media (max-width: 640px) {
+  .grid2, .grid3 { grid-template-columns: 1fr; }
+  .hflow { flex-direction: column; }
+  .hf-arrow { transform: rotate(90deg); align-self: center; padding: 4px 0; }
+  .panels { padding: 24px 16px 48px; }
+  .header { padding: 20px 16px 0; }
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 16px;
+  border-top: 3px solid var(--border);
+}
+.card.c-notion   { border-top-color: var(--notion); }
+.card.c-vector   { border-top-color: var(--vector); }
+.card.c-graph    { border-top-color: var(--graph); }
+.card.c-snow     { border-top-color: var(--snowflake); }
+.card.c-mcp      { border-top-color: var(--mcp); }
+.card.c-llm      { border-top-color: var(--llm); }
+.card.c-accent   { border-top-color: var(--accent); }
+.card-name  { font-family: var(--font-label); font-size: 12.5px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.card-role  { font-size: 10.5px; font-family: var(--font-label); color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+.card-desc  { font-size: 12px; color: var(--text-muted); line-height: 1.65; }
+
+/* ── Callout ── */
+.callout {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 0 var(--r) var(--r) 0;
+  padding: 12px 16px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.7;
+  margin-top: 16px;
+}
+.callout strong { color: var(--text); }
+.callout.notion { border-left-color: var(--notion); background: var(--notion-soft); }
+.callout.vector { border-left-color: var(--vector); background: var(--vector-soft); }
+.callout.graph  { border-left-color: var(--graph);  background: var(--graph-soft); }
+.callout.snow   { border-left-color: var(--snowflake); background: var(--snowflake-soft); }
+.callout.llm    { border-left-color: var(--llm);    background: var(--llm-soft); }
+
+/* ── Decision branch ── */
+.branch {
+  background: var(--bg-card);
+  border: 1.5px solid var(--llm);
+  border-radius: var(--r);
+  padding: 16px;
+  margin: 12px 0;
+}
+.branch-title { font-weight: 700; font-size: 13px; color: var(--llm); margin-bottom: 10px; }
+.branch-paths { display: flex; gap: 10px; }
+.branch-path {
+  flex: 1;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-muted);
+}
+.branch-path.active-path {
+  background: var(--snowflake-soft);
+  border-color: var(--snowflake);
+}
+.path-label {
+  font-family: var(--font-label);
+  font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .06em;
+  margin-bottom: 6px;
+}
+.path-a .path-label { color: var(--accent); }
+.path-b .path-label { color: var(--snowflake); }
+
+/* ── Sub heading ── */
+.sub-heading {
+  font-size: 13px; font-weight: 700; color: var(--text);
+  margin: 24px 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ── Block type mini grid ── */
+.block-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; margin-top: 12px; }
+.block-item {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 6px; padding: 10px 12px; font-size: 11.5px;
+}
+.block-label { font-family: var(--font-label); font-size: 10px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 3px; }
+.block-val { color: var(--text); line-height: 1.4; }
+.block-item.hl .block-label { color: var(--llm); }
+
+/* inline code */
+.ic { font-family: 'SF Mono','Consolas',monospace; font-size: 11px; background: var(--bg-alt); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; color: var(--accent); }
+
+a:focus-visible { outline: 2px solid var(--accent); border-radius: 2px; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<!-- ── Header ── -->
+<header class="header">
+  <div class="header-top">
+    <div class="header-title">
+      <span class="header-eyebrow">JoyCity 전략사업본부 · 온톨로지 검색 시스템</span>
+      <h1>Semantica — Notion 기반 온톨로지 플랫폼</h1>
+    </div>
+    <p class="header-sub">Notion 지식을 자동 구조화하여 자연어 검색과<br>Snowflake 데이터 분석 품질 향상에 활용합니다.</p>
+  </div>
+
+  <!-- Tab carousel -->
+  <nav class="tab-rail" role="tablist" aria-label="섹션 선택">
+    <button class="tab-btn active" role="tab" aria-selected="true"  data-panel="overview"    onclick="switchTab(this)"><span class="tab-icon">🗺</span> 시스템 개요</button>
+    <button class="tab-btn"        role="tab" aria-selected="false" data-panel="collection"  onclick="switchTab(this)"><span class="tab-icon">📥</span> 데이터 수집</button>
+    <button class="tab-btn"        role="tab" aria-selected="false" data-panel="query"       onclick="switchTab(this)"><span class="tab-icon">🔍</span> 질의 응답</button>
+    <button class="tab-btn"        role="tab" aria-selected="false" data-panel="snowflake"   onclick="switchTab(this)"><span class="tab-icon">❄️</span> Snowflake 연동</button>
+    <button class="tab-btn"        role="tab" aria-selected="false" data-panel="tech"        onclick="switchTab(this)"><span class="tab-icon">⚙️</span> 기술 스택</button>
+    <button class="tab-btn"        role="tab" aria-selected="false" data-panel="quality"     onclick="switchTab(this)"><span class="tab-icon">📈</span> 분석 품질 향상</button>
+    <button class="tab-btn"        role="tab" aria-selected="false" data-panel="role"        onclick="switchTab(this)"><span class="tab-icon">📦</span> Semantica</button>
+  </nav>
+</header>
+
+<!-- ── Panels ── -->
+<main class="panels">
+
+  <!-- ① 시스템 개요 -->
+  <section class="panel active" id="panel-overview" role="tabpanel">
+    <h2 class="panel-title">시스템 개요</h2>
+    <p class="panel-desc">
+      Semantica는 전략사업본부 Notion에 축적된 문서와 의사결정 이력을 수집·구조화하여
+      자연어 질문으로 검색하고, Snowflake 분석에 직접 연결하는 온톨로지 플랫폼입니다.
+    </p>
+
+    <div class="badges">
+      <span class="badge b-notion">Notion API</span>
+      <span class="badge b-vector">벡터 DB (Qdrant)</span>
+      <span class="badge b-graph">그래프 DB (FalkorDB)</span>
+      <span class="badge b-snow">Snowflake UDF</span>
+      <span class="badge b-mcp">MCP 서버 (Claude)</span>
+    </div>
+
+    <div class="grid2" style="margin-bottom: 20px;">
+      <div class="card c-accent">
+        <div class="card-name">문제 의식</div>
+        <div class="card-desc" style="margin-top: 8px;">
+          Notion에 축적된 운영 이력·의사결정 맥락이 수치 분석에 연결되지 않아,
+          데이터 이면의 이유를 파악하는 데 시간이 소요됩니다.
+        </div>
+      </div>
+      <div class="card c-vector">
+        <div class="card-name">해결 방식</div>
+        <div class="card-desc" style="margin-top: 8px;">
+          Notion 문서를 자동 수집해 벡터·그래프 DB에 구조화하고,
+          자연어 질문 하나로 관련 이력을 즉시 검색합니다.
+          Snowflake SQL에서도 동일하게 활용합니다.
+        </div>
+      </div>
+    </div>
+
+    <!-- Architecture diagram (simplified) -->
+    <p class="sub-heading">전체 아키텍처</p>
+
+    <div class="hflow" style="margin-bottom: 8px;">
+      <div class="hf-step hf-notion">
+        <div class="hf-label">소스</div>
+        <div class="hf-title">Notion</div>
+        <div class="hf-desc">전략사업본부 문서·운영 이력</div>
+      </div>
+      <div class="hf-arrow">→</div>
+      <div class="hf-step hf-accent">
+        <div class="hf-label">파이프라인</div>
+        <div class="hf-title">수집 · 전처리</div>
+        <div class="hf-desc">블록 파싱, HTML 변환, 텍스트 분할</div>
+      </div>
+      <div class="hf-arrow">→</div>
+      <div class="hf-step hf-vector">
+        <div class="hf-label">벡터 DB</div>
+        <div class="hf-title">Qdrant</div>
+        <div class="hf-desc">의미 검색용 임베딩 저장</div>
+      </div>
+      <div class="hf-arrow">+</div>
+      <div class="hf-step hf-graph">
+        <div class="hf-label">그래프 DB</div>
+        <div class="hf-title">FalkorDB</div>
+        <div class="hf-desc">관계·이벤트 네트워크 저장</div>
+      </div>
+      <div class="hf-arrow">→</div>
+      <div class="hf-step hf-mcp">
+        <div class="hf-label">검색 인터페이스</div>
+        <div class="hf-title">MCP 서버 / REST API</div>
+        <div class="hf-desc">Claude Desktop · Snowflake UDF 연동</div>
+      </div>
+    </div>
+
+    <div class="callout">
+      <strong>현황:</strong> 전략사업본부 Notion 페이지 약 370개 수집·인덱싱 완료.
+      증분 동기화로 페이지 추가·수정 시 자동 갱신됩니다.
+    </div>
+  </section>
+
+  <!-- ② 데이터 수집 -->
+  <section class="panel" id="panel-collection" role="tabpanel">
+    <h2 class="panel-title">데이터 수집 플로우</h2>
+    <p class="panel-desc">
+      <span class="ic">departments.yaml</span>에 정의된 본부별 Notion 페이지를 루트로 삼아
+      하위 페이지를 재귀 수집합니다. 텍스트·테이블·HTML 첨부 파일을 모두 처리합니다.
+    </p>
+
+    <div class="vflow">
+      <div class="vf-step">
+        <div class="vf-dot d-notion">N</div>
+        <div class="vf-body">
+          <div class="vf-title">① Notion API — 페이지 수집</div>
+          <div class="vf-desc">루트 데이터베이스 하위 모든 페이지를 재귀 순회 (최대 4단계). 이전 수집 후 수정된 페이지만 갱신하는 증분 동기화 지원.</div>
+        </div>
+      </div>
+
+      <div class="vf-step">
+        <div class="vf-dot d-accent">②</div>
+        <div class="vf-body">
+          <div class="vf-title">② 블록 파싱 — 본문 변환</div>
+          <div class="vf-desc">Notion 블록 유형별로 처리합니다.</div>
+          <div class="block-grid" style="margin-top: 10px;">
+            <div class="block-item"><div class="block-label">텍스트·제목·목록</div><div class="block-val">마크다운으로 변환</div></div>
+            <div class="block-item"><div class="block-label">테이블 블록</div><div class="block-val">마크다운 테이블로 변환</div></div>
+            <div class="block-item hl"><div class="block-label">HTML 첨부 파일</div><div class="block-val">다운로드 후 HTML 파서 적용</div></div>
+            <div class="block-item"><div class="block-label">이미지·PDF</div><div class="block-val">파일명만 기록</div></div>
+          </div>
+          <!-- HTML parser detail -->
+          <div style="margin-top: 12px; background: var(--llm-soft); border: 1px solid var(--border); border-left: 3px solid var(--llm); border-radius: 0 6px 6px 0; padding: 12px 14px;">
+            <div style="font-family: var(--font-label); font-size: 10.5px; font-weight: 700; color: var(--llm); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px;">HTML 파서 (_HTMLStripper) 동작</div>
+            <div style="font-size: 12px; color: var(--text-muted); line-height: 1.7; display: flex; flex-direction: column; gap: 5px;">
+              <div><strong style="color:var(--text);">1. S3 URL 감지</strong> — Notion 업로드 파일은 S3 URL에 저장. URL만으로 HTML 여부 판별 불가 → GET으로 실제 내용 확인</div>
+              <div><strong style="color:var(--text);">2. Content-Type 검사</strong> — <span class="ic">text/html</span> 또는 <span class="ic">&lt;!DOCTYPE html&gt;</span> 선언으로 HTML 판별</div>
+              <div><strong style="color:var(--text);">3. 태그 제거</strong> — script·style·head 제외, body 본문만 평문으로 추출. 블록 요소(p, td 등)에서 줄바꿈 삽입</div>
+              <div><strong style="color:var(--text);">4. 마커 삽입</strong> — <span class="ic">[첨부 HTML: 파일명]</span> 형태로 .md 본문에 포함</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="vf-step">
+        <div class="vf-dot d-accent">③</div>
+        <div class="vf-body">
+          <div class="vf-title">③ .md 파일 저장</div>
+          <div class="vf-desc">YAML 프론트매터(페이지 ID·URL·수정 시각) + 본문을 <span class="ic">data/strategic/notion_pages/</span>에 저장. 30단어 미만 페이지는 파일 미생성.</div>
+        </div>
+      </div>
+
+      <div class="vf-step">
+        <div class="vf-dot d-vector">④</div>
+        <div class="vf-body">
+          <div class="vf-title">④ 임베딩 → 벡터 DB (Qdrant)</div>
+          <div class="vf-desc">텍스트 청크 분할 → Google Vertex AI <span class="ic">text-multilingual-embedding-002</span>로 768차원 벡터 생성 → Qdrant <span class="ic">strategic_pages</span> 컬렉션 저장. 검색 시 같은 page_id의 모든 청크를 조합해 전체 본문(최대 4,000자) 반환.</div>
+        </div>
+      </div>
+
+      <div class="vf-step">
+        <div class="vf-dot d-graph">⑤</div>
+        <div class="vf-body">
+          <div class="vf-title">⑤ 트리플 추출 → 그래프 DB (FalkorDB)</div>
+          <div class="vf-desc">Claude LLM이 문서에서 <em>주어–관계–목적어</em> 트리플 추출 → FalkorDB <span class="ic">strategic_kg</span>에 Game·Team·Person·Event 등 8종 엔티티 노드로 저장. 게임별 운영 이벤트가 날짜와 함께 기록되어 시계열 조회 가능.</div>
+        </div>
+      </div>
+
+      <div class="vf-step">
+        <div class="vf-dot d-neutral">⑥</div>
+        <div class="vf-body" style="padding-bottom: 0;">
+          <div class="vf-title">⑥ PostgreSQL — 운영 메타데이터 기록</div>
+          <div class="vf-desc">수집 상태·청크 수·HTML 첨부 여부·마지막 동기화 시각을 기록. 웹 운영 대시보드(port 8080)에서 현황 및 📎 아이콘으로 HTML 첨부 여부를 확인.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ③ 질의 응답 -->
+  <section class="panel" id="panel-query" role="tabpanel">
+    <h2 class="panel-title">질의 응답 플로우</h2>
+    <p class="panel-desc">
+      자연어 질문이 들어오면 벡터 검색과 그래프 탐색을 병렬 수행하여 관련 문서와 이벤트를 조합합니다.
+      Claude Desktop(MCP)과 Snowflake 모두 동일한 검색 엔진을 사용합니다.
+    </p>
+
+    <div class="hflow" style="margin-bottom: 20px;">
+      <div class="hf-step hf-mcp">
+        <div class="hf-label">질문</div>
+        <div class="hf-title">자연어 질의</div>
+        <div class="hf-desc">Claude Desktop 또는 Snowflake UDF를 통해 MCP 서버로 전달</div>
+      </div>
+      <div class="hf-arrow">→</div>
+      <div class="hf-step hf-accent">
+        <div class="hf-label">임베딩</div>
+        <div class="hf-title">쿼리 벡터화</div>
+        <div class="hf-desc">Vertex AI로 질문을 768차원 벡터 변환</div>
+      </div>
+      <div class="hf-arrow">→</div>
+      <div class="hf-step hf-vector">
+        <div class="hf-label">벡터 검색</div>
+        <div class="hf-title">유사 문서 탐색</div>
+        <div class="hf-desc">Qdrant 코사인 유사도 → 페이지 전체 본문 재조합</div>
+      </div>
+      <div class="hf-arrow">+</div>
+      <div class="hf-step hf-graph">
+        <div class="hf-label">그래프 탐색</div>
+        <div class="hf-title">관계·이벤트 검색</div>
+        <div class="hf-desc">FalkorDB 엔티티·이벤트 → 벡터 결과 교차 연결</div>
+      </div>
+      <div class="hf-arrow">→</div>
+      <div class="hf-step hf-llm">
+        <div class="hf-label">응답</div>
+        <div class="hf-title">문서 기반 답변</div>
+        <div class="hf-desc">Notion 원문 + 그래프 맥락으로 Claude가 답변 생성</div>
+      </div>
+    </div>
+
+    <p class="sub-heading">검색 도구 (MCP Tools)</p>
+    <div class="grid2">
+      <div class="card c-mcp">
+        <div class="card-name">hybrid_search</div>
+        <div class="card-role">통합 검색 (기본)</div>
+        <div class="card-desc">벡터 + 그래프 동시 수행. 그래프 엣지에서 추가 연결 문서(linked_pages)도 반환.</div>
+      </div>
+      <div class="card c-vector">
+        <div class="card-name">semantic_search</div>
+        <div class="card-role">의미 기반 검색</div>
+        <div class="card-desc">키워드 없이 의미로 문서 탐색. 페이지 전체 본문 최대 4,000자 반환.</div>
+      </div>
+      <div class="card c-graph">
+        <div class="card-name">timeline_search</div>
+        <div class="card-role">이벤트 이력 조회</div>
+        <div class="card-desc">게임·기간·이벤트 유형으로 운영 이력을 시계열로 조회. 각 이벤트에 Notion 원문 연결.</div>
+      </div>
+      <div class="card c-accent">
+        <div class="card-name">graph_search</div>
+        <div class="card-role">엔티티 관계 탐색</div>
+        <div class="card-desc">게임·팀·인물에서 연결된 관계망 탐색. 홉(hop) 수로 탐색 범위 조절.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ④ Snowflake 연동 -->
+  <section class="panel" id="panel-snowflake" role="tabpanel">
+    <h2 class="panel-title">Snowflake 연동 플로우</h2>
+    <p class="panel-desc">
+      Cortex Agent가 질문을 받으면 Agent Instruction과 Tool Instruction을 참조해
+      지표 데이터만 필요한지, 온톨로지 지식이 필요한지를 LLM이 판단합니다.
+      온톨로지가 필요한 경우 <span class="ic">sementica_hybrid</span>를 기본으로 호출합니다.
+    </p>
+
+    <div class="vflow">
+      <div class="vf-step">
+        <div class="vf-dot d-snow">❄</div>
+        <div class="vf-body">
+          <div class="vf-title">① 사용자 질문 — Cortex Agent 수신</div>
+          <div class="vf-desc">분석가가 자연어로 질문. Cortex Agent가 어떤 도구를 사용할지 판단을 시작합니다.</div>
+        </div>
+      </div>
+
+      <div class="vf-step">
+        <div class="vf-dot d-llm">AI</div>
+        <div class="vf-body">
+          <div class="vf-title">② LLM 판단 — Agent &amp; Tool Instruction 기반</div>
+          <div class="vf-desc">등록된 Instruction에 따라 두 경로 중 하나를 선택합니다.</div>
+          <div class="branch">
+            <div class="branch-title">LLM 도구 선택 분기</div>
+            <div class="branch-paths">
+              <div class="branch-path path-a">
+                <div class="path-label">PATH A — 지표만 필요</div>
+                "이번 달 DS DAU는?" 같은 수치 조회<br><br>
+                <strong style="color:var(--text);">→ Cortex Analyst</strong><br>
+                KPI 테이블 직접 분석
+              </div>
+              <div class="branch-path active-path path-b">
+                <div class="path-label">PATH B — 온톨로지 필요 (기본)</div>
+                이유·배경·이력이 필요한 질문<br><br>
+                <strong style="color:var(--text);">→ sementica_hybrid</strong><br>
+                벡터 + 그래프 통합 검색
+              </div>
+            </div>
+          </div>
+          <div class="callout llm" style="margin-top: 10px;">
+            <strong>Tool Instruction 예시:</strong>
+            <em> "지표 수치만 필요하면 Cortex Analyst를 사용하세요. 이유·배경·운영 이력이 필요하면 sementica_hybrid를, 특정 게임·기간 이벤트 이력은 sementica_events를 사용하세요."</em>
+          </div>
+        </div>
+      </div>
+
+      <div class="vf-step">
+        <div class="vf-dot d-accent">③</div>
+        <div class="vf-body">
+          <div class="vf-title">③ Python UDF → ngrok → REST API</div>
+          <div class="vf-desc">Snowflake Python UDF가 External Network Access를 통해 ngrok HTTPS 터널로 GCP VM의 REST API 서버(port 8766)를 호출합니다.</div>
+        </div>
+      </div>
+
+      <div class="vf-step">
+        <div class="vf-dot d-neutral">④</div>
+        <div class="vf-body">
+          <div class="vf-title">④ 벡터 + 그래프 병렬 검색</div>
+          <div class="vf-desc">Qdrant(의미 검색)와 FalkorDB(관계·이벤트)를 동시에 쿼리하여 결과를 조합합니다.</div>
+        </div>
+      </div>
+
+      <div class="vf-step">
+        <div class="vf-dot d-llm">⑤</div>
+        <div class="vf-body" style="padding-bottom: 0;">
+          <div class="vf-title">⑤ Cortex Agent — 최종 답변 생성</div>
+          <div class="vf-desc">온톨로지 결과가 VARIANT로 반환되고, Cortex Agent가 KPI 수치와 Notion 맥락을 결합하여 자연어 답변을 생성합니다.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑤ 기술 스택 -->
+  <section class="panel" id="panel-tech" role="tabpanel">
+    <h2 class="panel-title">기술 스택</h2>
+    <p class="panel-desc">각 구성 요소의 역할과 기술 선택 이유를 정리합니다.</p>
+
+    <div class="grid3">
+      <div class="card c-notion">
+        <div class="card-name">Notion API</div>
+        <div class="card-role">데이터 소스</div>
+        <div class="card-desc">전략사업본부 문서·운영 이력 수집. 페이지 단위 재귀 수집 및 증분 동기화.</div>
+      </div>
+      <div class="card c-accent">
+        <div class="card-name">Google Vertex AI</div>
+        <div class="card-role">임베딩 모델</div>
+        <div class="card-desc"><span class="ic">text-multilingual-embedding-002</span> 768차원. 한국어 포함 다국어 지원.</div>
+      </div>
+      <div class="card c-vector">
+        <div class="card-name">Qdrant</div>
+        <div class="card-role">벡터 데이터베이스</div>
+        <div class="card-desc">코사인 유사도 검색. 키워드 없이 의미적으로 유사한 문서를 탐색.</div>
+      </div>
+      <div class="card c-graph">
+        <div class="card-name">FalkorDB</div>
+        <div class="card-role">그래프 데이터베이스</div>
+        <div class="card-desc">게임·팀·이벤트 간 관계 네트워크. 시계열 이벤트·인과 관계 추적에 특화.</div>
+      </div>
+      <div class="card c-llm">
+        <div class="card-name">Claude (Anthropic)</div>
+        <div class="card-role">LLM — 추출 &amp; 응답</div>
+        <div class="card-desc">수집 단계에서 지식 트리플 추출, 검색 단계에서 자연어 답변 생성 두 역할.</div>
+      </div>
+      <div class="card c-mcp">
+        <div class="card-name">MCP 서버 (FastMCP)</div>
+        <div class="card-role">Claude Desktop 연동</div>
+        <div class="card-desc">Claude Desktop·Cursor에서 온톨로지 검색 도구를 대화 중 직접 사용.</div>
+      </div>
+      <div class="card c-snow">
+        <div class="card-name">Snowflake Python UDF</div>
+        <div class="card-role">SQL 연동</div>
+        <div class="card-desc">SQL 쿼리에서 온톨로지를 직접 호출. Cortex Agent와 결합하여 KPI + 맥락 분석.</div>
+      </div>
+      <div class="card c-accent">
+        <div class="card-name">PostgreSQL</div>
+        <div class="card-role">운영 메타데이터</div>
+        <div class="card-desc">수집 이력·동기화 상태·HTML 첨부 여부 관리. 웹 대시보드(port 8080) 기반.</div>
+      </div>
+      <div class="card c-accent">
+        <div class="card-name">GCP VM + ngrok</div>
+        <div class="card-role">인프라</div>
+        <div class="card-desc">GCP VM에서 모든 서비스 실행. ngrok HTTPS 터널로 Snowflake에 외부 노출.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑥ 분석 품질 향상 -->
+  <section class="panel" id="panel-quality" role="tabpanel">
+    <h2 class="panel-title">데이터 분석 품질 향상</h2>
+    <p class="panel-desc">
+      Semantica는 Notion 맥락 정보를 정량 데이터 분석에 연결하여 분석 품질을 높입니다.
+    </p>
+
+    <div class="grid2">
+      <div class="card c-accent">
+        <div class="card-name">운영 이벤트 ↔ 지표 연결</div>
+        <div class="card-desc" style="margin-top: 8px;">UA 예산 조정·이벤트 집행·정책 변경 이력이 날짜·게임 기준으로 검색됩니다. 수치 이상 발생 시 해당 기간의 운영 이벤트를 즉시 조회할 수 있습니다.</div>
+      </div>
+      <div class="card c-vector">
+        <div class="card-name">의사결정 근거 자동 참조</div>
+        <div class="card-desc" style="margin-top: 8px;">특정 전략이 채택된 이유, 팀 간 협의 내역, 리스크로 기록된 항목을 자연어 질문으로 즉시 검색합니다.</div>
+      </div>
+      <div class="card c-snow">
+        <div class="card-name">KPI × 온톨로지 교차 분석</div>
+        <div class="card-desc" style="margin-top: 8px;">Snowflake SQL에서 KPI 테이블과 온톨로지 결과를 한 쿼리로 결합합니다. 수치 리포트에 문서 맥락을 자동 포함.</div>
+      </div>
+      <div class="card c-llm">
+        <div class="card-name">HTML 첨부 문서 검색 포함</div>
+        <div class="card-desc" style="margin-top: 8px;">Notion에 첨부된 HTML 테이블·리포트 파일도 텍스트 변환 후 인덱싱됩니다. 파일을 직접 열지 않아도 내용을 질의로 탐색 가능.</div>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top: 20px;">
+      <strong>현황:</strong> 전략사업본부 기준 약 370개 페이지 수집·인덱싱 완료.
+      증분 동기화로 Notion 변경 사항이 자동으로 반영됩니다.
+      웹 운영 대시보드(port 8080)에서 수집 현황과 검색 테스트를 실시간 확인 가능.
+    </div>
+  </section>
+
+
+  <!-- ⑦ Semantica 라이브러리 -->
+  <section class="panel" id="panel-role" role="tabpanel">
+    <h2 class="panel-title">Semantica 라이브러리</h2>
+    <p class="panel-desc">
+      <span class="ic">semantica</span>는 PyPI에서 설치하는 외부 NLP 라이브러리입니다(<span class="ic">semantica[graph-falkordb]==0.6.6</span>).
+      이 프로젝트에서는 <strong>인제스트 파이프라인</strong>의 NLP 유틸리티 계층으로서
+      두 가지 역할을 수행합니다.
+    </p>
+
+    <!-- 아키텍처 내 위치 -->
+    <p class="sub-heading">아키텍처 내 위치</p>
+    <div class="hflow" style="margin-bottom: 8px;">
+      <div class="hf-step hf-notion">
+        <div class="hf-label">수집</div>
+        <div class="hf-title">notion_fetch.py</div>
+        <div class="hf-desc">Notion 블록 → .md 파일</div>
+      </div>
+      <div class="hf-arrow">→</div>
+      <div class="hf-step hf-accent">
+        <div class="hf-label">오케스트레이터</div>
+        <div class="hf-title">ingest.py / sync.py</div>
+        <div class="hf-desc">파이프라인 진입점</div>
+      </div>
+      <div class="hf-arrow">→</div>
+      <div class="hf-step hf-llm" style="border: 2px solid var(--llm);">
+        <div class="hf-label" style="color:var(--llm); font-weight:700;">✦ semantica_helper.py</div>
+        <div class="hf-title">semantica 브릿지</div>
+        <div class="hf-desc">semantica 라이브러리 단일 진입점</div>
+      </div>
+      <div class="hf-arrow">→</div>
+      <div class="hf-step hf-vector">
+        <div class="hf-label">저장소</div>
+        <div class="hf-title">Qdrant / FalkorDB</div>
+        <div class="hf-desc">벡터·그래프 DB 적재</div>
+      </div>
+    </div>
+    <div class="callout" style="margin-bottom: 24px;">
+      외부 코드는 <span class="ic">semantica</span>를 직접 import하지 않습니다.
+      <strong>모든 사용은 <span class="ic">src/pipeline/semantica_helper.py</span>를 통해 간접 접근</strong>하며,
+      이 파일이 semantica 관련 로직의 단일 진입점 역할을 합니다.
+    </div>
+
+    <!-- 역할 1: Qdrant 래퍼 -->
+    <p class="sub-heading">역할 ① — Qdrant 연결 추상화</p>
+    <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; margin-bottom: 20px;">
+      <div style="display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 220px;">
+          <div style="font-family: var(--font-label); font-size: 10.5px; font-weight: 700; color: var(--vector); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px;">사용 모듈</div>
+          <div class="ic" style="display: inline-block; margin-bottom: 10px;">semantica.vector_store.qdrant_store.QdrantStore</div>
+          <div style="font-size: 12.5px; color: var(--text-muted); line-height: 1.75;">
+            <strong style="color:var(--text);">ingest.py</strong>가 <span class="ic">QdrantStore(url)</span>를 생성하면
+            <span class="ic">.connect()</span> → <span class="ic">.create_collection()</span> → <span class="ic">.insert_vectors()</span> 순서로
+            Notion 청크 임베딩을 Qdrant에 적재합니다.
+            Qdrant의 REST API를 직접 호출하는 대신 semantica의 래퍼 클래스를 사용해
+            컬렉션 관리와 벡터 삽입을 추상화합니다.
+          </div>
+        </div>
+        <div style="flex: 1; min-width: 220px; background: var(--bg-alt); border-radius: 6px; padding: 12px; font-size: 11.5px; color: var(--text-muted); line-height: 1.8; font-family: 'SF Mono','Consolas',monospace;">
+          <span style="color:var(--text-muted);"># ingest.py 실제 사용 패턴</span><br>
+          <span style="color:var(--accent);">from</span> semantica.vector_store.qdrant_store <span style="color:var(--accent);">import</span> QdrantStore<br><br>
+          store = QdrantStore(url=QDRANT_URL)<br>
+          store.connect()<br>
+          store.create_collection(<span style="color:var(--vector);">"strategic_pages"</span>, dim=<span style="color:var(--graph);">768</span>)<br>
+          store.insert_vectors(chunks)
+        </div>
+      </div>
+    </div>
+
+    <!-- 역할 2: NER/RE Fallback -->
+    <p class="sub-heading">역할 ② — NER/RE Fallback 엔진 (대기 상태)</p>
+    <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--r); padding: 16px; margin-bottom: 20px;">
+      <div style="display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 220px;">
+          <div style="font-family: var(--font-label); font-size: 10.5px; font-weight: 700; color: var(--llm); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px;">사용 모듈</div>
+          <div class="ic" style="display: inline-block; margin-bottom: 10px;">semantica.semantic_extract</div>
+          <div style="font-size: 12.5px; color: var(--text-muted); line-height: 1.75;">
+            <strong style="color:var(--text);">extract_with_fallback()</strong>에서 Claude LLM(Haiku)이
+            트리플 추출에 실패하거나 0개를 반환할 때 발동하도록 설계됐습니다.
+            <span class="ic">NamedEntityRecognizer</span>로 엔티티를,
+            <span class="ic">RelationExtractor</span>로 관계를 추출한 뒤
+            FalkorDB에 적재합니다.<br><br>
+            <span style="color:var(--notion);">⚠ 현재 비활성화:</span>
+            한국어 업무 문서에서 노이즈가 과다하게 발생하여 의도적으로 주석 처리됨.
+            런타임에 <span class="ic">_SEM_AVAILABLE</span> 플래그로 설치 여부를 감지하며,
+            한국어 NER 품질 개선 시 재활성화 예정입니다.
+          </div>
+        </div>
+        <div style="flex: 1; min-width: 220px; background: var(--bg-alt); border-radius: 6px; padding: 12px; font-size: 11.5px; color: var(--text-muted); line-height: 1.8; font-family: 'SF Mono','Consolas',monospace;">
+          <span style="color:var(--text-muted);"># semantica_helper.py 내부</span><br>
+          <span style="color:var(--accent);">try</span>:<br>
+          &nbsp;&nbsp;<span style="color:var(--accent);">from</span> semantica.semantic_extract <span style="color:var(--accent);">import</span> ...<br>
+          &nbsp;&nbsp;_SEM_AVAILABLE = <span style="color:var(--vector);">True</span><br>
+          <span style="color:var(--accent);">except</span> ImportError:<br>
+          &nbsp;&nbsp;_SEM_AVAILABLE = <span style="color:var(--notion);">False</span><br><br>
+          <span style="color:var(--text-muted);"># LLM 실패 시 fallback (현재 비활성)</span><br>
+          <span style="color:var(--accent);">def</span> extract_with_fallback(llm_fn, text):<br>
+          &nbsp;&nbsp;result = llm_fn(text)<br>
+          &nbsp;&nbsp;<span style="color:var(--text-muted);"># if not result and _SEM_AVAILABLE: ...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- semantica_helper 함수 목록 -->
+    <p class="sub-heading">semantica_helper.py — 공개 함수 목록</p>
+    <div class="block-grid" style="grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));">
+      <div class="block-item"><div class="block-label">그래프 기초</div><div class="block-val"><span class="ic">merge_node()</span> — 엔티티 중복 제거, node_id 반환</div></div>
+      <div class="block-item"><div class="block-label">트리플 추출</div><div class="block-val"><span class="ic">extract_with_fallback()</span> — LLM 추출 + fallback 경로</div></div>
+      <div class="block-item"><div class="block-label">경로 탐색</div><div class="block-val"><span class="ic">find_shortest_path()</span> — Cypher shortestPath 래퍼</div></div>
+      <div class="block-item hl"><div class="block-label">의사결정</div><div class="block-val"><span class="ic">is_decision_triplet()</span> — 한국어 결정 키워드 감지</div></div>
+      <div class="block-item hl"><div class="block-label">의사결정</div><div class="block-val"><span class="ic">record_decision_node()</span> — :Decision + LED_TO 엣지 기록</div></div>
+      <div class="block-item hl"><div class="block-label">의사결정</div><div class="block-val"><span class="ic">trace_decision_chain()</span> — 인과 체인 시계열 탐색</div></div>
+      <div class="block-item"><div class="block-label">이벤트</div><div class="block-val"><span class="ic">upsert_event_node()</span> — :Event MERGE + FOLLOWED_BY 자동 연결</div></div>
+      <div class="block-item"><div class="block-label">이벤트</div><div class="block-val"><span class="ic">get_event_chain()</span> — 게임별 시계열 이벤트 필터 조회</div></div>
+      <div class="block-item"><div class="block-label">분류</div><div class="block-val"><span class="ic">classify_page()</span> — core / defer / excluded 결정</div></div>
+      <div class="block-item"><div class="block-label">유틸</div><div class="block-val"><span class="ic">content_hash()</span> — SHA-256 앞 16자, 변경 감지용</div></div>
+      <div class="block-item"><div class="block-label">유틸</div><div class="block-val"><span class="ic">detect_realization_status()</span> — planned / applied / unconfirmed</div></div>
+      <div class="block-item"><div class="block-label">DB 변환</div><div class="block-val"><span class="ic">event_from_db_props()</span> — Notion DB 컬럼 → :Event dict (LLM 없이)</div></div>
+    </div>
+  </section>
+
+</main>
+
+<script>
+function switchTab(btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    b.classList.remove('active');
+    b.setAttribute('aria-selected', 'false');
+  });
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+
+  btn.classList.add('active');
+  btn.setAttribute('aria-selected', 'true');
+
+  const panel = document.getElementById('panel-' + btn.dataset.panel);
+  if (panel) panel.classList.add('active');
+
+  // Scroll active tab into view on mobile
+  btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+}
+</script>
