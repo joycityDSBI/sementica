@@ -717,22 +717,22 @@ def sync_page(
             if cid:
                 props["evidence_chunk_id"] = cid
 
-        # ── 인메모리 중복 체크 ────────────────────────────────────────────────
-        edge_key = (sid, props["rel_name"], oid)
+        # ── 중복 판단 기준: (subj, rel_name, obj, source_url) ────────────────
+        edge_key = (sid, props["rel_name"], oid, source_url)
         if edge_key in seen_edges:
             continue
         seen_edges.add(edge_key)
 
         try:
             set_clauses = ", ".join(f"r.{k} = ${k}" for k in props)
-            # ── DB 수준 중복 체크 (크로스-페이지 중복 방지) ────────────────
-            # FalkorDB MERGE의 관계 속성 조건이 신뢰할 수 없어
-            # MATCH로 존재 여부를 확인한 뒤 없을 때만 CREATE합니다.
+            # ── DB 수준 중복 체크: (rel_name + source_url) 기준 ─────────────
             existing = graph.query(
                 "MATCH (s)-[r:REL]->(o) "
-                "WHERE id(s) = $sid AND id(o) = $oid AND r.rel_name = $rel_name "
+                "WHERE id(s) = $sid AND id(o) = $oid "
+                "  AND r.rel_name = $rel_name AND r.source_url = $source_url "
                 "RETURN id(r) LIMIT 1",
-                {"sid": sid, "oid": oid, "rel_name": props["rel_name"]},
+                {"sid": sid, "oid": oid,
+                 "rel_name": props["rel_name"], "source_url": source_url},
             )
             if not existing.result_set:
                 graph.query(

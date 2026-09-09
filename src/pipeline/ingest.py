@@ -565,8 +565,10 @@ def store_graph(
             if cid:
                 rel_props["evidence_chunk_id"] = cid
 
-        # ── 인메모리 중복 체크 (같은 페이지 내 여러 청크 → 동일 트리플) ──────
-        edge_key = (subj_id, rel_props["rel_name"], obj_id)
+        # ── 중복 판단 기준: (subj, rel_name, obj, source_url) ────────────────
+        # · 같은 source_url + 같은 관계 → 진짜 중복 (한 페이지 내 여러 청크)
+        # · 다른 source_url + 같은 관계 → 독립 증거이므로 각각 저장
+        edge_key = (subj_id, rel_props["rel_name"], obj_id, source_url)
         if edge_key in seen_edges:
             continue
         seen_edges.add(edge_key)
@@ -581,14 +583,16 @@ def store_graph(
                 set_parts.append(f"r.{k} = ${pk}")
             set_clause = ("SET " + ", ".join(set_parts)) if set_parts else ""
 
-            # ── DB 수준 중복 체크 (다른 페이지에서 동일 트리플이 이미 저장된 경우) ──
-            # FalkorDB의 MERGE는 관계 속성 조건을 신뢰하기 어려워
-            # MATCH로 존재 여부를 먼저 확인한 뒤 없을 때만 CREATE합니다.
+            # ── DB 수준 중복 체크: (rel_name + source_url) 기준 ─────────────
+            # 같은 페이지를 재인제스트해도 엣지가 하나만 유지됩니다.
+            # 다른 페이지에서 동일 관계가 추출되면 별도 엣지로 보존합니다.
             existing = _falkordb.query(
                 "MATCH (s)-[r:REL]->(o) "
-                "WHERE id(s) = $_s AND id(o) = $_o AND r.rel_name = $_rn "
+                "WHERE id(s) = $_s AND id(o) = $_o "
+                "  AND r.rel_name = $_rn AND r.source_url = $_url "
                 "RETURN id(r) LIMIT 1",
-                {"_s": subj_id, "_o": obj_id, "_rn": rel_props["rel_name"]},
+                {"_s": subj_id, "_o": obj_id,
+                 "_rn": rel_props["rel_name"], "_url": source_url},
             )
             if not existing.result_set:
                 _falkordb.query(
