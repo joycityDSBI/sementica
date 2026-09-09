@@ -3,12 +3,19 @@
 골든셋 자동 생성 스크립트
 실제 Qdrant + FalkorDB 데이터에서 평가 질문을 생성합니다.
 
+채택 기준 (중요):
+    정답이 소스 원문으로 뒷받침되는지(verify_grounded)만을 기준으로 채택합니다.
+    검색 파이프라인 통과 여부를 채택 기준으로 쓰면 골든셋이 "이미 답할 수 있는
+    질문"만 남아 평가 점수가 100%에 수렴하고 약점이 드러나지 않습니다.
+    파이프라인 통과 여부는 --baseline 으로 참고 정보(baseline_pass)로만 기록합니다.
+
 실행:
     python src/eval/gen_golden_set.py --dept strategic
-    python src/eval/gen_golden_set.py --dept strategic --count 30 --out data/eval/golden_set.json
+    python src/eval/gen_golden_set.py --dept strategic --count 30 --baseline
+    python src/eval/gen_golden_set.py --dept strategic --out data/eval/golden_set.json
 
 결과:
-    data/eval/golden_set.json  ← evaluate.py가 --golden 옵션으로 로드
+    data/eval/golden_set_YYYYMMDD.json  ← evaluate.py가 --golden 옵션으로 로드
 """
 
 import argparse
@@ -34,7 +41,9 @@ if _env.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
+LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")  # 임베딩 리전
+# Claude 리전은 임베딩과 별개 — ingest.py와 동일한 환경변수를 사용
+ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
@@ -60,6 +69,12 @@ parser.add_argument(
     "--out", default="", help="출력 파일 경로 (기본: data/eval/golden_set_YYYYMMDD.json)"
 )
 parser.add_argument("--seed", type=int, default=42, help="난수 시드")
+parser.add_argument(
+    "--baseline",
+    action="store_true",
+    help="각 문항에 대해 현재 검색 파이프라인 통과 여부를 기록 (채택 기준이 아닌 참고 정보). "
+    "LLM 호출이 문항당 2회 추가되어 느려집니다.",
+)
 args = parser.parse_args()
 
 random.seed(args.seed)
@@ -105,7 +120,7 @@ embed_client = _genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=Tr
 qdrant = QdrantClient(url=QDRANT_URL)
 _db = _fdb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
 graph = _db.select_graph(GRAPH_NAME)
-claude = AnthropicVertex(project_id=GCP_PROJECT, region=LOCATION)
+claude = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
 print("✅ 완료\n")
 
 
@@ -219,8 +234,12 @@ REL_QA_PROMPT = """다음 지식 그래프 관계들을 보고 평가용 Q&A를 
 
 
 def parse_qa_response(text: str) -> list:
-    """Claude 응답에서 JSON Q&A 추출"""
-    m = re.search(r"\[.*?\]", text, re.DOTALL)
+    """Claude 응답에서 JSON Q&A 추출
+
+    ※ greedy 매칭 사용: 정답 문자열에 ']' 가 포함되어도 배열이 잘리지 않도록
+      첫 '[' 부터 마지막 ']' 까지를 취합니다.
+    """
+    m = re.search(r"\[.*\]", text, re.DOTALL)
     if not m:
         return []
     try:
@@ -243,7 +262,28 @@ def parse_qa_response(text: str) -> list:
         return []
 
 
-# ─── 검색 기반 검증 함수 (전체 파이프라인) ───────────────────────────────────
+# ─── 검증 함수 ───────────────────────────────────────────────────────────────
+# 채택 기준은 "정답이 원문에 근거하는가"(verify_grounded) 입니다.
+#
+# ※ 중요 — 검색 파이프라인 통과 여부를 채택 기준으로 쓰면 안 됩니다:
+#   골든셋 채택 기준 = 평가 대상 파이프라인 → "이미 답할 수 있는 질문"만 남아
+#   평가 점수가 인위적으로 100%에 수렴하고 시스템 약점이 측정되지 않습니다.
+#   검색 통과 여부는 --baseline 플래그로 참고 정보(baseline_pass)로만 기록합니다.
+
+_GROUND_PROMPT = """다음 답변이 주어진 원문으로 뒷받침되는지 엄격하게 판단하세요.
+
+원문:
+{source}
+
+질문: {question}
+답변: {answer}
+
+판단 기준:
+- pass: 답변의 핵심 정보가 원문에 명시적으로 있음 (표현이 달라도 의미가 같으면 pass)
+- fail: 원문에 없는 내용 / 추측 / 원문과 불일치 / 원문보다 과도하게 구체적
+
+JSON으로만 응답: {{"verdict": "pass"|"fail", "reason": "한 줄"}}"""
+
 _ANSWER_PROMPT = """아래 컨텍스트를 바탕으로 질문에 답하세요. 컨텍스트에 없는 내용은 답하지 마세요.
 
 컨텍스트:
@@ -271,14 +311,46 @@ def _embed_text(text: str) -> list:
     return result.embeddings[0].values
 
 
-def verify_by_search(question: str, answer: str, search_limit: int = 7) -> bool:
-    """검색 → 답변 생성 → 정답 일치 확인 전체 파이프라인으로 Q&A 검증.
+def _judge_verdict(prompt: str, max_tokens: int = 150) -> bool:
+    """LLM에 판정을 요청하고 verdict == 'pass' 여부를 반환."""
+    resp = claude.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = resp.content[0].text.strip()
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return False
+    return json.loads(m.group()).get("verdict", "fail") == "pass"
 
-    평가 시와 동일한 흐름으로 검증하므로
-    '검색은 되지만 답변 생성 때 정보가 누락되는' 질문도 걸러낼 수 있습니다.
+
+def verify_grounded(question: str, answer: str, source_text: str) -> bool:
+    """★ 채택 기준 — 정답이 소스 원문으로 뒷받침되는지 확인.
+
+    LLM이 생성한 정답의 환각을 걸러냅니다.
+    검색 파이프라인을 거치지 않으므로 평가 대상과 독립적입니다.
     """
     try:
-        # 1. 검색
+        return _judge_verdict(
+            _GROUND_PROMPT.format(
+                source=source_text[:3000],
+                question=question,
+                answer=answer,
+            )
+        )
+    except Exception:
+        return False
+
+
+def baseline_search_pass(question: str, answer: str, search_limit: int = 7) -> bool:
+    """참고 정보 — 현재 검색 파이프라인이 이 질문에 답할 수 있는지.
+
+    ※ 채택 기준이 아닙니다. --baseline 플래그로만 실행되며
+      결과는 문항의 baseline_pass 필드에 기록됩니다.
+      fail인 문항이 곧 '개선이 필요한 지점'이므로 오히려 가치가 높습니다.
+    """
+    try:
         vec = _embed_text(question)
         result = qdrant.query_points(
             collection_name=COLLECTION_NAME,
@@ -294,7 +366,6 @@ def verify_by_search(question: str, answer: str, search_limit: int = 7) -> bool:
             p = h.payload or {}
             context += f"[{p.get('title', '')}]\n{p.get('text', '')[:600]}\n\n"
 
-        # 2. 답변 생성
         gen = claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=200,
@@ -307,27 +378,12 @@ def verify_by_search(question: str, answer: str, search_limit: int = 7) -> bool:
         )
         response = gen.content[0].text.strip()
 
-        # 3. 생성된 답변이 정답과 일치하는지 채점
-        judge = claude.messages.create(
-            model=CLAUDE_MODEL,
+        return _judge_verdict(
+            _SCORE_PROMPT.format(question=question, answer=answer, response=response[:500]),
             max_tokens=100,
-            messages=[
-                {
-                    "role": "user",
-                    "content": _SCORE_PROMPT.format(
-                        question=question, answer=answer, response=response[:500]
-                    ),
-                }
-            ],
         )
-        text = judge.content[0].text.strip()
-        m = re.search(r"\{.*?\}", text, re.DOTALL)
-        if m:
-            verdict = json.loads(m.group()).get("verdict", "fail")
-            return verdict == "pass"
     except Exception:
-        pass
-    return False
+        return False
 
 
 # ─── 3. 페이지 기반 Q&A 생성 + 즉시 검증 ────────────────────────────────────
@@ -365,18 +421,23 @@ for i, page in enumerate(pages):
 
         verified = 0
         for item in items:
-            # 검색 결과로 검증 — 답변 가능한 질문만 채택
-            ok = verify_by_search(item["question"], item["answer"])
-            if ok:
-                item["source_url"] = page["url"]
-                item["source_title"] = page["title"]
-                item["verified"] = True
-                all_candidates.append(item)
-                cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
-                verified += 1
+            # ★ 채택 기준: 정답이 이 문서 원문으로 뒷받침되는지 (환각 필터)
+            if not verify_grounded(item["question"], item["answer"], page["text"]):
+                time.sleep(0.2)
+                continue
+
+            item["source_url"] = page["url"]
+            item["source_title"] = page["title"]
+            item["grounded"] = True
+            # 참고 정보: 현재 검색 파이프라인 통과 여부 (채택 여부와 무관)
+            if args.baseline:
+                item["baseline_pass"] = baseline_search_pass(item["question"], item["answer"])
+            all_candidates.append(item)
+            cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
+            verified += 1
             time.sleep(0.2)
 
-        print(f" → {len(items)}개 생성, {verified}개 검증 통과")
+        print(f" → {len(items)}개 생성, {verified}개 근거 확인")
     except Exception as e:
         print(f" ⚠️  {e}")
 
@@ -412,16 +473,21 @@ if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
             items = parse_qa_response(msg.content[0].text)
             verified = 0
             for item in items:
-                ok = verify_by_search(item["question"], item["answer"])
-                if ok:
-                    item["source_url"] = chunk[0].get("url", "")
-                    item["source_title"] = f"관계: {chunk[0]['subject']}"
-                    item["verified"] = True
-                    all_candidates.append(item)
-                    cat_counts["관계"] = cat_counts.get("관계", 0) + 1
-                    verified += 1
+                # ★ 채택 기준: 정답이 이 관계 데이터로 뒷받침되는지
+                if not verify_grounded(item["question"], item["answer"], rel_text):
+                    time.sleep(0.2)
+                    continue
+
+                item["source_url"] = chunk[0].get("url", "")
+                item["source_title"] = f"관계: {chunk[0]['subject']}"
+                item["grounded"] = True
+                if args.baseline:
+                    item["baseline_pass"] = baseline_search_pass(item["question"], item["answer"])
+                all_candidates.append(item)
+                cat_counts["관계"] = cat_counts.get("관계", 0) + 1
+                verified += 1
                 time.sleep(0.2)
-            print(f" → {len(items)}개 생성, {verified}개 검증 통과")
+            print(f" → {len(items)}개 생성, {verified}개 근거 확인")
         except Exception as e:
             print(f" ⚠️  {e}")
         time.sleep(0.3)
@@ -475,17 +541,21 @@ for cat, target in CATEGORY_TARGETS.items():
 
     selected = selected[:target]
     for item in selected:
-        final_set.append(
-            {
-                "id": f"Q{qid:02d}",
-                "category": item["category"],
-                "difficulty": item.get("difficulty", "medium"),
-                "question": item["question"],
-                "answer": item["answer"],
-                "source_url": item.get("source_url", ""),
-                "source_title": item.get("source_title", ""),
-            }
-        )
+        entry = {
+            "id": f"Q{qid:02d}",
+            "category": item["category"],
+            "difficulty": item.get("difficulty", "medium"),
+            "question": item["question"],
+            "answer": item["answer"],
+            "source_url": item.get("source_url", ""),
+            "source_title": item.get("source_title", ""),
+            # 정답이 원문으로 뒷받침됨 (채택 기준)
+            "grounded": item.get("grounded", False),
+        }
+        # --baseline 실행 시에만 존재 — 현재 파이프라인 통과 여부 (참고)
+        if "baseline_pass" in item:
+            entry["baseline_pass"] = item["baseline_pass"]
+        final_set.append(entry)
         qid += 1
 
     print(f"  {cat:<10}: {len(selected)}개 선택 (후보 {len(pool)}개)")
@@ -501,13 +571,26 @@ meta = {
     "collection": COLLECTION_NAME,
     "graph": GRAPH_NAME,
     "total": len(final_set),
+    "acceptance_criterion": "answer_grounded_in_source",
     "category_counts": {
         c: sum(1 for q in final_set if q["category"] == c) for c in CATEGORY_TARGETS
     },
 }
+if args.baseline:
+    _bp = [q for q in final_set if "baseline_pass" in q]
+    meta["baseline"] = {
+        "measured": len(_bp),
+        "passed": sum(1 for q in _bp if q["baseline_pass"]),
+    }
 output = {"meta": meta, "questions": final_set}
 Path(OUT_PATH).write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
 print(f"💾 저장 완료: {OUT_PATH}")
+if args.baseline and meta.get("baseline", {}).get("measured"):
+    _b = meta["baseline"]
+    print(
+        f"   참고 — 현재 파이프라인 baseline: {_b['passed']}/{_b['measured']} 통과 "
+        f"(낮을수록 개선 여지가 큼)"
+    )
 print()
 print("  다음 단계:")
 print(f"  1. 파일 검토 및 수동 수정: {OUT_PATH}")
