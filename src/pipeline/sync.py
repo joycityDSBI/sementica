@@ -728,7 +728,7 @@ def sync_page(
         return nid
 
     edges_created = 0
-    seen_edges: set[tuple[int, str, int]] = set()  # 인메모리 중복 방지
+    seen_edges: set[tuple[int, str, int, str]] = set()  # 인메모리 중복 방지
     for t in triplets:
         sid = get_or_create_node(t["subject"])
         oid = get_or_create_node(t["object"])
@@ -756,24 +756,15 @@ def sync_page(
 
         try:
             set_clauses = ", ".join(f"r.{k} = ${k}" for k in props)
-            # ── DB 수준 중복 체크: (rel_name + source_url) 기준 ─────────────
-            # ※ FalkorDB: 관계 패턴 MATCH 후 WHERE id() 조건은 신뢰할 수 없음.
-            #   노드를 먼저 각각 MATCH 후 관계를 조회합니다.
-            existing = graph.query(
-                "MATCH (s) WHERE id(s) = $sid "
-                "MATCH (o) WHERE id(o) = $oid "
-                "MATCH (s)-[r:REL]->(o) "
-                "WHERE r.rel_name = $rel_name AND r.source_url = $source_url "
-                "RETURN id(r) LIMIT 1",
-                {"sid": sid, "oid": oid, "rel_name": props["rel_name"], "source_url": source_url},
+            # ── DB 체크 불필요: sync_page() 진입 시 delete_page_edges()가
+            #   이 source_url의 엣지를 이미 전부 삭제했으므로 항상 빈 결과.
+            #   in-memory seen_edges 로만 동일 페이지 내 중복을 차단합니다.
+            graph.query(
+                f"MATCH (s) WHERE id(s) = $sid "
+                f"MATCH (o) WHERE id(o) = $oid "
+                f"CREATE (s)-[r:REL]->(o) SET {set_clauses}",
+                {"sid": sid, "oid": oid, **props},
             )
-            if not existing.result_set:
-                graph.query(
-                    f"MATCH (s) WHERE id(s) = $sid "
-                    f"MATCH (o) WHERE id(o) = $oid "
-                    f"CREATE (s)-[r:REL]->(o) SET {set_clauses}",
-                    {"sid": sid, "oid": oid, **props},
-                )
             edges_created += 1
 
             # 의사결정 트리플이면 :Decision 노드로도 기록
@@ -998,6 +989,14 @@ def main():
         help="Notion 삭제 페이지 감지 후 Qdrant·FalkorDB에서 데이터 정리 (주 1회 권장)",
     )
     args = parser.parse_args()
+
+    # ── 비즈니스 용어집 사전 미리 로드 (동의어 해결기 워밍업) ────────────────
+    try:
+        from utils.synonym_resolver import preload as _syn_preload
+
+        _syn_preload()
+    except Exception:
+        pass  # 용어집 서비스 미연결 시 동의어 해결 비활성화로 계속 진행
 
     # ── 본부 설정 로드 ──────────────────────────────────────────────────────
     dept_cfg = load_dept(args.dept)
