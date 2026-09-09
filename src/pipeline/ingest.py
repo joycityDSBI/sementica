@@ -296,10 +296,13 @@ def init_falkordb(reset: bool = False):
 
         if reset:
             try:
-                db.delete_graph(GRAPH_NAME)
+                db.select_graph(GRAPH_NAME).delete()
                 print(f"  🗑️  FalkorDB 그래프 삭제: {GRAPH_NAME}")
-            except Exception:
-                pass
+            except Exception as _del_err:
+                # 그래프가 존재하지 않으면 정상 (첫 실행), 그 외 오류는 경고 출력
+                _msg = str(_del_err).lower()
+                if "no such graph" not in _msg and "unknown graph" not in _msg:
+                    print(f"  ⚠️  FalkorDB 그래프 삭제 실패 (무시): {_del_err}")
 
         _falkordb = db.select_graph(GRAPH_NAME)
         print(f"  ✅ FalkorDB 연결 완료 — 그래프: {GRAPH_NAME}")
