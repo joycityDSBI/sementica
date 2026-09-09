@@ -648,6 +648,34 @@ EVENT_TYPES: frozenset = frozenset(
 # ─── DB 속성 키 별칭 ─────────────────────────────────────────────────────────
 # Notion DB 컬럼명은 자유롭게 설정되므로, 소문자 비교(case-insensitive)로 처리한다.
 # ingest.py / sync.py 에서 공통으로 사용하는 단일 정의.
+DB_TITLE_KEYS = {
+    # Notion DB에서 실질적인 제목/메모를 담는 텍스트 컬럼 후보
+    # 우선순위: 앞에 있을수록 먼저 시도 (frozenset이므로 _first()가 순서 비결정적 — 리스트 사용)
+    "메모",
+    "memo",
+    "제목",
+    "이벤트명",
+    "이벤트제목",
+    "내용",
+    "description",
+    "설명",
+    "name",
+    "이름",
+}
+# 우선순위가 있는 리스트 — _first()는 set 순서 비결정적이므로 별도 정의
+_DB_TITLE_KEYS_ORDERED = [
+    "메모",
+    "memo",
+    "제목",
+    "이벤트명",
+    "이벤트제목",
+    "내용",
+    "description",
+    "설명",
+    "name",
+    "이름",
+]
+
 DB_DATE_KEYS = {
     "이벤트날짜",
     "날짜",
@@ -750,11 +778,23 @@ def event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | N
 
     manager_raw = _first(DB_MANAGER_KEYS) or ""
 
+    # DB 속성에서 실질적 제목 추출 (메모/내용 등 우선, 없으면 페이지 meta title 폴백)
+    # meta title은 Notion 파일명(page_id)일 수 있으므로 DB 컬럼을 먼저 확인한다.
+    db_title = ""
+    for tk in _DB_TITLE_KEYS_ORDERED:
+        v = lower.get(tk.lower())
+        if v is not None:
+            db_title = ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
+            if db_title.strip():
+                break
+    resolved_title = db_title.strip() or title
+
     return {
         "game": game,
         "event_type": event_type,
+        "category": raw_type,  # 변경카테고리 원문 보존 (캠페인조정, 소재 변경 등)
         "date": date[:10],
-        "title": title,
+        "title": resolved_title,
         "description": "",
         "manager": manager_raw,
         "source_url": source_url,
@@ -806,6 +846,7 @@ def upsert_event_node(graph, event: dict) -> int:
 
     game = str(event.get("game", "")).strip()
     event_type = str(event.get("event_type", "")).strip()
+    category = str(event.get("category", "")).strip()  # 변경카테고리 원문 (예: "캠페인조정")
     date = str(event.get("date", "")).strip()
     title = str(event.get("title", "")).strip()
     description = str(event.get("description", ""))
@@ -833,8 +874,16 @@ def upsert_event_node(graph, event: dict) -> int:
     except Exception:
         year, month, quarter = 0, 0, ""
 
-    # 안정적 ID: game | event_type | date
-    event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{game}|{event_type}|{date}"))
+    # 안정적 ID: source_url이 있으면 Notion 페이지 URL 기준 (행마다 고유)
+    # source_url이 없으면 game|event_type|date|title 해시로 폴백
+    # ※ 이전: game|event_type|date 만 사용 → 같은 날 같은 유형 여러 행이 충돌
+    if source_url:
+        event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, source_url))
+    else:
+        import hashlib
+
+        title_hash = hashlib.md5(title.encode()).hexdigest()[:8]
+        event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{game}|{event_type}|{date}|{title_hash}"))
     ts = datetime.now(UTC).isoformat()
 
     # ── 1. :Event 노드 MERGE ────────────────────────────────────────────────
@@ -842,16 +891,20 @@ def upsert_event_node(graph, event: dict) -> int:
         r = graph.query(
             "MERGE (e:Event {event_id: $eid}) "
             "ON CREATE SET "
-            "  e.game = $game, e.event_type = $etype, e.date = $date, "
-            "  e.date_ts = $date_ts, e.year = $year, e.month = $month, "
-            "  e.quarter = $quarter, e.title = $title, "
-            "  e.description = $desc, e.target = $target, "
+            "  e.game = $game, e.event_type = $etype, e.category = $category, "
+            "  e.date = $date, e.date_ts = $date_ts, "
+            "  e.year = $year, e.month = $month, e.quarter = $quarter, "
+            "  e.title = $title, e.description = $desc, e.target = $target, "
             "  e.source_url = $url, e.ts = $ts "
+            "ON MATCH SET "
+            "  e.title = $title, e.category = $category, e.description = $desc, "
+            "  e.manager = $mgr "
             "RETURN id(e) AS nid",
             {
                 "eid": event_id,
                 "game": game,
                 "etype": event_type,
+                "category": category,
                 "date": date,
                 "date_ts": date_ts,
                 "year": year,
@@ -860,6 +913,7 @@ def upsert_event_node(graph, event: dict) -> int:
                 "title": title,
                 "desc": description,
                 "target": target,
+                "mgr": manager,
                 "url": source_url,
                 "ts": ts,
             },
