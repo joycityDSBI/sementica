@@ -571,10 +571,13 @@ def store_graph(
                 params[pk] = v
                 set_parts.append(f"r.{k} = ${pk}")
             set_clause = ("SET " + ", ".join(set_parts)) if set_parts else ""
+            # MERGE on rel_name: 동일 (subject, rel_name, object) 조합이면 기존 엣지를 재사용.
+            # source_url·evidence_quote 등은 SET으로 최신값으로 갱신.
             _falkordb.query(
                 "MATCH (s) WHERE id(s) = $_s "
                 "MATCH (o) WHERE id(o) = $_o "
-                f"CREATE (s)-[r:REL]->(o) {set_clause}",
+                f"MERGE (s)-[r:REL {{rel_name: $_p_rel_name}}]->(o) "
+                + set_clause,
                 params,
             )
             edges_created += 1

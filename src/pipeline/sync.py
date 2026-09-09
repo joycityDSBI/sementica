@@ -718,10 +718,13 @@ def sync_page(
         try:
             # create_relationship() SDK 메서드는 버전에 따라 동작이 다름 →
             # Cypher 직접 실행으로 대체 (node id 기반, 안정적)
+            # MERGE on rel_name: 동일 (subject, rel_name, object) 조합이면 기존 엣지를 재사용.
+            # source_url·evidence_quote 등은 SET으로 최신값으로 갱신.
             set_clauses = ", ".join(f"r.{k} = ${k}" for k in props)
             graph.query(
                 f"MATCH (s), (o) WHERE id(s) = $sid AND id(o) = $oid "
-                f"CREATE (s)-[r:REL]->(o) SET {set_clauses}",
+                f"MERGE (s)-[r:REL {{rel_name: $rel_name}}]->(o) "
+                f"SET {set_clauses}",
                 {"sid": sid, "oid": oid, **props},
             )
             edges_created += 1
