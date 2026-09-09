@@ -715,7 +715,7 @@ def sync_page(
 
     # 5. 트리플 → FalkorDB 저장
     print(f"     트리플: {len(triplets)}개 추출 [{triplet_src}]")
-    node_cache = {}
+    node_cache: dict[tuple, int] = {}
 
     def get_or_create_node(entity: dict) -> int:
         key = (entity["name"], entity["type"])
@@ -755,15 +755,28 @@ def sync_page(
         seen_edges.add(edge_key)
 
         try:
-            set_clauses = ", ".join(f"r.{k} = ${k}" for k in props)
-            # ── DB 체크 불필요: sync_page() 진입 시 delete_page_edges()가
-            #   이 source_url의 엣지를 이미 전부 삭제했으므로 항상 빈 결과.
-            #   in-memory seen_edges 로만 동일 페이지 내 중복을 차단합니다.
+            # ── MERGE 방식으로 엣지 생성 (CREATE 대신 사용) ──────────────────
+            # sync_page() 진입 시 delete_page_edges()가 이미 source_url 엣지를 제거했으므로
+            # 정상 경로에서는 MERGE가 항상 CREATE로 동작합니다.
+            # 다만 예외 상황(중복 호출 등)에서도 DB 레벨 멱등성을 보장합니다.
+            merge_params: dict = {"sid": sid, "oid": oid,
+                                  "_rn": props["rel_name"], "_url": props["source_url"]}
+            on_create_parts: list[str] = []
+            for k, v in props.items():
+                if k in ("rel_name", "source_url"):
+                    continue
+                merge_params[k] = v
+                on_create_parts.append(f"r.{k} = ${k}")
+            on_create_clause = (
+                "ON CREATE SET " + ", ".join(on_create_parts)
+            ) if on_create_parts else ""
+
             graph.query(
                 f"MATCH (s) WHERE id(s) = $sid "
                 f"MATCH (o) WHERE id(o) = $oid "
-                f"CREATE (s)-[r:REL]->(o) SET {set_clauses}",
-                {"sid": sid, "oid": oid, **props},
+                f"MERGE (s)-[r:REL {{rel_name: $_rn, source_url: $_url}}]->(o) "
+                f"{on_create_clause}",
+                merge_params,
             )
             edges_created += 1
 

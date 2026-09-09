@@ -550,8 +550,8 @@ def store_graph(
     edges_created = 0
 
     # 노드 캐시 (세션 내 중복 호출 방지)
-    node_cache: dict = {}
-    # 엣지 중복 방지: (subj_id, rel_name, obj_id) → 동일 페이지의 여러 청크에서
+    node_cache: dict[tuple, int] = {}
+    # 엣지 중복 방지: (subj_id, rel_name, obj_id, source_url) → 동일 페이지 내
     # 같은 트리플이 추출되어도 DB 조회 없이 즉시 차단
     seen_edges: set[tuple[int, str, int, str]] = set()
 
@@ -600,38 +600,34 @@ def store_graph(
         seen_edges.add(edge_key)
 
         try:
-            # rel_props 키를 파라미터명 충돌 없이 SET으로 처리
-            params = {"_s": subj_id, "_o": obj_id}
-            set_parts = []
+            # ── MERGE 방식으로 엣지 생성 (CREATE 대신 사용) ──────────────────
+            # MERGE 키: (rel_name, source_url) → 동일 쌍에 대해 DB 레벨 멱등성 보장
+            # in-memory seen_edges 가 동일 호출 내 중복을 빠르게 차단하고,
+            # MERGE 가 호출 간 중복(재인제스트, 동일 source_url 중복 파일 등)을 차단합니다.
+            merge_params: dict = {
+                "_s": subj_id,
+                "_o": obj_id,
+                "_p_rel_name": rel_props["rel_name"],
+                "_p_source_url": source_url,
+            }
+            on_create_parts: list[str] = []
             for k, v in rel_props.items():
+                if k in ("rel_name", "source_url"):
+                    continue  # MERGE 패턴에 이미 포함
                 pk = f"_p_{k}"
-                params[pk] = v
-                set_parts.append(f"r.{k} = ${pk}")
-            set_clause = ("SET " + ", ".join(set_parts)) if set_parts else ""
+                merge_params[pk] = v
+                on_create_parts.append(f"r.{k} = ${pk}")
+            on_create_clause = (
+                "ON CREATE SET " + ", ".join(on_create_parts)
+            ) if on_create_parts else ""
 
-            # ── DB 수준 중복 체크: (rel_name + source_url) 기준 ─────────────
-            # reset=True: 그래프가 비어 있으므로 DB 조회 생략 → in-memory로만 차단
-            # reset=False: 재인제스트 없는 추가 실행 시 크로스-페이지 중복 방지
-            # ※ FalkorDB: 관계 패턴 MATCH 후 WHERE id() 조건은 신뢰할 수 없음.
-            #   CREATE와 동일하게 노드를 먼저 각각 MATCH 후 관계를 조회합니다.
-            should_create = True
-            if not reset:
-                existing = _falkordb.query(
-                    "MATCH (s) WHERE id(s) = $_s "
-                    "MATCH (o) WHERE id(o) = $_o "
-                    "MATCH (s)-[r:REL]->(o) "
-                    "WHERE r.rel_name = $_rn AND r.source_url = $_url "
-                    "RETURN id(r) LIMIT 1",
-                    {"_s": subj_id, "_o": obj_id, "_rn": rel_props["rel_name"], "_url": source_url},
-                )
-                should_create = not existing.result_set
-            if should_create:
-                _falkordb.query(
-                    "MATCH (s) WHERE id(s) = $_s "
-                    "MATCH (o) WHERE id(o) = $_o "
-                    f"CREATE (s)-[r:REL]->(o) {set_clause}",
-                    params,
-                )
+            _falkordb.query(
+                "MATCH (s) WHERE id(s) = $_s "
+                "MATCH (o) WHERE id(o) = $_o "
+                "MERGE (s)-[r:REL {rel_name: $_p_rel_name, source_url: $_p_source_url}]->(o) "
+                f"{on_create_clause}",
+                merge_params,
+            )
             edges_created += 1
 
             # 의사결정 트리플이면 :Decision 노드로도 기록
