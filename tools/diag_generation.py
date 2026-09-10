@@ -159,10 +159,25 @@ def main() -> int:
         docs = sr["semantic"]
 
         # 근거 페이지가 컨텍스트에 실제로 들어갔는지
-        in_ctx = any(d.get("url") == url for d in docs[: ev.TOP_PAGES])
-        rank = next((i + 1 for i, d in enumerate(docs) if d.get("url") == url), None)
+        # (키는 utils.retrieval 통합 후 source_url/content 로 통일됨)
+        in_ctx = any(d.get("source_url") == url for d in docs[: ev.TOP_PAGES])
+        rank = next((i + 1 for i, d in enumerate(docs) if d.get("source_url") == url), None)
         print(f"  컨텍스트 {len(ctx)}자 | 문서 {len(docs)}건 | 근거 페이지 순위 {rank} ", end="")
         print(f"| 상위 {ev.TOP_PAGES} 포함: {'예' if in_ctx else '아니오'}")
+        if sr.get("decomposed"):
+            print(f"  서브쿼리: {sr.get('sub_queries')}")
+
+        # 상위 문서의 순위·점수·coverage — 짧은 정답 문서가 밀렸는지 확인용.
+        # coverage 부스트는 여러 서브쿼리에 걸린 문서를 올리므로, 한 서브쿼리에만
+        # 걸리는 짧고 구체적인 문서가 불리해질 수 있습니다.
+        print("  순위  점수    cov  길이   문서")
+        for i, d in enumerate(docs[: ev.TOP_PAGES + 3], 1):
+            mark = " ←근거" if d.get("source_url") == url else ""
+            cut = "  " if i <= ev.TOP_PAGES else " ✂"
+            print(
+                f"  {cut}{i:2}  {d.get('score', 0):.4f}  {d.get('coverage', 1):>2}  "
+                f"{len(d.get('content', '')):>5}  {d.get('title', '')[:30]}{mark}"
+            )
 
         # A. 현재 조건
         a_resp = generate(claude, PROMPT_CURRENT, ctx[: ev.CONTEXT_MAX_CHARS], question)
@@ -170,9 +185,9 @@ def main() -> int:
         print(f"\n  A 현재     : {a_score:.1f}  {a_resp[:88]}")
 
         # B. 근거 페이지만
-        only = next((d for d in docs if d.get("url") == url), None)
+        only = next((d for d in docs if d.get("source_url") == url), None)
         if only:
-            b_ctx = f"[{only['title']}]\n{only['text']}"
+            b_ctx = f"[{only['title']}]\n{only['content']}"
             b_resp = generate(claude, PROMPT_CURRENT, b_ctx, question)
             b_score, _ = judge(claude, question, answer, b_resp)
             print(f"  B 근거만   : {b_score:.1f}  ({len(b_ctx)}자)  {b_resp[:70]}")
@@ -185,12 +200,16 @@ def main() -> int:
         c_score, _ = judge(claude, question, answer, c_resp)
         print(f"  C 프롬프트 : {c_score:.1f}  {c_resp[:88]}")
 
-        if a_score < 0.7 and b_score >= 0.7 and c_score < 0.7:
-            verdict = "컨텍스트 길이 — 정답이 묻힘"
-        elif a_score < 0.7 and c_score >= 0.7:
-            verdict = "프롬프트 — 과도하게 보수적"
-        elif a_score >= 0.7:
+        if a_score >= 0.7:
             verdict = "재현 안 됨 (평가 시점과 다름)"
+        elif rank is None:
+            verdict = "검색 미스 — 근거 페이지가 결과에 없음"
+        elif not in_ctx:
+            verdict = f"랭킹 — 근거가 {rank}위라 상위 {ev.TOP_PAGES} 밖으로 밀림"
+        elif b_score >= 0.7 and c_score < 0.7:
+            verdict = "컨텍스트 — 다른 문서에 정답이 묻힘"
+        elif c_score >= 0.7:
+            verdict = "프롬프트 — 과도하게 보수적"
         elif b_score < 0.7:
             verdict = "근거 페이지만으로도 실패 — 근거 판정 재확인 필요"
         else:
