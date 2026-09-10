@@ -31,6 +31,11 @@ CHUNK_OVERSAMPLE: int = int(os.environ.get("CHUNK_OVERSAMPLE", "4"))
 # 여러 서브쿼리에 공통으로 걸린 문서에 주는 가산율.
 COVERAGE_BOOST: float = float(os.environ.get("COVERAGE_BOOST", "0.20"))
 
+# near-duplicate 판정 — 같은 문서의 여러 버전이 컨텍스트를 중복 점유하는 것을 막습니다.
+# 1.0 이면 제거 비활성화. 임계값이 낮으면 서로 다른 문서까지 지워 정보를 잃습니다.
+NEAR_DUP_THRESHOLD: float = float(os.environ.get("NEAR_DUP_THRESHOLD", "0.85"))
+NEAR_DUP_PREFIX: int = int(os.environ.get("NEAR_DUP_PREFIX", "600"))
+
 # 복합 쿼리 판정 임계값.
 COMPLEX_MIN_CHARS: int = 12
 COMPLEX_MIN_WORDS: int = 5
@@ -323,6 +328,51 @@ def vector_search_pages(
     result = [{**page, "score": page_scores.get(pid, 0.0)} for pid, page in full_pages.items()]
     result.sort(key=lambda x: x["score"], reverse=True)
     return result
+
+
+def _ngrams(text: str, n: int = 3) -> set:
+    """문자 n-gram 집합 — near-duplicate 판정용."""
+    t = "".join(text.split())  # 공백 차이는 무시
+    return {t[i : i + n] for i in range(len(t) - n + 1)} if len(t) >= n else {t}
+
+
+def content_similarity(a: str, b: str, prefix: int = NEAR_DUP_PREFIX) -> float:
+    """두 본문의 앞부분 n-gram Jaccard 유사도 (0.0~1.0).
+
+    전문을 비교하면 비용이 크고, 같은 문서의 다른 버전은 대개 앞부분이
+    동일하므로 앞 prefix 자만 봅니다.
+    """
+    ga, gb = _ngrams(a[:prefix]), _ngrams(b[:prefix])
+    if not ga or not gb:
+        return 0.0
+    return len(ga & gb) / len(ga | gb)
+
+
+def dedupe_documents(
+    docs: list,
+    threshold: float = NEAR_DUP_THRESHOLD,
+    prefix: int = NEAR_DUP_PREFIX,
+) -> list:
+    """내용이 거의 같은 문서를 제거합니다 (점수 상위를 보존).
+
+    같은 문서의 여러 버전이 Notion 에 남아 있으면 컨텍스트를 중복 점유해
+    다른 근거가 들어갈 자리를 빼앗습니다. 실측 사례: 상위 6건이 모두
+    "점검 진행 프로세스"라는 같은 제목의 유사 문서였습니다.
+
+    docs 는 점수 내림차순으로 정렬되어 있다고 가정합니다.
+    """
+    if threshold >= 1.0 or len(docs) < 2:
+        return list(docs)
+
+    kept: list = []
+    for d in docs:
+        body = str(d.get("content", ""))
+        if any(
+            content_similarity(body, str(k.get("content", "")), prefix) >= threshold for k in kept
+        ):
+            continue
+        kept.append(d)
+    return kept
 
 
 def merge_semantic_results(results_per_query: list, boost: float = COVERAGE_BOOST) -> list:
