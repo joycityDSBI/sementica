@@ -3,9 +3,9 @@
 골든셋 자동 생성 스크립트
 실제 Qdrant + FalkorDB 데이터에서 평가 질문을 생성합니다.
 
-채택 기준 (중요) — 두 관문을 모두 통과해야 합니다:
-    ① verify_grounded   정답이 소스 원문으로 뒷받침되는가 (환각 필터)
-    ② verify_answerable 질문이 답을 하나로 특정하는가 (모호성 필터)
+채택 기준 (중요) — 두 관문을 모두 통과해야 합니다 (verify_qa 가 한 번에 판정):
+    ① grounded    정답이 소스 원문으로 뒷받침되는가 (환각 필터)
+    ② answerable  질문이 답을 하나로 특정하는가 (모호성 필터)
 
     ②가 필요한 이유: 근거가 있어도 질문이 모호하면 평가가 검색 품질이 아니라
     문항 품질을 재게 됩니다. 실제로 "쿼리에서 GROUP BY 항목은?"(문서에 쿼리
@@ -16,9 +16,17 @@
     답할 수 있는 질문"만 남아 점수가 100%에 수렴하고 약점이 드러나지 않습니다.
     --baseline 으로 참고 정보(baseline_pass)로만 기록합니다.
 
+속도:
+    페이지·관계 처리를 병렬로 수행하고(--workers, 기본 8), 두 관문을 한 번의
+    LLM 호출로 판정합니다. 순차·분리 호출이던 이전 대비 문항당 호출이 절반이고
+    대기 시간이 겹칩니다.
+    검증 모델을 Haiku 로 낮추는 것도 시도했으나 "범위 초과" 판정을 놓쳐
+    되돌렸습니다 — 필요하면 GOLDEN_JUDGE_MODEL 로 바꿀 수 있습니다.
+
 실행:
     python src/eval/gen_golden_set.py --dept strategic
-    python src/eval/gen_golden_set.py --dept strategic --count 30 --baseline
+    python src/eval/gen_golden_set.py --dept strategic --count 40
+    python src/eval/gen_golden_set.py --dept strategic --count 40 --workers 12
     python src/eval/gen_golden_set.py --dept strategic --out data/eval/golden_set.json
 
 결과:
@@ -31,7 +39,8 @@ import os
 import random
 import re
 import sys
-import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -55,6 +64,14 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 CLAUDE_MODEL = "claude-sonnet-4-6@default"
+GEN_MODEL = os.environ.get("GOLDEN_GEN_MODEL", CLAUDE_MODEL)
+# 검증도 Sonnet 을 씁니다. Haiku 로 낮춰 실측했더니 "범위 초과"(정답이 묻지 않은
+# 정보를 포함) 판정을 놓치고 JSON 이 잘려 파싱에 실패했습니다 — 골든셋 품질이
+# 떨어지면 평가 전체가 무의미해지므로 속도보다 판정 정확도를 택합니다.
+# 속도가 급하면 GOLDEN_JUDGE_MODEL 로 낮출 수 있으나 탈락 기준이 느슨해집니다.
+JUDGE_MODEL = os.environ.get("GOLDEN_JUDGE_MODEL", CLAUDE_MODEL)
+# 판정 JSON 이 잘리지 않도록 넉넉히 — 150 에서는 reason 이 길 때 파싱에 실패했습니다.
+JUDGE_MAX_TOKENS = 300
 
 # 카테고리 배분 비율 (합 20 기준) — 실제 목표는 --count 에 맞춰 스케일됩니다.
 CATEGORY_RATIO = {
@@ -116,6 +133,12 @@ parser.add_argument(
     "--out", default="", help="출력 파일 경로 (기본: data/eval/golden_set_YYYYMMDD.json)"
 )
 parser.add_argument("--seed", type=int, default=42, help="난수 시드")
+parser.add_argument(
+    "--workers",
+    type=int,
+    default=8,
+    help="병렬 워커 수 (기본 8). Vertex AI 쿼터에 따라 조정",
+)
 parser.add_argument(
     "--baseline",
     action="store_true",
@@ -356,36 +379,19 @@ def parse_qa_response(text: str) -> list:
 
 
 # ─── 검증 함수 ───────────────────────────────────────────────────────────────
-# 채택하려면 두 관문을 모두 통과해야 합니다.
-#   ① verify_grounded    — 정답이 원문에 근거하는가 (환각 필터)
-#   ② verify_answerable  — 질문이 답을 하나로 특정하는가 (모호성 필터)
+# 채택하려면 두 관문을 모두 통과해야 합니다 (verify_qa 가 한 번에 판정).
+#   ① grounded    — 정답이 원문에 근거하는가 (환각 필터)
+#   ② answerable  — 질문이 답을 하나로 특정하는가 (모호성 필터)
 #
 # ※ 중요 — 검색 파이프라인 통과 여부를 채택 기준으로 쓰면 안 됩니다:
 #   골든셋 채택 기준 = 평가 대상 파이프라인 → "이미 답할 수 있는 질문"만 남아
 #   평가 점수가 인위적으로 100%에 수렴하고 시스템 약점이 측정되지 않습니다.
 #   검색 통과 여부는 --baseline 플래그로 참고 정보(baseline_pass)로만 기록합니다.
 
-_GROUND_PROMPT = """다음 답변이 주어진 원문으로 뒷받침되는지 엄격하게 판단하세요.
-
-원문:
-{source}
-
-질문: {question}
-답변: {answer}
-
-판단 기준:
-- pass: 답변의 핵심 정보가 원문에 명시적으로 있음 (표현이 달라도 의미가 같으면 pass)
-- fail: 원문에 없는 내용 / 추측 / 원문과 불일치 / 원문보다 과도하게 구체적
-
-JSON으로만 응답: {{"verdict": "pass"|"fail", "reason": "한 줄"}}"""
-
-# 모호성 필터 — 실제 평가에서 반복 실패한 문항 유형을 걸러냅니다.
-#   · "쿼리에서 GROUP BY 항목은?"      → 문서에 쿼리가 여럿이라 답이 갈림
-#   · "테이블 조인 조건은?"             → 어느 조인인지 불명
-#   · Q "제공하는 곳은?" / A "…분기마다" → 묻지 않은 정보가 정답에 포함
-# 이런 문항은 시스템이 정답을 찾아도 채점에서 부분점수가 나와, 검색 품질이
-# 아니라 문항 품질을 측정하게 됩니다.
-_ANSWERABLE_PROMPT = """다음 Q&A가 검색 시스템 평가 문항으로 적절한지 판단하세요.
+# 두 관문을 한 번의 호출로 판정합니다. 입력(원문·질문·정답)이 동일하므로
+# 나눠 보내면 같은 컨텍스트를 두 번 전송하게 되고, 검증이 전체 LLM 호출의
+# 대부분을 차지해 생성 시간이 배로 늘어납니다.
+_VERIFY_PROMPT = """다음 Q&A가 검색 시스템 평가 문항으로 적절한지 두 단계로 판단하세요.
 
 원문:
 {source}
@@ -393,21 +399,23 @@ _ANSWERABLE_PROMPT = """다음 Q&A가 검색 시스템 평가 문항으로 적�
 질문: {question}
 정답: {answer}
 
-아래 중 하나라도 해당하면 reject:
+━━ 1단계: 근거 (grounded) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+정답이 원문으로 뒷받침되는가?
+- true : 정답의 핵심 정보가 원문에 있음 (표현이 달라도 의미가 같으면 true)
+- false: 원문에 없음 / 추측 / 원문과 불일치 / 원문보다 과도하게 구체적
 
+━━ 2단계: 명확성 (answerable) ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+질문이 답을 하나로 특정하는가? 아래 중 하나라도 해당하면 false:
 1. 대상 미특정 — 원문에 같은 종류의 대상(쿼리·테이블·단계·프로세스·문서 등)이
-   여럿인데 질문이 어느 것인지 밝히지 않아, 원문을 본 사람도 답을 하나로
-   고를 수 없음
+   여럿인데 질문이 어느 것인지 밝히지 않아, 원문을 본 사람도 답을 하나로 고를 수 없음
 2. 범위 초과 — 정답이 질문에서 묻지 않은 정보를 포함
    (예: "어디인가요?" 라고 물었는데 정답에 주기·시점·이유가 들어감)
-3. 문맥 의존 — "해당 쿼리", "이 단계", "위 문서" 처럼 질문만으로는
-   무엇을 가리키는지 알 수 없음
+3. 문맥 의존 — "해당 쿼리", "이 단계", "위 문서" 처럼 질문만으로 대상을 알 수 없음
 4. 정답 불완전 — 원문에 근거가 더 있는데 정답이 일부만 담아, 완전한 답변이
    오히려 오답 처리될 수 있음
 
-문제가 없으면 accept.
-
-JSON으로만 응답: {{"verdict": "accept"|"reject", "reason": "한 줄"}}"""
+JSON으로만 응답:
+{{"grounded": true, "answerable": true, "reason": "한 줄"}}"""
 
 _ANSWER_PROMPT = """아래 컨텍스트를 바탕으로 질문에 답하세요. 컨텍스트에 없는 내용은 답하지 마세요.
 
@@ -436,18 +444,23 @@ def _embed_text(text: str) -> list:
     return result.embeddings[0].values
 
 
-def _judge_verdict(prompt: str, ok_value: str = "pass", max_tokens: int = 150) -> tuple[bool, str]:
-    """LLM 판정을 요청하고 (통과 여부, 사유) 를 반환."""
+def _judge_json(prompt: str, model: str = JUDGE_MODEL, max_tokens: int = 150) -> dict:
+    """LLM 판정을 요청하고 JSON dict 를 반환. 실패 시 {}."""
     resp = claude.messages.create(
-        model=CLAUDE_MODEL,
+        model=model,
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
     text = resp.content[0].text.strip()
     m = re.search(r"\{.*\}", text, re.DOTALL)
-    if not m:
+    return json.loads(m.group()) if m else {}
+
+
+def _judge_verdict(prompt: str, ok_value: str = "pass", max_tokens: int = 150) -> tuple[bool, str]:
+    """단일 verdict 판정 — (통과 여부, 사유)."""
+    d = _judge_json(prompt, max_tokens=max_tokens)
+    if not d:
         return False, "판정 파싱 실패"
-    d = json.loads(m.group())
     return d.get("verdict", "") == ok_value, str(d.get("reason", ""))
 
 
@@ -466,50 +479,37 @@ def _warn_once(kind: str, exc: Exception) -> None:
         print(f"\n  ⚠️  {kind} LLM 호출 실패 — 이후 동일 오류는 생략합니다:\n     {exc}\n")
 
 
-def verify_grounded(question: str, answer: str, source_text: str) -> bool:
-    """★ 채택 관문 ① — 정답이 소스 원문으로 뒷받침되는지 확인.
+def verify_qa(question: str, answer: str, source_text: str) -> tuple[bool, str, str]:
+    """★ 채택 판정 — 근거와 명확성을 한 번의 LLM 호출로 확인합니다.
 
-    LLM이 생성한 정답의 환각을 걸러냅니다.
-    검색 파이프라인을 거치지 않으므로 평가 대상과 독립적입니다.
-    """
-    try:
-        ok, _ = _judge_verdict(
-            _GROUND_PROMPT.format(
-                source=source_text[:3000],
-                question=question,
-                answer=answer,
-            )
-        )
-        return ok
-    except Exception as e:
-        _warn_once("근거 검증", e)
-        return False
-
-
-def verify_answerable(question: str, answer: str, source_text: str) -> tuple[bool, str]:
-    """★ 채택 관문 ② — 질문이 답을 하나로 특정하는지 확인.
-
-    근거가 있어도 질문이 모호하면 평가가 문항 품질을 재게 됩니다.
-    실제로 "쿼리에서 GROUP BY 항목은?"(문서에 쿼리 3개), "제공하는 곳은?"에
-    주기까지 담은 정답 같은 문항이 반복해서 부분점수를 받았습니다.
+    두 관문을 나눠 호출하면 같은 원문을 두 번 전송하게 되고, 검증이 전체
+    호출의 대부분이라 생성 시간이 배로 늘어납니다.
 
     Returns:
-        (채택 여부, 사유)
+        (채택 여부, 탈락 사유 분류, 상세 사유)
+        분류는 "근거 없음" | "모호함" | "" (채택).
     """
     try:
-        return _judge_verdict(
-            _ANSWERABLE_PROMPT.format(
+        d = _judge_json(
+            _VERIFY_PROMPT.format(
                 source=source_text[:3000],
                 question=question,
                 answer=answer,
             ),
-            ok_value="accept",
+            max_tokens=JUDGE_MAX_TOKENS,
         )
     except Exception as e:
-        _warn_once("모호성 검증", e)
-        # 판정 불가 시에는 통과시킵니다 — 근거 검증은 이미 통과한 문항이므로
-        # 검증기 장애로 골든셋이 비는 것보다 낫습니다.
-        return True, "검증 생략"
+        _warn_once("문항 검증", e)
+        return False, "검증 실패", str(e)[:40]
+
+    if not d:
+        return False, "검증 실패", "판정 파싱 실패"
+    reason = str(d.get("reason", ""))
+    if not d.get("grounded", False):
+        return False, "근거 없음", reason
+    if not d.get("answerable", False):
+        return False, "모호함", reason
+    return True, "", reason
 
 
 def baseline_search_pass(question: str, answer: str, search_limit: int = 7) -> bool:
@@ -535,6 +535,8 @@ def baseline_search_pass(question: str, answer: str, search_limit: int = 7) -> b
             p = h.payload or {}
             context += f"[{p.get('title', '')}]\n{p.get('text', '')[:600]}\n\n"
 
+        # 평가 파이프라인을 재현하는 목적이므로 evaluate.py 와 같은 모델을 씁니다
+        # (검증용 JUDGE_MODEL 이 아님).
         gen = claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=200,
@@ -557,72 +559,82 @@ def baseline_search_pass(question: str, answer: str, search_limit: int = 7) -> b
         return False
 
 
-# ─── 3. 페이지 기반 Q&A 생성 + 즉시 검증 ────────────────────────────────────
-print("🤖 페이지 기반 Q&A 생성 + 검증 중...")
+# ─── 3. 페이지 기반 Q&A 생성 + 즉시 검증 (병렬) ─────────────────────────────
+print(f"🤖 페이지 기반 Q&A 생성 + 검증 중... (워커 {args.workers}개)")
 all_candidates = []
 
 # 카테고리별 현재 수집 현황 추적
 cat_counts = dict.fromkeys(CATEGORY_TARGETS, 0)
 
-for i, page in enumerate(pages):
-    # 목표 달성 시 중단 (관계 제외)
-    non_rel_done = all(
-        cat_counts[c] >= CATEGORY_TARGETS[c] * 2  # 후보 2배 수집 후 선별
-        for c in ("담당자", "정책/규정", "문서위치", "복합")
+_lock = threading.Lock()
+_stop = threading.Event()  # 목표 달성 시 남은 페이지 처리를 건너뜁니다
+
+
+def _generate_and_verify(source_text: str, prompt: str) -> tuple[list, list]:
+    """LLM으로 Q&A를 생성하고 각 후보를 검증합니다.
+
+    Returns:
+        (채택된 item 목록, [(분류, 질문, 사유), ...] 탈락 목록)
+    """
+    msg = claude.messages.create(
+        model=GEN_MODEL,
+        max_tokens=600,
+        messages=[{"role": "user", "content": prompt}],
     )
-    if non_rel_done:
-        break
+    accepted: list = []
+    rejected: list = []
+    for item in parse_qa_response(msg.content[0].text):
+        ok, kind, why = verify_qa(item["question"], item["answer"], source_text)
+        if ok:
+            item["grounded"] = True
+            accepted.append(item)
+        else:
+            rejected.append((kind, item["question"][:48], why[:40]))
+    return accepted, rejected
 
-    print(f"  [{i + 1}/{len(pages)}] {page['title'][:40]}", end="", flush=True)
+
+def _process_page(page: dict) -> tuple:
+    """한 페이지에서 Q&A를 생성·검증합니다. (페이지, 생성수, 채택, 탈락, 오류)"""
+    if _stop.is_set():
+        return page, 0, [], [], None
     try:
-        msg = claude.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=600,
-            messages=[
-                {
-                    "role": "user",
-                    "content": PAGE_QA_PROMPT.format(
-                        title=page["title"],
-                        text=page["text"],
-                    ),
-                }
-            ],
-        )
-        items = parse_qa_response(msg.content[0].text)
-
-        verified = 0
-        for item in items:
-            # ★ 관문 ①: 정답이 이 문서 원문으로 뒷받침되는지 (환각 필터)
-            if not verify_grounded(item["question"], item["answer"], page["text"]):
-                _reject_counts["근거 없음"] = _reject_counts.get("근거 없음", 0) + 1
-                time.sleep(0.2)
-                continue
-
-            # ★ 관문 ②: 질문이 답을 하나로 특정하는지 (모호성 필터)
-            ok, why = verify_answerable(item["question"], item["answer"], page["text"])
-            if not ok:
-                _reject_counts["모호함"] = _reject_counts.get("모호함", 0) + 1
-                _reject_samples.append((item["question"][:48], why[:40]))
-                time.sleep(0.2)
-                continue
-
+        prompt = PAGE_QA_PROMPT.format(title=page["title"], text=page["text"])
+        accepted, rejected = _generate_and_verify(page["text"], prompt)
+        for item in accepted:
             item["source_url"] = page["url"]
             item["source_title"] = page["title"]
-            item["grounded"] = True
             # 참고 정보: 현재 검색 파이프라인 통과 여부 (채택 여부와 무관)
             if args.baseline:
                 item["baseline_pass"] = baseline_search_pass(item["question"], item["answer"])
-            all_candidates.append(item)
-            cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
-            verified += 1
-            time.sleep(0.2)
-
-        print(f" → {len(items)}개 생성, {verified}개 근거 확인")
+        return page, len(accepted) + len(rejected), accepted, rejected, None
     except Exception as e:
-        print(f" ⚠️  {e}")
+        return page, 0, [], [], e
 
-    time.sleep(0.3)
 
+_NON_REL = ("담당자", "정책/규정", "문서위치", "복합")
+_done = 0
+with ThreadPoolExecutor(max_workers=args.workers) as pool:
+    futures = [pool.submit(_process_page, p) for p in pages]
+    for fut in as_completed(futures):
+        page, generated, accepted, rejected, err = fut.result()
+        _done += 1
+        with _lock:
+            for item in accepted:
+                all_candidates.append(item)
+                cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
+            for kind, q, why in rejected:
+                _reject_counts[kind] = _reject_counts.get(kind, 0) + 1
+                if kind == "모호함":
+                    _reject_samples.append((q, why))
+            # 후보를 목표의 2배까지 모으면 중단 — 이후 난이도 균형을 맞춰 선별합니다
+            if all(cat_counts[c] >= CATEGORY_TARGETS[c] * 2 for c in _NON_REL):
+                _stop.set()
+
+        tail = f"⚠️  {err}" if err else f"→ {generated}개 생성, {len(accepted)}개 채택"
+        print(f"  [{_done}/{len(pages)}] {page['title'][:36]:38} {tail}")
+
+if _stop.is_set():
+    print("  (카테고리 목표 도달 — 남은 페이지 생략)")
 print()
 
 # ─── 4. 관계 기반 Q&A 생성 ───────────────────────────────────────────────────
@@ -631,57 +643,51 @@ if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
     # 관계를 5개씩 묶어 처리. 훑을 관계 수는 목표 문항에 비례합니다
     # (고정 30개였을 때는 --count 를 올려도 관계 후보가 늘지 않았습니다).
     _rel_scan = min(len(relations), max(30, CATEGORY_TARGETS["관계"] * 8))
-    for chunk_start in range(0, _rel_scan, 5):
-        if cat_counts.get("관계", 0) >= CATEGORY_TARGETS["관계"] * 3:
-            break
-        chunk = relations[chunk_start : chunk_start + 5]
+    _rel_chunks = [relations[s : s + 5] for s in range(0, _rel_scan, 5)]
+    _rel_stop = threading.Event()
+
+    def _process_rel_chunk(chunk: list) -> tuple:
+        """관계 묶음에서 Q&A를 생성·검증합니다. (라벨, 생성수, 채택, 탈락, 오류)"""
+        label = f"{chunk[0]['subject'][:20]} 외 {len(chunk) - 1}건"
+        if _rel_stop.is_set():
+            return label, 0, [], [], None
         rel_text = "\n".join(
             f"- {r['subject']} →[{r['predicate']}]→ {r['object']}"
             + (f" (조건: {r['condition']})" if r.get("condition") else "")
             for r in chunk
         )
-        print(f"  관계 묶음 [{chunk_start + 1}~{chunk_start + len(chunk)}]...", end="", flush=True)
         try:
-            msg = claude.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=400,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": REL_QA_PROMPT.format(relations=rel_text),
-                    }
-                ],
+            accepted, rejected = _generate_and_verify(
+                rel_text, REL_QA_PROMPT.format(relations=rel_text)
             )
-            items = parse_qa_response(msg.content[0].text)
-            verified = 0
-            for item in items:
-                # ★ 관문 ①: 정답이 이 관계 데이터로 뒷받침되는지
-                if not verify_grounded(item["question"], item["answer"], rel_text):
-                    _reject_counts["근거 없음"] = _reject_counts.get("근거 없음", 0) + 1
-                    time.sleep(0.2)
-                    continue
-
-                # ★ 관문 ②: 질문이 답을 하나로 특정하는지
-                ok, why = verify_answerable(item["question"], item["answer"], rel_text)
-                if not ok:
-                    _reject_counts["모호함"] = _reject_counts.get("모호함", 0) + 1
-                    _reject_samples.append((item["question"][:48], why[:40]))
-                    time.sleep(0.2)
-                    continue
-
+            for item in accepted:
                 item["source_url"] = chunk[0].get("url", "")
                 item["source_title"] = f"관계: {chunk[0]['subject']}"
-                item["grounded"] = True
                 if args.baseline:
                     item["baseline_pass"] = baseline_search_pass(item["question"], item["answer"])
-                all_candidates.append(item)
-                cat_counts["관계"] = cat_counts.get("관계", 0) + 1
-                verified += 1
-                time.sleep(0.2)
-            print(f" → {len(items)}개 생성, {verified}개 근거 확인")
+            return label, len(accepted) + len(rejected), accepted, rejected, None
         except Exception as e:
-            print(f" ⚠️  {e}")
-        time.sleep(0.3)
+            return label, 0, [], [], e
+
+    _rdone = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = [pool.submit(_process_rel_chunk, c) for c in _rel_chunks]
+        for fut in as_completed(futures):
+            label, generated, accepted, rejected, err = fut.result()
+            _rdone += 1
+            with _lock:
+                for item in accepted:
+                    all_candidates.append(item)
+                    cat_counts["관계"] = cat_counts.get("관계", 0) + 1
+                for kind, q, why in rejected:
+                    _reject_counts[kind] = _reject_counts.get(kind, 0) + 1
+                    if kind == "모호함":
+                        _reject_samples.append((q, why))
+                if cat_counts.get("관계", 0) >= CATEGORY_TARGETS["관계"] * 3:
+                    _rel_stop.set()
+
+            tail = f"⚠️  {err}" if err else f"→ {generated}개 생성, {len(accepted)}개 채택"
+            print(f"  [{_rdone}/{len(_rel_chunks)}] {label:38} {tail}")
     print()
 
 
