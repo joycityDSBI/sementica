@@ -70,33 +70,28 @@ FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 # 평가 파이프라인(evaluate.py)도 같은 모듈을 쓰므로 한쪽만 튜닝되어
 # 서로 다른 검색을 하던 문제가 재발하지 않습니다.
 from utils.retrieval import (
-    decompose_query as _decompose_with,
     fetch_pages_by_source_urls as _fetch_pages_by_source_urls,
     find_entities_in_query as _find_entities,
-    is_complex_query as _is_complex_query,
     merge_semantic_results as _merge_semantic_results,
+    search_queries as _search_queries,
     vector_search_pages as _vector_search_pages,
 )
 
 
-def _decompose_query(query: str) -> list:
-    """복합 쿼리 분해 — 분해 로직은 utils.retrieval, LLM 호출만 여기서 주입.
+def _complete_for_decompose(prompt: str) -> str:
+    """쿼리 분해용 LLM 호출 — 분해 로직 자체는 utils.retrieval 이 담당합니다.
 
     MCP 서버는 API 키 방식(anthropic.Anthropic)을 쓰고 평가는 Vertex 를 쓰므로
     클라이언트 생성만 각자 담당합니다.
     """
+    import anthropic
 
-    def _complete(prompt: str) -> str:
-        import anthropic
-
-        msg = anthropic.Anthropic().messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return msg.content[0].text
-
-    return _decompose_with(query, _complete)
+    msg = anthropic.Anthropic().messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text
 
 
 # 기본값 (--dept 없을 때 / legacy)
@@ -655,11 +650,9 @@ def hybrid_search(query: str, limit: int = 12) -> dict[str, Any]:
     _result = None
     try:
         # ── 1. 복합 쿼리 감지 및 서브쿼리 분해 ─────────────────────────────
-        sub_queries = [query]
-        decomposed = False
-        if _is_complex_query(query):
-            sub_queries = _decompose_query(query)
-            decomposed = len(sub_queries) > 1
+        # 분해되면 원본 질문도 검색 대상에 포함됩니다 — 분해 과정에서 긴 엔티티
+        # 이름이 축약되면 그래프 노드 매칭이 깨지기 때문입니다.
+        sub_queries, decomposed = _search_queries(query, _complete_for_decompose)
 
         # ── 2. 서브쿼리별 벡터+그래프 병렬 검색 ───────────────────────────
         # 각 서브쿼리는 독립적 → 서브쿼리 간에도 병렬 실행

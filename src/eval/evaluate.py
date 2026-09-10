@@ -55,10 +55,9 @@ EMBED_MODEL = "text-multilingual-embedding-002"
 # 서비스(server.py)와 같은 모듈을 쓰므로, 한쪽만 튜닝되어 평가가 다른 검색을
 # 측정하던 문제(coverage 부스트 0.15 vs 0.20, 복합 판정 임계값 등)가 사라집니다.
 from utils.retrieval import (
-    decompose_query as _decompose_with,
     find_entities_in_query as _find_entities,
-    is_complex_query as _is_complex_query,
     merge_semantic_results as _merge_semantic_results,
+    search_queries as _search_queries,
     vector_search_pages as _vector_search_pages,
 )
 
@@ -373,9 +372,10 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
     평가와 서비스가 같은 검색을 수행합니다.
     """
     # ── 1. 복합 쿼리 감지 및 분해 ──────────────────────────────────────────
+    # 분해되면 원본 질문도 검색 대상에 포함됩니다 (utils.retrieval.search_queries).
     sub_queries = [query]
     decomposed = False
-    if claude and _is_complex_query(query):
+    if claude:
 
         def _complete(prompt: str) -> str:
             msg = claude.messages.create(
@@ -385,8 +385,7 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
             )
             return msg.content[0].text
 
-        sub_queries = _decompose_with(query, _complete)
-        decomposed = len(sub_queries) > 1
+        sub_queries, decomposed = _search_queries(query, _complete)
 
     # ── 2. 이벤트 타임라인 (원본 질문 기준 1회) ────────────────────────────
     timeline = timeline_lookup(graph, qdrant, query)

@@ -101,6 +101,27 @@ def is_complex_query(query: str) -> bool:
     return len(query.split()) >= COMPLEX_MIN_WORDS
 
 
+def search_queries(query: str, complete_fn) -> tuple[list, bool]:
+    """검색에 사용할 쿼리 목록과 분해 여부를 반환합니다.
+
+    분해된 경우 **원본 질문을 맨 앞에 함께 포함**합니다. 분해 과정에서 긴 엔티티
+    이름이 축약되면(예: "ADNW/빅미디어 규모-효율 진단" → "ADNW 빅미디어 진단")
+    그래프 노드 매칭($text CONTAINS n.name)이 깨져, 원본에는 온전히 들어 있는
+    이름을 쓰지 못하게 됩니다.
+
+    부수 효과로 원본 질문에 걸린 문서는 coverage 가 1 늘어 재랭킹에서 우대됩니다.
+
+    Returns:
+        (검색 쿼리 목록, 분해 여부)
+    """
+    if not is_complex_query(query):
+        return [query], False
+    subs = decompose_query(query, complete_fn)
+    if len(subs) <= 1:
+        return [query], False
+    return [query, *subs], True
+
+
 def decompose_query(query: str, complete_fn) -> list:
     """복합 쿼리를 서브쿼리 2~4개로 분해합니다. 실패 시 [query].
 
