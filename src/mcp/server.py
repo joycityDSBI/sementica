@@ -25,6 +25,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+# src/ — utils 패키지(synonym_resolver·korean·datespan) import 에 필요.
+# 아래 try/except 보다 먼저 실행되어야 하며, 누락 시 동의어 확장과
+# 그래프 노드 매칭(hybrid_search 의 _do_graph)이 조용히 비활성화됩니다.
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 # ─── 동의어 해결기 (비즈니스 용어집 API) ────────────────────────────────────────
 try:
     from utils.synonym_resolver import expand as _syn_expand

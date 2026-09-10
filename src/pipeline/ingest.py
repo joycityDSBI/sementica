@@ -31,6 +31,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
+# src/ — utils 패키지(synonym_resolver·korean·datespan) import 에 필요.
+# 누락 시 동의어 정규화와 이벤트 주체 판정이 조용히 비활성화됩니다.
+sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
     from db_logger import upsert_notion_page as _upsert_notion_page
 except Exception:

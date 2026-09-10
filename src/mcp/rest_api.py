@@ -38,6 +38,7 @@ _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE))  # server.py
 sys.path.insert(0, str(_HERE.parent / "pipeline"))  # dept_config 등
 sys.path.insert(0, str(_HERE.parent / "ops"))  # db_logger 등
+sys.path.insert(0, str(_HERE.parent))  # src/ — utils 패키지
 
 # ─── .env 로드 ────────────────────────────────────────────────────────────────
 _env_path = _HERE.parent.parent / ".env"

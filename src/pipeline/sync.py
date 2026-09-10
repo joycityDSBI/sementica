@@ -41,6 +41,8 @@ if _env_path.exists():
 
 ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
+# src/ — utils 패키지(synonym_resolver·korean·datespan) import 에 필요
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
     import httpx

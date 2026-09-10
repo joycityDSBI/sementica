@@ -35,6 +35,7 @@ if _env_path.exists():
 ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT / "src" / "pipeline"))
 sys.path.insert(0, str(ROOT / "src" / "ops"))
+sys.path.insert(0, str(ROOT / "src"))  # utils 패키지
 
 POSTGRES_URL = os.environ.get("POSTGRES_URL", "")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
