@@ -57,6 +57,11 @@ TOP_RELATIONS = 15  # 컨텍스트에 넣을 그래프 관계 수
 CONTEXT_MAX_CHARS = 26000  # 문서 24000자 + 그래프 요약 여유분
 ANSWER_MAX_TOKENS = 800  # 나열형 답변이 중간에 끊기지 않도록
 SCORE_RESPONSE_CHARS = 2500  # 채점 시 응답을 자르는 한도
+
+# 청크 검색 개수 — 페이지 단위 집계 후 TOP_PAGES 만큼 남기므로 넉넉히 가져옵니다.
+# 청크 k개를 page_id 로 묶으면 결과가 1~k개로 줄어듭니다. 긴 문서가 상위를
+# 독점하면 k=5 일 때 페이지 1건만 남아 다른 문서를 아예 보지 못합니다.
+CHUNK_SEARCH_LIMIT = 24
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
@@ -345,8 +350,13 @@ def timeline_lookup(graph, query: str, limit: int = 20) -> dict:
         return {}
 
 
-def semantic_search(embed_client, qdrant, query: str, limit: int = 5) -> list:
-    """청크로 검색한 뒤 해당 페이지 전문을 조립해 반환 (Parent Document Retrieval)."""
+def semantic_search(embed_client, qdrant, query: str, limit: int = CHUNK_SEARCH_LIMIT) -> list:
+    """청크로 검색한 뒤 해당 페이지 전문을 조립해 반환 (Parent Document Retrieval).
+
+    limit 은 **청크** 개수입니다. page_id 로 묶는 과정에서 결과 수가 줄어들므로
+    (같은 페이지의 청크가 여러 개 걸리면 1건으로 합쳐짐) 페이지 다양성을
+    확보하려면 넉넉히 가져와야 합니다.
+    """
     vec = embed(embed_client, query)
     result = qdrant.query_points(
         collection_name=COLLECTION_NAME,
@@ -524,7 +534,7 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
     graph_seen: set = set()
 
     for sq in sub_queries:
-        sem = semantic_search(embed_client, qdrant, sq, limit=5)
+        sem = semantic_search(embed_client, qdrant, sq, limit=CHUNK_SEARCH_LIMIT)
         grp = graph_search(graph, sq)
 
         for s in sem:

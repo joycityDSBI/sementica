@@ -64,6 +64,11 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 
+# 청크 오버샘플 배수 — Parent Document Retrieval 이 청크를 page_id 로 묶으면서
+# 결과 수가 줄어드는 것을 보정합니다. limit 개 페이지를 얻으려면 그보다 많은
+# 청크를 조회해야 합니다 (한 페이지가 상위 청크를 독점하는 경우 대비).
+CHUNK_OVERSAMPLE = 4
+
 # 기본값 (--dept 없을 때 / legacy)
 COLLECTION_NAME = "joycity_pages"
 GRAPH_NAME = "joycity_kg"
@@ -428,6 +433,11 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
     Parent Document Retrieval 적용:
     벡터 유사도로 top-k 청크를 찾은 뒤, 매칭된 page_id의 전체 청크를
     조합해 완전한 페이지 본문을 반환합니다.
+
+    ※ limit 은 반환할 **페이지** 수입니다. 청크를 page_id 로 묶으면 결과가
+      줄어들므로(같은 페이지의 청크 여러 개 → 1건) 청크는 CHUNK_OVERSAMPLE
+      배로 조회합니다. 이것이 없으면 긴 문서가 상위를 독점할 때 페이지가
+      1~2건만 남아 다른 문서를 아예 보지 못합니다.
     """
 
     def _do_vector() -> list:
@@ -437,7 +447,7 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
             hit = qc.query_points(
                 collection_name=COLLECTION_NAME,
                 query=vec,
-                limit=limit,
+                limit=max(limit * CHUNK_OVERSAMPLE, limit),
                 with_payload=True,
             )
             page_scores: dict = {}
@@ -447,18 +457,20 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
                 score = round(h.score, 4)
                 if pid and (pid not in page_scores or score > page_scores[pid]):
                     page_scores[pid] = score
-            full_pages = _fetch_full_pages(qc, COLLECTION_NAME, list(page_scores.keys()))
-            result = []
-            for pid, page in full_pages.items():
-                result.append(
-                    {
-                        "title": page["title"],
-                        "source_url": page["source_url"],
-                        "content": page["content"],
-                        "chunk_count": page["chunk_count"],
-                        "score": page_scores.get(pid, 0.0),
-                    }
-                )
+            # 점수 상위 limit 개 페이지만 전문 조립 (오버샘플한 만큼 잘라냄)
+            top_pids = sorted(page_scores, key=lambda k: page_scores[k], reverse=True)[:limit]
+            full_pages = _fetch_full_pages(qc, COLLECTION_NAME, top_pids)
+            result = [
+                {
+                    "title": page["title"],
+                    "source_url": page["source_url"],
+                    "content": page["content"],
+                    "chunk_count": page["chunk_count"],
+                    "score": page_scores.get(pid, 0.0),
+                }
+                for pid, page in full_pages.items()
+            ]
+            result.sort(key=lambda x: x["score"], reverse=True)
             return result
         except Exception:
             return []
