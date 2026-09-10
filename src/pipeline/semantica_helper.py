@@ -1477,7 +1477,14 @@ def detect_event_scopes(graph, text: str, limit: int = 3) -> list[str]:
     return names[:limit]
 
 
-def resolve_timeline_query(graph, query: str, limit: int = 20) -> dict:
+def resolve_timeline_query(
+    graph,
+    query: str,
+    limit: int = 20,
+    qc=None,
+    collection_name: str = "",
+    page_max_chars: int = 1500,
+) -> dict:
     """질문 문장에서 조회 조건을 추론해 이벤트 타임라인을 반환합니다.
 
     hybrid_search 와 평가 파이프라인이 공유하는 진입점입니다. 날짜 기반
@@ -1498,8 +1505,16 @@ def resolve_timeline_query(graph, query: str, limit: int = 20) -> dict:
     "점검 시작은 어느 팀 담당?" 처럼 시계열 키워드만 걸리고 날짜도 주체도
     없는 질문은 빈 dict 를 반환합니다.
 
+    Args:
+        qc:              Qdrant 클라이언트. 주면 이벤트별 원문(page_content)을
+                         첨부합니다. 서비스와 평가가 같은 데이터를 보도록
+                         반드시 전달하세요.
+        collection_name: 원문 조회 대상 컬렉션.
+        page_max_chars:  이벤트당 첨부할 원문 길이.
+
     Returns:
-        get_event_chain() 결과 dict. 조건 미충족·조회 실패 시 {}.
+        get_event_chain() 결과 dict (+ events[].page_content).
+        조건 미충족·조회 실패 시 {}.
     """
     try:
         from utils.datespan import extract_date_range, has_timeline_intent
@@ -1531,7 +1546,31 @@ def resolve_timeline_query(graph, query: str, limit: int = 20) -> dict:
         limit=limit,
         keywords=keywords or None,
     )
-    return result if result and result.get("events") else {}
+    if not result or not result.get("events"):
+        return {}
+
+    # ── 이벤트별 Notion 원문 첨부 ────────────────────────────────────────────
+    # :Event 노드는 제목·날짜·카테고리만 담고 있어, "몇 건인가" 같은 세부는
+    # 원문에만 있습니다. 첨부하지 않으면 이벤트를 찾고도 답하지 못합니다.
+    # qc 가 없으면(그래프만 쓰는 호출) 조용히 건너뜁니다.
+    if qc is not None and collection_name:
+        urls = list({ev["source_url"] for ev in result["events"] if ev.get("source_url")})
+        if urls:
+            try:
+                from utils.retrieval import fetch_pages_by_source_urls
+
+                pages = fetch_pages_by_source_urls(
+                    qc, collection_name, urls, max_chars=page_max_chars
+                )
+                for ev in result["events"]:
+                    page = pages.get(ev.get("source_url", ""))
+                    if page:
+                        ev["page_content"] = page.get("content", "")
+                        ev["page_chunk_count"] = page.get("chunk_count", 0)
+            except Exception:
+                pass  # 원문 첨부는 부가 정보 — 실패해도 이벤트 목록은 반환
+
+    return result
 
 
 # ─── 9. 경로 분류 (classify_page) ────────────────────────────────────────────

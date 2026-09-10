@@ -166,9 +166,8 @@ def _embed(text: str) -> list[float]:
 def _search_event_timeline(query: str, limit: int = 20) -> dict:
     """질문에 시계열 의도가 있으면 :Event 이력을 조회하고 원문을 첨부합니다.
 
-    조건 판정과 조회는 semantica_helper.resolve_timeline_query() 가 담당하며
-    (평가 파이프라인과 동일 로직), 이 함수는 그 결과에 Qdrant 원문을
-    붙이는 서버 측 처리만 수행합니다.
+    조건 판정·조회·원문 첨부 모두 semantica_helper.resolve_timeline_query()
+    가 담당합니다 (평가 파이프라인과 동일 경로).
 
     Returns:
         get_event_chain() 결과 dict + events[].page_content.
@@ -177,25 +176,13 @@ def _search_event_timeline(query: str, limit: int = 20) -> dict:
     if _resolve_timeline is None:
         return {}
     try:
-        result = _resolve_timeline(_get_falkordb(), query, limit=limit)
-        if not result:
-            return {}
-
-        # :Event 의 source_url → Qdrant 원문 첨부 (timeline_search 와 동일한 방식)
-        urls = list({ev["source_url"] for ev in result["events"] if ev.get("source_url")})
-        if urls:
-            try:
-                pages = _fetch_pages_by_source_urls(
-                    _get_qdrant(), COLLECTION_NAME, urls, max_chars=1500
-                )
-                for ev in result["events"]:
-                    page = pages.get(ev.get("source_url", ""))
-                    if page:
-                        ev["page_content"] = page.get("content", "")
-                        ev["page_chunk_count"] = page.get("chunk_count", 0)
-            except Exception:
-                pass  # 원문 첨부는 부가 정보 — 실패해도 이벤트 목록은 반환
-        return result
+        return _resolve_timeline(
+            _get_falkordb(),
+            query,
+            limit=limit,
+            qc=_get_qdrant(),
+            collection_name=COLLECTION_NAME,
+        )
     except Exception:
         return {}
 

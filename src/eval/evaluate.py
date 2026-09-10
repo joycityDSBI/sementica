@@ -291,18 +291,23 @@ def embed(client, text: str) -> list:
 
 
 # ─── 검색 함수 ────────────────────────────────────────────────────────────────
-def timeline_lookup(graph, query: str, limit: int = 20) -> dict:
-    """이벤트 타임라인을 조회합니다 — 서비스와 동일한 판정 로직 사용.
+def timeline_lookup(graph, qdrant, query: str, limit: int = 20) -> dict:
+    """이벤트 타임라인을 조회합니다 — 서비스와 동일한 판정·원문 첨부 경로.
 
-    조건 추론(시계열 의도·날짜 범위·주체 결정)은 semantica_helper 의
-    resolve_timeline_query() 가 담당합니다. server.py 의 hybrid_search 도
-    같은 함수를 호출하므로, 평가와 서비스가 어긋나지 않습니다.
+    조건 추론(시계열 의도·날짜 범위·주체 결정)과 이벤트별 원문 첨부 모두
+    semantica_helper.resolve_timeline_query() 가 담당합니다.
+    server.py 의 hybrid_search 도 같은 함수를 같은 인자로 호출합니다.
+
+    ※ qdrant 를 넘기지 않으면 이벤트 원문이 빠져, "몇 건인가" 처럼 원문에만
+      있는 세부를 평가에서 볼 수 없게 됩니다.
     """
     try:
         sys.path.insert(0, str(ROOT / "src" / "pipeline"))
         from semantica_helper import resolve_timeline_query
 
-        return resolve_timeline_query(graph, query, limit=limit)
+        return resolve_timeline_query(
+            graph, query, limit=limit, qc=qdrant, collection_name=COLLECTION_NAME
+        )
     except Exception:
         return {}
 
@@ -379,7 +384,7 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
         decomposed = len(sub_queries) > 1
 
     # ── 2. 이벤트 타임라인 (원본 질문 기준 1회) ────────────────────────────
-    timeline = timeline_lookup(graph, query)
+    timeline = timeline_lookup(graph, qdrant, query)
 
     # ── 3. 서브쿼리별 검색 및 결과 수집 ────────────────────────────────────
     sem_per_query: list = []
@@ -421,6 +426,9 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
         timeline_text += " ".join(parts) + "\n"
         if ev.get("description"):
             timeline_text += f"    {ev['description'][:300]}\n"
+        # 원문 — 이벤트 노드에 없는 세부(건수·수치 등)가 여기에만 있습니다
+        if ev.get("page_content"):
+            timeline_text += f"    {ev['page_content'][:800]}\n"
 
     # 상위 순위부터 예산 안에서 채웁니다. 개수(TOP_PAGES)와 총량
     # (CONTEXT_MAX_CHARS) 중 먼저 도달하는 쪽에서 멈추므로, 문서 하나가
