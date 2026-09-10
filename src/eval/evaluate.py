@@ -62,7 +62,12 @@ from utils.retrieval import (
     vector_search_pages as _vector_search_pages,
 )
 
-TOP_PAGES = 6  # 컨텍스트에 넣을 페이지 수
+# 검색·컨텍스트 구성
+# TOP_PAGES 를 개수로만 제한하면 짧은 문서가 상위를 차지할 때 컨텍스트가 텅 빕니다
+# (실측: 51자 단편 6건이 상위를 독점해 컨텍스트가 958자, 예산 60000자 중 1.6%).
+# 그 상태로 근거 문서가 7위로 밀려 답을 못 했습니다. 이제 예산이 찰 때까지 채웁니다.
+RETRIEVE_LIMIT = 10  # 서브쿼리당 검색할 페이지 수
+MAX_CONTEXT_DOCS = 25  # 컨텍스트에 넣을 문서 수 상한 (안전장치)
 TOP_RELATIONS = 15  # 컨텍스트에 넣을 그래프 관계 수
 # 전체 컨텍스트 상한 — Sonnet 200K 토큰(한국어 약 13만 자) 대비 여유 있는 값.
 # 문서를 점수 순으로 채우다 이 한도에서 중단합니다.
@@ -312,7 +317,7 @@ def timeline_lookup(graph, qdrant, query: str, limit: int = 20) -> dict:
         return {}
 
 
-def semantic_search(embed_client, qdrant, query: str, limit: int = TOP_PAGES) -> list:
+def semantic_search(embed_client, qdrant, query: str, limit: int = RETRIEVE_LIMIT) -> list:
     """벡터 검색 — 서비스(server.py)와 동일한 utils.retrieval 경로를 사용합니다.
 
     limit 은 **페이지** 수입니다. 청크 오버샘플·앵커 윈도우는 공통 모듈이 처리합니다.
@@ -392,7 +397,7 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
     graph_seen: set = set()
 
     for sq in sub_queries:
-        sem_per_query.append(semantic_search(embed_client, qdrant, sq, limit=TOP_PAGES))
+        sem_per_query.append(semantic_search(embed_client, qdrant, sq, limit=RETRIEVE_LIMIT))
         for r in graph_search(graph, sq):
             key = (r["subject"], r["predicate"], r["object"])
             if key not in graph_seen:
@@ -430,16 +435,19 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
         if ev.get("page_content"):
             timeline_text += f"    {ev['page_content'][:800]}\n"
 
-    # 상위 순위부터 예산 안에서 채웁니다. 개수(TOP_PAGES)와 총량
-    # (CONTEXT_MAX_CHARS) 중 먼저 도달하는 쪽에서 멈추므로, 문서 하나가
-    # 길더라도 뒤쪽이 통째로 잘려나가지 않습니다.
+    # 상위 순위부터 **예산이 찰 때까지** 채웁니다.
+    # 개수로 자르면 짧은 문서가 상위를 차지할 때 예산을 거의 쓰지 못한 채
+    # 정작 근거가 담긴 문서가 잘려나갑니다. 긴 문서는 예산에서 자연히 몇 건으로
+    # 제한되고, 짧은 문서는 훨씬 많이 들어갑니다.
     doc_budget = CONTEXT_MAX_CHARS - len(graph_text) - len(timeline_text) - 200
     vector_text = ""
-    for i, s in enumerate(sem_final[:TOP_PAGES]):
+    used_docs = 0
+    for i, s in enumerate(sem_final[:MAX_CONTEXT_DOCS]):
         block = f"[{s['title']}]\n{s['content']}\n\n"
         if i and len(vector_text) + len(block) > doc_budget:
             break  # 최소 1건은 넣되, 이후로는 예산을 지킵니다
         vector_text += block
+        used_docs += 1
 
     # 타임라인은 날짜 질문의 직접 근거이므로 문서보다 앞에 배치합니다.
     context_parts = ["=== 그래프 관계 ===\n" + graph_text]
@@ -455,6 +463,7 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
         "timeline": timeline.get("events") or [],
         "decomposed": decomposed,
         "sub_queries": sub_queries if decomposed else [],
+        "used_docs": used_docs,  # 실제로 컨텍스트에 들어간 문서 수
         "combined_context": "\n".join(context_parts).strip(),
     }
 

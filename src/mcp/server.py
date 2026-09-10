@@ -581,7 +581,7 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
 
 
 @mcp.tool()
-def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
+def hybrid_search(query: str, limit: int = 12) -> dict[str, Any]:
     """
     벡터 검색(문서 내용) + 그래프 탐색(관계 구조)을 동시에 수행하는 통합 검색입니다.
     복합 질문을 자동으로 서브쿼리로 분해하여 각각 검색한 뒤 결과를 병합합니다.
@@ -619,7 +619,10 @@ def hybrid_search(query: str, limit: int = 8) -> dict[str, Any]:
     Args:
         query: 검색할 자연어 질문 (한국어 가능). 복합 질문도 그대로 입력하세요.
                AI가 자동으로 서브쿼리로 분해합니다.
-        limit: 벡터 검색 결과 수 (기본값: 8). 더 넓은 탐색이 필요하면 12~15 권장.
+        limit: 서브쿼리당 반환할 **페이지** 수 (기본값: 12).
+               짧은 문서(50~300자 단편)가 상위를 차지하면 8건으로는 정보량이
+               부족해 정작 근거가 담긴 문서가 밀려납니다. 더 넓은 탐색이
+               필요하면 15~20까지 올리세요.
 
     Returns:
         {

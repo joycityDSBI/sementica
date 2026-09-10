@@ -142,8 +142,8 @@ def main() -> int:
 
     print(f"  대상 {len(targets)}문항 | PAGE_MAX_CHARS={PAGE_MAX_CHARS} ")
     print(
-        f"  CONTEXT_MAX_CHARS={ev.CONTEXT_MAX_CHARS} TOP_PAGES={ev.TOP_PAGES} "
-        f"COVERAGE_BOOST={COVERAGE_BOOST}\n"
+        f"  CONTEXT_MAX_CHARS={ev.CONTEXT_MAX_CHARS} "
+        f"MAX_CONTEXT_DOCS={ev.MAX_CONTEXT_DOCS} COVERAGE_BOOST={COVERAGE_BOOST}\n"
     )
 
     summary: list = []
@@ -160,10 +160,12 @@ def main() -> int:
 
         # 근거 페이지가 컨텍스트에 실제로 들어갔는지
         # (키는 utils.retrieval 통합 후 source_url/content 로 통일됨)
-        in_ctx = any(d.get("source_url") == url for d in docs[: ev.TOP_PAGES])
+        # 예산이 찰 때까지 채우므로 실제 사용된 문서 수는 질문마다 다릅니다.
+        used = sr.get("used_docs", len(docs))
+        in_ctx = any(d.get("source_url") == url for d in docs[:used])
         rank = next((i + 1 for i, d in enumerate(docs) if d.get("source_url") == url), None)
-        print(f"  컨텍스트 {len(ctx)}자 | 문서 {len(docs)}건 | 근거 페이지 순위 {rank} ", end="")
-        print(f"| 상위 {ev.TOP_PAGES} 포함: {'예' if in_ctx else '아니오'}")
+        print(f"  컨텍스트 {len(ctx)}자 | 검색 {len(docs)}건 | 컨텍스트 투입 {used}건 ", end="")
+        print(f"| 근거 순위 {rank} | 포함: {'예' if in_ctx else '아니오'}")
         if sr.get("decomposed"):
             print(f"  서브쿼리: {sr.get('sub_queries')}")
 
@@ -171,9 +173,9 @@ def main() -> int:
         # coverage 부스트는 여러 서브쿼리에 걸린 문서를 올리므로, 한 서브쿼리에만
         # 걸리는 짧고 구체적인 문서가 불리해질 수 있습니다.
         print("  순위  점수    cov  길이   문서")
-        for i, d in enumerate(docs[: ev.TOP_PAGES + 3], 1):
+        for i, d in enumerate(docs[: used + 3], 1):
             mark = " ←근거" if d.get("source_url") == url else ""
-            cut = "  " if i <= ev.TOP_PAGES else " ✂"
+            cut = "  " if i <= used else " ✂"
             print(
                 f"  {cut}{i:2}  {d.get('score', 0):.4f}  {d.get('coverage', 1):>2}  "
                 f"{len(d.get('content', '')):>5}  {d.get('title', '')[:30]}{mark}"
@@ -205,7 +207,7 @@ def main() -> int:
         elif rank is None:
             verdict = "검색 미스 — 근거 페이지가 결과에 없음"
         elif not in_ctx:
-            verdict = f"랭킹 — 근거가 {rank}위라 상위 {ev.TOP_PAGES} 밖으로 밀림"
+            verdict = f"랭킹 — 근거가 {rank}위라 투입 {used}건 밖으로 밀림"
         elif b_score >= 0.7 and c_score < 0.7:
             verdict = "컨텍스트 — 다른 문서에 정답이 묻힘"
         elif c_score >= 0.7:
