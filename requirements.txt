@@ -16,7 +16,11 @@ falkordb>=1.0.0
 redis>=5.0.0
 
 # ── MCP 서버 ──────────────────────────────────────────────────────────────────
-fastmcp>=2.0.0
+# 메이저 버전 고정 — 2.7~3.x 에서는 @mcp.tool() 이 호출 불가능한 FunctionTool 을
+# 반환해, 도구를 내부에서 호출하는 hybrid_search·rest_api 가 깨집니다.
+# (운영 확인: 4.0.0 은 원본 함수를 반환. server.tool_fn 이 양쪽을 흡수하지만
+#  범위를 열어둘 이유가 없습니다.)
+fastmcp>=4.0.0,<5.0.0
 
 # ── Semantica 프레임워크 (엔티티 중복 제거 / NER·RE fallback) ─────────────────
 # graph-falkordb 번들: FalkorDB 백엔드 + NER/RE 포함

@@ -235,9 +235,13 @@ def upsert_notion_page(
     title: str = "",
     last_edited_time=None,  # datetime | ISO 문자열 | None
     word_count: int = 0,
-    chunk_count: int = 0,
-    triplet_count: int = 0,
-    event_count: int = 0,
+    # 카운트 3종은 기본값이 **None(=기존 값 유지)** 입니다. 0 이 기본이던 시절에는
+    # 해시 일치로 건너뛴 페이지가 카운트를 넘기지 않아 매 동기화마다 0 으로
+    # 덮어써졌고, 그 결과 "chunk_count=0 인데 status='ok'" 인 행이 잔뜩 생겨
+    # 벡터가 실제로 유실된 페이지와 구분할 수 없었습니다.
+    chunk_count: int | None = None,
+    triplet_count: int | None = None,
+    event_count: int | None = None,
     is_db_item: bool = False,
     has_html_attachment: bool = False,  # HTML 첨부 파일 포함 여부  (v3)
     status: str = "ok",  # "ok" | "skipped" | "error"
@@ -277,7 +281,9 @@ def upsert_notion_page(
                          last_ingested_at, word_count, chunk_count, triplet_count,
                          event_count, is_db_item, has_html_attachment, status, error_msg,
                          route, content_hash)
-                    VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, NOW(), %s,
+                            COALESCE(%s, 0), COALESCE(%s, 0), COALESCE(%s, 0),
+                            %s, %s, %s, %s, %s, %s)
                     ON CONFLICT ON CONSTRAINT uq_notion_pages_page_dept
                     DO UPDATE SET
                         notion_url           = EXCLUDED.notion_url,
@@ -285,9 +291,12 @@ def upsert_notion_page(
                         last_edited_time     = EXCLUDED.last_edited_time,
                         last_ingested_at     = NOW(),
                         word_count           = EXCLUDED.word_count,
-                        chunk_count          = EXCLUDED.chunk_count,
-                        triplet_count        = EXCLUDED.triplet_count,
-                        event_count          = EXCLUDED.event_count,
+                        -- 인수가 NULL 이면 기존 값을 유지합니다. EXCLUDED 를 쓰면
+                        -- 위 INSERT 의 COALESCE(...,0) 때문에 0 으로 보여
+                        -- "안 넘긴 것"과 "0 건"을 구분할 수 없으므로 따로 바인딩합니다.
+                        chunk_count          = COALESCE(%s, notion_pages.chunk_count),
+                        triplet_count        = COALESCE(%s, notion_pages.triplet_count),
+                        event_count          = COALESCE(%s, notion_pages.event_count),
                         is_db_item           = EXCLUDED.is_db_item,
                         has_html_attachment  = EXCLUDED.has_html_attachment,
                         status               = EXCLUDED.status,
@@ -311,6 +320,10 @@ def upsert_notion_page(
                     error_msg,
                     (route or "core")[:20],
                     content_hash[:16] if content_hash else None,
+                    # DO UPDATE 의 카운트 3종 (위 주석 참고)
+                    chunk_count,
+                    triplet_count,
+                    event_count,
                 ),
             )
     except Exception as e:
