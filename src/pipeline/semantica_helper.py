@@ -1440,6 +1440,98 @@ def get_event_chain(
         }
 
 
+def detect_event_scopes(graph, text: str, limit: int = 3) -> list[str]:
+    """질문 문장에 이름이 등장하는 게임/서비스를 찾습니다.
+
+    :Game 노드를 우선 조회하고, 없으면 :Event 의 game 속성에서 탐색합니다
+    (게임 노드 없이 이벤트만 적재된 구버전 데이터 대응).
+    긴 이름을 우선해 부분 문자열 오탐을 줄입니다.
+    """
+    from utils.korean import contains_as_token
+
+    names: list[str] = []
+    for cypher in (
+        "MATCH (g:Game) WHERE g.name IS NOT NULL AND $text CONTAINS g.name "
+        "RETURN DISTINCT g.name AS name LIMIT 20",
+        "MATCH (e:Event) WHERE e.game IS NOT NULL AND $text CONTAINS e.game "
+        "RETURN DISTINCT e.game AS name LIMIT 20",
+    ):
+        try:
+            res = graph.query(cypher, {"text": text})
+        except Exception:
+            continue
+        names = [
+            str(r[0])
+            for r in res.result_set
+            if r
+            and r[0]
+            and len(str(r[0])) >= 2
+            # 게임 코드에 ONE·GOD·DS 등 짧은 영문이 있어 부분 문자열 오탐 제거
+            and contains_as_token(text, str(r[0]))
+        ]
+        if names:
+            break
+    names.sort(key=len, reverse=True)
+    return names[:limit]
+
+
+def resolve_timeline_query(graph, query: str, limit: int = 20) -> dict:
+    """질문 문장에서 조회 조건을 추론해 이벤트 타임라인을 반환합니다.
+
+    hybrid_search 와 평가 파이프라인이 공유하는 진입점입니다. 날짜 기반
+    질문이 :Event 노드에 닿지 못하던 문제를 해결하며, 양쪽이 같은 판정을
+    쓰도록 로직을 한 곳에 둡니다.
+
+    조건:
+      ① 날짜 표현 또는 시계열 키워드가 있어야 함 (필수)
+      ② 게임명이 매칭되거나, 주체 후보(부서·조직) 또는 날짜가 잡혀야 함
+
+    주체 결정 순서:
+      1) :Game / :Event.game 에 이름이 있으면 그 게임으로 조회
+      2) 아니면 질문에 등장하는 그래프 노드 이름을 keywords 로 조회
+         — game 이 없는 이벤트는 "기타" 로 저장되므로 부서명으로는 game
+           매칭이 되지 않습니다. 제목·설명·카테고리·담당자에서 찾습니다.
+      3) 주체가 없고 날짜만 있으면 그 기간 전체를 조회
+
+    "점검 시작은 어느 팀 담당?" 처럼 시계열 키워드만 걸리고 날짜도 주체도
+    없는 질문은 빈 dict 를 반환합니다.
+
+    Returns:
+        get_event_chain() 결과 dict. 조건 미충족·조회 실패 시 {}.
+    """
+    try:
+        from utils.datespan import extract_date_range, has_timeline_intent
+        from utils.korean import match_nodes_in_text
+    except Exception:
+        return {}  # utils 미사용 환경 — 타임라인 조회 비활성화
+
+    if not has_timeline_intent(query):
+        return {}
+
+    from_date, to_date = extract_date_range(query)
+    games = detect_event_scopes(graph, query)
+    game_arg: str | None = games[0] if games else None
+    keywords: list[str] = []
+
+    if not game_arg:
+        # 그래프 노드 이름만 키워드로 사용합니다. 원시 토큰을 쓰면 "업무",
+        # "일정" 같은 일반 명사가 필터에 들어가 무관한 이벤트를 끌어옵니다.
+        keywords = [name for name, _t in match_nodes_in_text(graph, query, limit=5)]
+        if not keywords and not (from_date or to_date):
+            return {}
+
+    result = get_event_chain(
+        graph,
+        game=game_arg,
+        event_type=None,  # 질문에서 유형까지 추정하지 않음 — 전체 조회 후 LLM이 판단
+        from_date=from_date or None,
+        to_date=to_date or None,
+        limit=limit,
+        keywords=keywords or None,
+    )
+    return result if result and result.get("events") else {}
+
+
 # ─── 9. 경로 분류 (classify_page) ────────────────────────────────────────────
 #
 # 페이지마다 LLM 추출 전에 호출해 처리 경로를 결정합니다.

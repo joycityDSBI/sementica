@@ -48,6 +48,10 @@ max-complexity = 25
 "scripts/test_mcp.py" = ["C901"]
 # 웹 앱 HTML/JS 인라인 템플릿 안의 UI 특수문자 (–, ‹, › 등) 허용
 "src/ops/web_app.py"  = ["RUF001"]
+# CLI 도구: 콘솔 출력에 이모지(ℹ️, ⚠️ 등)를 사용 — 모호 문자 경고 대상 아님
+"tools/*.py"          = ["RUF001"]
+# 한국어 조사 처리: 유니코드 인용부호를 strip 대상으로 명시적으로 나열
+"src/utils/korean.py" = ["RUF001"]
 # sync_page: Notion 페이지 단위 전처리(분류·해시·임베딩·LLM·이벤트·DB)를 단일 함수에서
 # 순서대로 조율하는 조율자(orchestrator) 역할 — 도메인 필수 복잡도로 분리 리팩토링 불가
 "src/pipeline/sync.py" = ["C901"]
@@ -56,6 +60,8 @@ max-complexity = 25
 known-first-party = [
     "semantica", "semantica_helper", "dept_config",
     "notion_fetch", "db_logger",
+    # src/utils 패키지 — 진입점들이 sys.path 에 src/ 를 추가해 임포트한다
+    "utils",
 ]
 
 [tool.ruff.format]

@@ -31,9 +31,7 @@ except ImportError:
 
 ROOT = Path(__file__).parent.parent
 DEFAULT_OUT = ROOT / "config" / "glossary_snapshot.json"
-DEFAULT_URL = os.environ.get(
-    "GLOSSARY_API_URL", "https://catalog.joycityplay.com/api/glossary/all"
-)
+DEFAULT_URL = os.environ.get("GLOSSARY_API_URL", "https://catalog.joycityplay.com/api/glossary/all")
 
 
 def main() -> int:
@@ -87,9 +85,7 @@ def main() -> int:
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     print(f"  ✅ 저장: {out_path}")
     print(f"     용어 {len(terms)}개, 카테고리 {by_cat or '없음'}")

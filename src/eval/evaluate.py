@@ -330,61 +330,17 @@ def _fetch_full_pages(qdrant, page_ids: list, max_chars: int = PAGE_MAX_CHARS) -
 
 
 def timeline_lookup(graph, query: str, limit: int = 20) -> dict:
-    """질문에 게임명 + 시계열 의도가 있으면 :Event 이력을 조회합니다.
+    """이벤트 타임라인을 조회합니다 — 서비스와 동일한 판정 로직 사용.
 
-    server.py `_search_event_timeline()` 과 동일한 트리거 조건을 사용합니다
-    (게임명 매칭 AND 날짜/시계열 키워드). 평가와 서비스의 조건을 맞춥니다.
+    조건 추론(시계열 의도·날짜 범위·주체 결정)은 semantica_helper 의
+    resolve_timeline_query() 가 담당합니다. server.py 의 hybrid_search 도
+    같은 함수를 호출하므로, 평가와 서비스가 어긋나지 않습니다.
     """
     try:
-        from utils.datespan import extract_date_range, has_timeline_intent
-    except Exception:
-        return {}
-    if not has_timeline_intent(query):
-        return {}
-
-    from_date, to_date = extract_date_range(query)
-
-    # 질문에 이름이 등장하는 게임 탐색 (:Game 우선, 없으면 :Event.game)
-    names: list = []
-    for cypher in (
-        "MATCH (g:Game) WHERE g.name IS NOT NULL AND $text CONTAINS g.name "
-        "RETURN DISTINCT g.name AS name LIMIT 20",
-        "MATCH (e:Event) WHERE e.game IS NOT NULL AND $text CONTAINS e.game "
-        "RETURN DISTINCT e.game AS name LIMIT 20",
-    ):
-        try:
-            res = graph.query(cypher, {"text": query})
-        except Exception:
-            continue
-        names = [str(r[0]) for r in res.result_set if r and r[0] and len(str(r[0])) >= 2]
-        if names:
-            break
-    names.sort(key=len, reverse=True)
-
-    # 게임이 아닌 주체(부서·조직)는 그래프 노드 이름을 키워드로 조회합니다.
-    # game 이 없는 이벤트는 game="기타" 로 저장되므로 game 매칭이 안 됩니다.
-    keywords: list = []
-    if not names:
-        from utils.korean import match_nodes_in_text
-
-        keywords = [n for n, _t in match_nodes_in_text(graph, query, limit=5)]
-        if not keywords and not (from_date or to_date):
-            return {}
-
-    try:
         sys.path.insert(0, str(ROOT / "src" / "pipeline"))
-        from semantica_helper import get_event_chain
+        from semantica_helper import resolve_timeline_query
 
-        result = get_event_chain(
-            graph,
-            game=names[0] if names else None,
-            event_type=None,
-            from_date=from_date or None,
-            to_date=to_date or None,
-            limit=limit,
-            keywords=keywords or None,
-        )
-        return result if result and result.get("events") else {}
+        return resolve_timeline_query(graph, query, limit=limit)
     except Exception:
         return {}
 

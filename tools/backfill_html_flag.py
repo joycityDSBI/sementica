@@ -82,7 +82,7 @@ def backfill(dept: str, data_dir: Path, dry_run: bool = False) -> None:
     """has_html_attachment 값을 DB에 반영합니다."""
     page_flags = scan_data_dir(data_dir)
 
-    html_pages  = [pid for pid, v in page_flags.items() if v]
+    html_pages = [pid for pid, v in page_flags.items() if v]
     total_pages = len(page_flags)
 
     print(f"\n  총 페이지: {total_pages}개  /  HTML 첨부 있음: {len(html_pages)}개")
@@ -118,31 +118,30 @@ def backfill(dept: str, data_dir: Path, dry_run: bool = False) -> None:
         return
 
     updated = 0
-    reset   = 0
-    errors  = 0
+    reset = 0
+    errors = 0
 
     try:
-        with conn:
-            with conn.cursor() as cur:
-                # HTML 있는 페이지 → TRUE
+        with conn, conn.cursor() as cur:
+            # HTML 있는 페이지 → TRUE
+            cur.executemany(
+                "UPDATE notion_pages SET has_html_attachment=TRUE "
+                "WHERE page_id=%s AND dept=%s AND has_html_attachment=FALSE",
+                [(pid, dept) for pid in html_pages],
+            )
+            updated = cur.rowcount
+
+            # HTML 없는 페이지 → FALSE (재수집 후 사라진 경우 보정)
+            no_html = [pid for pid, v in page_flags.items() if not v]
+            if no_html:
                 cur.executemany(
-                    "UPDATE notion_pages SET has_html_attachment=TRUE "
-                    "WHERE page_id=%s AND dept=%s AND has_html_attachment=FALSE",
-                    [(pid, dept) for pid in html_pages],
+                    "UPDATE notion_pages SET has_html_attachment=FALSE "
+                    "WHERE page_id=%s AND dept=%s AND has_html_attachment=TRUE",
+                    [(pid, dept) for pid in no_html],
                 )
-                updated = cur.rowcount
+                reset = cur.rowcount
 
-                # HTML 없는 페이지 → FALSE (재수집 후 사라진 경우 보정)
-                no_html = [pid for pid, v in page_flags.items() if not v]
-                if no_html:
-                    cur.executemany(
-                        "UPDATE notion_pages SET has_html_attachment=FALSE "
-                        "WHERE page_id=%s AND dept=%s AND has_html_attachment=TRUE",
-                        [(pid, dept) for pid in no_html],
-                    )
-                    reset = cur.rowcount
-
-        print(f"\n  ✅ 업데이트 완료")
+        print("\n  ✅ 업데이트 완료")
         print(f"     has_html_attachment TRUE  설정: {updated}개")
         if reset:
             print(f"     has_html_attachment FALSE 재설정: {reset}개 (HTML 없는 페이지)")
@@ -160,13 +159,14 @@ def backfill(dept: str, data_dir: Path, dry_run: bool = False) -> None:
 # ── 엔트리포인트 ──────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(description="has_html_attachment DB 백필")
-    parser.add_argument("--dept",    default="strategic", help="본부 키 (departments.yaml)")
+    parser.add_argument("--dept", default="strategic", help="본부 키 (departments.yaml)")
     parser.add_argument("--dry-run", action="store_true", help="변경 없이 대상 목록만 출력")
     args = parser.parse_args()
 
     # 본부별 data_dir 결정
     try:
         import yaml
+
         cfg_path = ROOT / "config" / "departments.yaml"
         with cfg_path.open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f)

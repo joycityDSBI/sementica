@@ -382,97 +382,22 @@ def _fetch_pages_by_source_urls(
     return assembled
 
 
-def _detect_games(graph, text: str, limit: int = 3) -> list[str]:
-    """질문 문장에 이름이 등장하는 게임/서비스를 찾습니다.
-
-    :Game 노드를 우선 조회하고, 없으면 :Event 의 game 속성에서 탐색합니다
-    (게임 노드 없이 이벤트만 적재된 구버전 데이터 대응).
-    긴 이름을 우선합니다 — 조사·부분 문자열로 인한 오탐을 줄입니다.
-    """
-    from utils.korean import contains_as_token
-
-    names: list[str] = []
-    for cypher in (
-        "MATCH (g:Game) WHERE g.name IS NOT NULL AND $text CONTAINS g.name "
-        "RETURN DISTINCT g.name AS name LIMIT 20",
-        "MATCH (e:Event) WHERE e.game IS NOT NULL AND $text CONTAINS e.game "
-        "RETURN DISTINCT e.game AS name LIMIT 20",
-    ):
-        try:
-            res = graph.query(cypher, {"text": text})
-        except Exception:
-            continue
-        names = [
-            str(r[0])
-            for r in res.result_set
-            if r and r[0] and len(str(r[0])) >= 2
-            # 게임 코드에 ONE·GOD·DS 등 짧은 영문이 있어 부분 문자열 오탐 제거
-            and contains_as_token(text, str(r[0]))
-        ]
-        if names:
-            break
-    names.sort(key=len, reverse=True)
-    return names[:limit]
-
-
 def _search_event_timeline(query: str, limit: int = 20) -> dict:
-    """질문에 게임명과 시계열 의도가 함께 있으면 :Event 이력을 조회합니다.
+    """질문에 시계열 의도가 있으면 :Event 이력을 조회하고 원문을 첨부합니다.
 
-    hybrid_search 가 날짜 기반 질문에 답하지 못하던 문제를 해결합니다.
-    이전에는 timeline_search 가 별도 도구로만 존재해, 호출자가 그 도구를
-    직접 고르지 않으면 :Event 노드에 아예 접근하지 못했습니다.
-
-    호출 조건:
-      ① 날짜 표현 또는 시계열 키워드가 존재 (필수)
-      ② 게임명이 매칭되거나, 주체 후보(부서·조직 등) 또는 날짜가 잡힘
-
-    주체 결정 순서:
-      1) :Game / :Event.game 에 이름이 있으면 그 게임으로 조회
-      2) 아니면 질문에 등장하는 그래프 노드 이름을 keywords 로 조회
-         — 게임명이 없는 이벤트는 game="기타" 로 저장되므로 부서명으로는
-           game 매칭이 안 됩니다. 제목·설명·카테고리·담당자에서 찾습니다.
-      3) 키워드도 없고 날짜만 있으면 그 기간 전체 이벤트를 조회
-
-    "점검 시작은 어느 팀 담당?" 처럼 시계열 키워드만 걸리고 날짜도
-    주체도 없는 질문은 get_event_chain 이 빈 결과를 반환합니다.
+    조건 판정과 조회는 semantica_helper.resolve_timeline_query() 가 담당하며
+    (평가 파이프라인과 동일 로직), 이 함수는 그 결과에 Qdrant 원문을
+    붙이는 서버 측 처리만 수행합니다.
 
     Returns:
-        get_event_chain() 결과 dict. 조건 미충족·조회 실패 시 {}.
+        get_event_chain() 결과 dict + events[].page_content.
+        조건 미충족·조회 실패 시 {}.
     """
-    if _get_event_chain is None:
+    if _resolve_timeline is None:
         return {}
     try:
-        from utils.datespan import extract_date_range, has_timeline_intent
-        from utils.korean import match_nodes_in_text
-
-        if not has_timeline_intent(query):
-            return {}
-
-        graph = _get_falkordb()
-        from_date, to_date = extract_date_range(query)
-
-        games = _detect_games(graph, query)
-        game_arg: str | None = games[0] if games else None
-        keywords: list[str] = []
-
-        if not game_arg:
-            # 게임이 아닌 주체 — 질문에 등장하는 그래프 노드 이름을 키워드로 사용.
-            # 노드 이름을 쓰면 "업무", "일정" 같은 일반 명사가 키워드로 들어가
-            # 무관한 이벤트를 끌어오는 것을 막을 수 있습니다.
-            keywords = [name for name, _t in match_nodes_in_text(graph, query, limit=5)]
-            if not keywords and not (from_date or to_date):
-                return {}  # 주체도 날짜도 없으면 조회 의미 없음
-
-        result = _get_event_chain(
-            graph,
-            game=game_arg,
-            event_type=None,  # 질문에서 유형까지 추정하지 않음 — 전체 조회 후 LLM이 판단
-            from_date=from_date or None,
-            to_date=to_date or None,
-            limit=limit,
-            keywords=keywords or None,
-        )
-        if not result or not result.get("events"):
+        result = _resolve_timeline(_get_falkordb(), query, limit=limit)
+        if not result:
             return {}
 
         # :Event 의 source_url → Qdrant 원문 첨부 (timeline_search 와 동일한 방식)
@@ -636,6 +561,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
 try:
     from semantica_helper import find_shortest_path as _find_path
     from semantica_helper import get_event_chain as _get_event_chain
+    from semantica_helper import resolve_timeline_query as _resolve_timeline
     from semantica_helper import trace_decision_chain as _trace_decision
     from semantica_helper import upsert_event_node as _upsert_event_node
 except Exception:
@@ -643,6 +569,7 @@ except Exception:
     _trace_decision = None
     _get_event_chain = None
     _upsert_event_node = None
+    _resolve_timeline = None
 
 # ─── FastMCP 서버 ─────────────────────────────────────────────────────────────
 from fastmcp import FastMCP  # noqa: E402

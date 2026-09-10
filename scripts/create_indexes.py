@@ -27,22 +27,22 @@ from src.pipeline.dept_config import list_depts
 # FalkorDB: CREATE INDEX FOR (n:Label) ON (n.prop)
 INDEX_SPECS: list[tuple[str, str]] = [
     # ── 공통 노드 ────────────────────────────────────────────────────
-    ("Person",    "name"),
-    ("Team",      "name"),
-    ("Process",   "name"),
-    ("System",    "name"),
-    ("Policy",    "name"),
-    ("Document",  "name"),
-    ("Role",      "name"),
+    ("Person", "name"),
+    ("Team", "name"),
+    ("Process", "name"),
+    ("System", "name"),
+    ("Policy", "name"),
+    ("Document", "name"),
+    ("Role", "name"),
     # ── Decision 온톨로지 ─────────────────────────────────────────────
-    ("Decision",  "subject"),
-    ("Decision",  "outcome"),
-    ("Decision",  "date"),
+    ("Decision", "subject"),
+    ("Decision", "outcome"),
+    ("Decision", "date"),
     # ── Event·Game 온톨로지 ───────────────────────────────────────────
-    ("Event",     "game"),
-    ("Event",     "event_type"),
-    ("Event",     "date_ts"),          # range 탐색 핵심
-    ("Game",      "name"),
+    ("Event", "game"),
+    ("Event", "event_type"),
+    ("Event", "date_ts"),  # range 탐색 핵심
+    ("Game", "name"),
 ]
 
 
@@ -53,7 +53,7 @@ def _create_indexes_for_dept(graph_name: str, client: FalkorDB) -> None:
 
     created = 0
     skipped = 0
-    failed  = 0
+    failed = 0
 
     for label, prop in INDEX_SPECS:
         cypher = f"CREATE INDEX FOR (n:{label}) ON (n.{prop})"
@@ -71,9 +71,7 @@ def _create_indexes_for_dept(graph_name: str, client: FalkorDB) -> None:
                 print(f"  ❌ {label}.{prop} — {exc}")
                 failed += 1
 
-    print(
-        f"[{graph_name}] 완료: 생성 {created}, 기존 {skipped}, 실패 {failed}"
-    )
+    print(f"[{graph_name}] 완료: 생성 {created}, 기존 {skipped}, 실패 {failed}")
 
 
 def main() -> None:
@@ -81,7 +79,9 @@ def main() -> None:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--all", action="store_true", help="모든 부서 그래프에 인덱스 생성")
     group.add_argument(
-        "--dept", action="append", metavar="DEPT",
+        "--dept",
+        action="append",
+        metavar="DEPT",
         help="특정 부서(그래프) 지정 (복수 가능: --dept strategic --dept game)",
     )
     parser.add_argument("--host", default="localhost", help="FalkorDB 호스트 (기본: localhost)")

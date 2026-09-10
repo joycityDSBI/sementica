@@ -31,9 +31,19 @@ except ImportError:
     sys.exit(1)
 
 NOTION_VERSION = "2022-06-28"
-_SKIP_TYPES = {"paragraph", "heading_1", "heading_2", "heading_3",
-               "bulleted_list_item", "numbered_list_item", "to_do",
-               "divider", "column_list", "column", "bookmark"}
+_SKIP_TYPES = {
+    "paragraph",
+    "heading_1",
+    "heading_2",
+    "heading_3",
+    "bulleted_list_item",
+    "numbered_list_item",
+    "to_do",
+    "divider",
+    "column_list",
+    "column",
+    "bookmark",
+}
 
 
 def get_blocks(token: str, block_id: str) -> list:
@@ -50,7 +60,9 @@ def get_blocks(token: str, block_id: str) -> list:
             params["start_cursor"] = cursor
         resp = httpx.get(
             f"https://api.notion.com/v1/blocks/{block_id}/children",
-            headers=headers, params=params, timeout=15,
+            headers=headers,
+            params=params,
+            timeout=15,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -72,20 +84,20 @@ def inspect_blocks(token: str, block_id: str, depth: int = 0) -> None:
 
     for block in blocks:
         btype = block.get("type", "unknown")
-        bid   = block.get("id", "")
+        bid = block.get("id", "")
 
         if btype in _SKIP_TYPES and depth > 0:
-            continue   # 텍스트 블록은 재귀만 처리
+            continue  # 텍스트 블록은 재귀만 처리
 
         content = block.get(btype, {})
 
         # ── 중요 블록 유형 출력 ───────────────────────────────────────────
         if btype == "file":
-            name      = content.get("name", "(이름 없음)")
+            name = content.get("name", "(이름 없음)")
             file_type = content.get("type", "")  # "file" | "external"
-            inner     = content.get("file") or content.get("external") or {}
-            url       = inner.get("url", "")
-            expiry    = inner.get("expiry_time", "")
+            inner = content.get("file") or content.get("external") or {}
+            url = inner.get("url", "")
+            expiry = inner.get("expiry_time", "")
             print(f"{indent}📄 [file 블록]")
             print(f"{indent}   name        : {name}")
             print(f"{indent}   file.type   : {file_type}")
@@ -99,7 +111,9 @@ def inspect_blocks(token: str, block_id: str, depth: int = 0) -> None:
                     r = httpx.get(url, follow_redirects=True, timeout=15)
                     ctype = r.headers.get("content-type", "알 수 없음")
                     text_start = r.text[:200].strip().lower()
-                    is_html = "text/html" in ctype or text_start.startswith(("<!doctype html", "<html"))
+                    is_html = "text/html" in ctype or text_start.startswith(
+                        ("<!doctype html", "<html")
+                    )
                     print(f"{indent}   Content-Type: {ctype}")
                     print(f"{indent}   HTML 여부   : {'✅ HTML' if is_html else '❌ HTML 아님'}")
                     if is_html:
@@ -117,7 +131,9 @@ def inspect_blocks(token: str, block_id: str, depth: int = 0) -> None:
                     r = httpx.get(url, follow_redirects=True, timeout=15)
                     ctype = r.headers.get("content-type", "알 수 없음")
                     text_start = r.text[:200].strip().lower()
-                    is_html = "text/html" in ctype or text_start.startswith(("<!doctype html", "<html"))
+                    is_html = "text/html" in ctype or text_start.startswith(
+                        ("<!doctype html", "<html")
+                    )
                     print(f"{indent}   Content-Type: {ctype}")
                     print(f"{indent}   HTML 여부   : {'✅ HTML' if is_html else '❌ HTML 아님'}")
                     if is_html:
@@ -127,12 +143,12 @@ def inspect_blocks(token: str, block_id: str, depth: int = 0) -> None:
 
         elif btype == "pdf":
             inner = content.get("file") or content.get("external") or {}
-            url   = inner.get("url", "")
+            url = inner.get("url", "")
             print(f"{indent}📑 [pdf 블록]  url={url[:80]}")
 
         elif btype == "image":
             inner = content.get("file") or content.get("external") or {}
-            url   = inner.get("url", "")
+            url = inner.get("url", "")
             print(f"{indent}🖼️  [image 블록] url={url[:80]}")
 
         elif btype == "link_preview":
@@ -150,15 +166,16 @@ def inspect_blocks(token: str, block_id: str, depth: int = 0) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Notion 페이지 HTML 블록 진단")
-    parser.add_argument("--page-id", required=True,
-                        help="Notion 페이지 ID (대시 포함/미포함 모두 가능)")
-    parser.add_argument("--dept", default="strategic",
-                        help="본부 키 (토큰 환경변수 결정에 사용)")
+    parser.add_argument(
+        "--page-id", required=True, help="Notion 페이지 ID (대시 포함/미포함 모두 가능)"
+    )
+    parser.add_argument("--dept", default="strategic", help="본부 키 (토큰 환경변수 결정에 사용)")
     args = parser.parse_args()
 
     # 본부 토큰 환경변수 결정
     try:
         import yaml
+
         cfg_path = ROOT / "config" / "departments.yaml"
         with cfg_path.open(encoding="utf-8") as f:
             cfg = yaml.safe_load(f)

@@ -68,6 +68,7 @@ _PARTICLES: tuple[str, ...] = (
 # 조사를 떼고 남는 최소 길이 — 1글자 후보는 오탐이 너무 많습니다.
 _MIN_STEM = 2
 
+
 def contains_as_token(text: str, name: str) -> bool:
     """text 안에 name 이 '독립된 토큰'으로 등장하는지 확인합니다.
 
@@ -134,7 +135,9 @@ def match_nodes_in_text(graph, text: str, limit: int = 5) -> list[tuple[str, str
     rows = [
         (str(r[0]), str(r[1]) if len(r) > 1 and r[1] else "")
         for r in res.result_set
-        if r and r[0] and len(str(r[0])) >= _MIN_STEM
+        if r
+        and r[0]
+        and len(str(r[0])) >= _MIN_STEM
         # 영문 코드가 다른 단어에 우연히 포함된 경우 제외 (ONE ⊄ MILESTONE)
         and contains_as_token(text, str(r[0]))
     ]
@@ -171,7 +174,7 @@ def entity_candidates(text: str, limit: int = 6) -> list[str]:
     seen: set[str] = set()
     for raw in text.split():
         # 문장부호 제거 (조사 판정을 방해함) — 유니코드 인용부호는 의도적으로 포함
-        tok = raw.strip("?!.,;:()[]{}\"'“”‘’·…")  # noqa: RUF001
+        tok = raw.strip("?!.,;:()[]{}\"'“”‘’·…")
         if len(tok) < _MIN_STEM:
             continue
         for cand in (tok, strip_particle(tok)):

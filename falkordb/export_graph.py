@@ -10,6 +10,7 @@ FalkorDB 전체 그래프 내보내기 + HTML 시각화
   data/strategic/graph_export.json  — node-edge JSON
   data/strategic/graph_view.html    — 인터랙티브 시각화 (브라우저에서 열기)
 """
+
 import argparse
 import json
 import os
@@ -31,14 +32,14 @@ FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 
 # 라벨별 색상
 NODE_COLORS = {
-    "Game":     "#3B82F6",
-    "Team":     "#10B981",
-    "Person":   "#F59E0B",
-    "Event":    "#EF4444",
-    "Metric":   "#8B5CF6",
+    "Game": "#3B82F6",
+    "Team": "#10B981",
+    "Person": "#F59E0B",
+    "Event": "#EF4444",
+    "Metric": "#8B5CF6",
     "Strategy": "#06B6D4",
-    "Issue":    "#F97316",
-    "Insight":  "#EC4899",
+    "Issue": "#F97316",
+    "Insight": "#EC4899",
     "Decision": "#6B7280",
 }
 DEFAULT_COLOR = "#94A3B8"
@@ -46,24 +47,26 @@ DEFAULT_COLOR = "#94A3B8"
 
 def export_graph(graph_name: str) -> dict:
     import falkordb
+
     db = falkordb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT)
-    g  = db.select_graph(graph_name)
+    g = db.select_graph(graph_name)
 
     # ── 노드 ──────────────────────────────────────────────────────
     nr = g.query(
-        "MATCH (n) RETURN id(n) AS nid, n.name AS name, "
-        "labels(n)[0] AS lbl, n.source_url AS url"
+        "MATCH (n) RETURN id(n) AS nid, n.name AS name, labels(n)[0] AS lbl, n.source_url AS url"
     )
     nodes = []
     for row in nr.result_set:
         nid, name, lbl, url = row
-        nodes.append({
-            "id":    nid,
-            "name":  name or f"node_{nid}",
-            "type":  lbl or "Unknown",
-            "url":   url or "",
-            "color": NODE_COLORS.get(lbl, DEFAULT_COLOR),
-        })
+        nodes.append(
+            {
+                "id": nid,
+                "name": name or f"node_{nid}",
+                "type": lbl or "Unknown",
+                "url": url or "",
+                "color": NODE_COLORS.get(lbl, DEFAULT_COLOR),
+            }
+        )
 
     # ── 엣지 ──────────────────────────────────────────────────────
     er = g.query("""
@@ -80,12 +83,14 @@ def export_graph(graph_name: str) -> dict:
     edges = []
     for row in er.result_set:
         from_id, to_id, rel, url = row
-        edges.append({
-            "from": from_id,
-            "to":   to_id,
-            "rel":  rel or "REL",
-            "url":  url or "",
-        })
+        edges.append(
+            {
+                "from": from_id,
+                "to": to_id,
+                "rel": rel or "REL",
+                "url": url or "",
+            }
+        )
 
     # ── 통계 ──────────────────────────────────────────────────────
     type_counts = {}
@@ -96,11 +101,11 @@ def export_graph(graph_name: str) -> dict:
         rel_counts[e["rel"]] = rel_counts.get(e["rel"], 0) + 1
 
     return {
-        "graph":      graph_name,
+        "graph": graph_name,
         "node_count": len(nodes),
         "edge_count": len(edges),
         "type_counts": type_counts,
-        "rel_counts":  rel_counts,
+        "rel_counts": rel_counts,
         "nodes": nodes,
         "edges": edges,
     }
@@ -109,18 +114,21 @@ def export_graph(graph_name: str) -> dict:
 def build_html(data: dict) -> str:
     nodes_js = json.dumps(data["nodes"], ensure_ascii=False)
     edges_js = json.dumps(data["edges"], ensure_ascii=False)
-    stats_js = json.dumps({
-        "node_count":  data["node_count"],
-        "edge_count":  data["edge_count"],
-        "type_counts": data["type_counts"],
-        "rel_counts":  data["rel_counts"],
-    }, ensure_ascii=False)
+    stats_js = json.dumps(
+        {
+            "node_count": data["node_count"],
+            "edge_count": data["edge_count"],
+            "type_counts": data["type_counts"],
+            "rel_counts": data["rel_counts"],
+        },
+        ensure_ascii=False,
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<title>Semantica Graph — {data['graph']}</title>
+<title>Semantica Graph — {data["graph"]}</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   body {{ font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; }}
@@ -150,9 +158,9 @@ def build_html(data: dict) -> str:
 <body>
 <header>
   <h1>🕸️ Semantica Graph</h1>
-  <span class="badge" id="h-graph">{data['graph']}</span>
-  <span class="badge" id="h-nodes">노드 {data['node_count']}</span>
-  <span class="badge" id="h-edges">엣지 {data['edge_count']}</span>
+  <span class="badge" id="h-graph">{data["graph"]}</span>
+  <span class="badge" id="h-nodes">노드 {data["node_count"]}</span>
+  <span class="badge" id="h-edges">엣지 {data["edge_count"]}</span>
   <div class="controls">
     <input type="text" id="search-box" placeholder="노드 이름 검색..." oninput="searchNode()">
     <select id="filter-type" onchange="applyFilter()">
@@ -445,15 +453,18 @@ draw();
 
 def main():
     parser = argparse.ArgumentParser(description="FalkorDB 그래프 내보내기 + 시각화")
-    parser.add_argument("--dept",   default="strategic", help="본부 이름 (departments.yaml key)")
-    parser.add_argument("--output", default="",          help="JSON 출력 경로 (기본: data/{dept}/graph_export.json)")
-    parser.add_argument("--html",   action="store_true", help="HTML 시각화 파일도 생성")
+    parser.add_argument("--dept", default="strategic", help="본부 이름 (departments.yaml key)")
+    parser.add_argument(
+        "--output", default="", help="JSON 출력 경로 (기본: data/{dept}/graph_export.json)"
+    )
+    parser.add_argument("--html", action="store_true", help="HTML 시각화 파일도 생성")
     args = parser.parse_args()
 
     from dept_config import load_dept
-    cfg        = load_dept(args.dept)
+
+    cfg = load_dept(args.dept)
     graph_name = cfg["falkordb_graph"]
-    data_dir   = Path(cfg["data_dir"])
+    data_dir = Path(cfg["data_dir"])
     data_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"📊 그래프 내보내기 — {graph_name}")

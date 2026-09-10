@@ -3,6 +3,7 @@
 MCP 서버 도구 검증 스크립트
 사용법: python scripts/test_mcp.py [--url http://localhost:8765]
 """
+
 import argparse
 import json
 import sys
@@ -11,12 +12,14 @@ import urllib.request
 
 
 def call_mcp(url: str, session_id: str, method: str, params: dict, req_id: int) -> dict:
-    body = json.dumps({
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "method": method,
-        "params": params,
-    }).encode()
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": method,
+            "params": params,
+        }
+    ).encode()
     req = urllib.request.Request(
         f"{url}/mcp",
         data=body,
@@ -41,16 +44,18 @@ def call_mcp(url: str, session_id: str, method: str, params: dict, req_id: int) 
 
 def initialize(url: str) -> str:
     """세션 초기화 → session_id 반환"""
-    body = json.dumps({
-        "jsonrpc": "2.0",
-        "id": 0,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "mcp-test", "version": "0.1.0"},
-        },
-    }).encode()
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "mcp-test", "version": "0.1.0"},
+            },
+        }
+    ).encode()
     req = urllib.request.Request(
         f"{url}/mcp",
         data=body,
@@ -139,16 +144,20 @@ def main():
     tools = resp.get("result", {}).get("tools", [])
     print(f"  등록된 도구 ({len(tools)}개):")
     for t in tools:
-        print(f"    • {t['name']} — {t.get('description','')[:60]}")
+        print(f"    • {t['name']} — {t.get('description', '')[:60]}")
 
     tool_names = {t["name"] for t in tools}
 
     # ── 3) semantic_search ────────────────────────────────────────────────────
     print("\n[2] semantic_search — '운영팀 담당 업무'...")
     if "semantic_search" in tool_names:
-        resp = call_mcp(url, sid, "tools/call",
-                        {"name": "semantic_search",
-                         "arguments": {"query": "운영팀 담당 업무", "limit": 3}}, 2)
+        resp = call_mcp(
+            url,
+            sid,
+            "tools/call",
+            {"name": "semantic_search", "arguments": {"query": "운영팀 담당 업무", "limit": 3}},
+            2,
+        )
         result, err = extract_result(resp)
         if err:
             print(f"  ❌ {err}")
@@ -159,16 +168,24 @@ def main():
                 if isinstance(h, dict):
                     title = h.get("title") or h.get("page_title", "")
                     score = h.get("score", "")
-                    print(f"    • [{score:.3f}] {title}" if isinstance(score, float) else f"    • {title}")
+                    print(
+                        f"    • [{score:.3f}] {title}"
+                        if isinstance(score, float)
+                        else f"    • {title}"
+                    )
     else:
         print("  ⚠️  도구 없음")
 
     # ── 4) graph_search ───────────────────────────────────────────────────────
     print("\n[3] graph_search — entity='운영팀'...")
     if "graph_search" in tool_names:
-        resp = call_mcp(url, sid, "tools/call",
-                        {"name": "graph_search",
-                         "arguments": {"entity": "운영팀", "depth": 1}}, 3)
+        resp = call_mcp(
+            url,
+            sid,
+            "tools/call",
+            {"name": "graph_search", "arguments": {"entity": "운영팀", "depth": 1}},
+            3,
+        )
         result, err = extract_result(resp)
         if err:
             print(f"  ❌ {err}")
@@ -176,20 +193,24 @@ def main():
             r = result if isinstance(result, dict) else {}
             outgoing = r.get("outgoing", [])
             incoming = r.get("incoming", [])
-            print(f"  ✅ 발견: {r.get('found', False)}, 엔티티: {r.get('entity','')}")
+            print(f"  ✅ 발견: {r.get('found', False)}, 엔티티: {r.get('entity', '')}")
             print(f"     outgoing {len(outgoing)}개, incoming {len(incoming)}개")
             for rel in outgoing[:3]:
                 if isinstance(rel, dict):
-                    print(f"    → [{rel.get('relation','')}] {rel.get('target_name','')}")
+                    print(f"    → [{rel.get('relation', '')}] {rel.get('target_name', '')}")
     else:
         print("  ⚠️  도구 없음")
 
     # ── 5) hybrid_search ──────────────────────────────────────────────────────
     print("\n[4] hybrid_search — '점검 프로세스 담당자'...")
     if "hybrid_search" in tool_names:
-        resp = call_mcp(url, sid, "tools/call",
-                        {"name": "hybrid_search",
-                         "arguments": {"query": "점검 프로세스 담당자", "limit": 3}}, 4)
+        resp = call_mcp(
+            url,
+            sid,
+            "tools/call",
+            {"name": "hybrid_search", "arguments": {"query": "점검 프로세스 담당자", "limit": 3}},
+            4,
+        )
         result, err = extract_result(resp)
         if err:
             print(f"  ❌ {err}")
@@ -201,7 +222,7 @@ def main():
             print(f"  ✅ 벡터 {len(sem)}건, 그래프 {len(gph)}건")
             for h in sem[:2]:
                 if isinstance(h, dict):
-                    print(f"    • {h.get('title','')}")
+                    print(f"    • {h.get('title', '')}")
             for s in summary[:3]:
                 print(f"    ↔ {s}")
     else:
@@ -210,10 +231,16 @@ def main():
     # ── 6) path_search ────────────────────────────────────────────────────────
     print("\n[5] path_search — '운영팀' → '점검'...")
     if "path_search" in tool_names:
-        resp = call_mcp(url, sid, "tools/call",
-                        {"name": "path_search",
-                         "arguments": {"start_entity": "운영팀", "end_entity": "점검",
-                                       "max_hops": 5}}, 5)
+        resp = call_mcp(
+            url,
+            sid,
+            "tools/call",
+            {
+                "name": "path_search",
+                "arguments": {"start_entity": "운영팀", "end_entity": "점검", "max_hops": 5},
+            },
+            5,
+        )
         result, err = extract_result(resp)
         if err:
             print(f"  ❌ {err}")
@@ -233,9 +260,13 @@ def main():
     # ── 7) decision_trace ────────────────────────────────────────────────────
     print("\n[6] decision_trace — entity='운영팀'...")
     if "decision_trace" in tool_names:
-        resp = call_mcp(url, sid, "tools/call",
-                        {"name": "decision_trace",
-                         "arguments": {"entity": "운영팀", "max_depth": 4}}, 6)
+        resp = call_mcp(
+            url,
+            sid,
+            "tools/call",
+            {"name": "decision_trace", "arguments": {"entity": "운영팀", "max_depth": 4}},
+            6,
+        )
         result, err = extract_result(resp)
         if err:
             print(f"  ❌ {err}")
@@ -246,7 +277,9 @@ def main():
             print(f"  ✅ Decision 노드 {r.get('found', len(decisions))}개")
             for d in decisions[:3]:
                 if isinstance(d, dict):
-                    print(f"    • [{d.get('action','')}] {d.get('subject','')} → {d.get('outcome','')}")
+                    print(
+                        f"    • [{d.get('action', '')}] {d.get('subject', '')} → {d.get('outcome', '')}"
+                    )
             for s in chain[:3]:
                 print(f"    ↻ {s}")
             if not decisions:
