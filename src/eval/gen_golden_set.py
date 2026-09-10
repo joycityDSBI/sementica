@@ -3,11 +3,18 @@
 골든셋 자동 생성 스크립트
 실제 Qdrant + FalkorDB 데이터에서 평가 질문을 생성합니다.
 
-채택 기준 (중요):
-    정답이 소스 원문으로 뒷받침되는지(verify_grounded)만을 기준으로 채택합니다.
-    검색 파이프라인 통과 여부를 채택 기준으로 쓰면 골든셋이 "이미 답할 수 있는
-    질문"만 남아 평가 점수가 100%에 수렴하고 약점이 드러나지 않습니다.
-    파이프라인 통과 여부는 --baseline 으로 참고 정보(baseline_pass)로만 기록합니다.
+채택 기준 (중요) — 두 관문을 모두 통과해야 합니다:
+    ① verify_grounded   정답이 소스 원문으로 뒷받침되는가 (환각 필터)
+    ② verify_answerable 질문이 답을 하나로 특정하는가 (모호성 필터)
+
+    ②가 필요한 이유: 근거가 있어도 질문이 모호하면 평가가 검색 품질이 아니라
+    문항 품질을 재게 됩니다. 실제로 "쿼리에서 GROUP BY 항목은?"(문서에 쿼리
+    3개), "제공하는 곳은?"인데 정답에 주기까지 담긴 문항이 반복해서 부분점수를
+    받았습니다.
+
+    검색 파이프라인 통과 여부는 채택 기준이 아닙니다 — 그러면 골든셋이 "이미
+    답할 수 있는 질문"만 남아 점수가 100%에 수렴하고 약점이 드러나지 않습니다.
+    --baseline 으로 참고 정보(baseline_pass)로만 기록합니다.
 
 실행:
     python src/eval/gen_golden_set.py --dept strategic
@@ -207,7 +214,33 @@ PAGE_QA_PROMPT = """다음 Notion 문서를 읽고 평가용 Q&A를 생성하세
 - 질문은 문서 내용만으로 답할 수 있어야 함
 - 정답은 문서 텍스트에서 직접 추출 가능해야 함
 - 추측이나 추론이 필요한 질문은 제외
-- 답변은 50자 이내로 간결하게"""
+- 답변은 50자 이내로 간결하게
+
+━━ 질문 작성 규칙 (반드시 지킬 것) ━━━━━━━━━━━━━━━━━━━━━━━━━
+
+① 대상을 특정하세요.
+   문서에 같은 종류의 대상(쿼리·테이블·단계·프로세스 등)이 여럿이면,
+   어느 것을 묻는지 질문에 반드시 밝히세요.
+
+   나쁨: "쿼리에서 GROUP BY 절에 포함된 항목들은 무엇인가요?"
+         → 문서에 쿼리가 3개면 어느 것인지 알 수 없어 답이 갈립니다.
+   좋음: "월별 매출 집계 쿼리의 GROUP BY 절에 포함된 항목은 무엇인가요?"
+
+   나쁨: "테이블 조인 조건과 날짜 집계 단위는 각각 무엇인가요?"
+   좋음: "국가별 코호트 쿼리에서 두 테이블을 조인하는 조건은 무엇인가요?"
+
+② 정답은 질문이 요구한 것만 담으세요.
+   질문에서 묻지 않은 정보를 정답에 넣지 마세요.
+
+   나쁨: Q "정산 원본 파일을 제공하는 곳은 어디인가요?"
+         A "재무팀과 퍼블리셔가 분기마다 제공"   ← 주기는 묻지 않았음
+   좋음: Q "정산 원본 파일을 제공하는 곳은 어디인가요?"
+         A "재무팀, 퍼블리셔"
+   또는: Q "정산 원본 파일은 어디에서 어떤 주기로 제공되나요?"
+         A "재무팀과 퍼블리셔가 분기마다 제공"
+
+③ 질문만 읽고도 무엇을 묻는지 알 수 있어야 합니다.
+   "해당 쿼리", "이 단계", "위 문서" 처럼 문맥에 기대는 표현을 쓰지 마세요."""
 
 REL_QA_PROMPT = """다음 지식 그래프 관계들을 보고 평가용 Q&A를 생성하세요.
 
@@ -230,7 +263,21 @@ REL_QA_PROMPT = """다음 지식 그래프 관계들을 보고 평가용 Q&A를 
 조건:
 - 주어진 관계 데이터만으로 답할 수 있어야 함
 - 구체적인 이름/팀명/관계명을 포함
-- 답변은 50자 이내"""
+- 답변은 50자 이내
+
+━━ 질문 작성 규칙 (반드시 지킬 것) ━━━━━━━━━━━━━━━━━━━━━━━━━
+
+① 주어를 특정하세요. 관계의 양쪽 엔티티 이름을 질문에 명시합니다.
+   나쁨: "이 팀이 담당하는 업무는?"
+   좋음: "퍼포먼스팀이 담당하는 업무는 무엇인가요?"
+
+② 정답은 질문이 요구한 것만 담으세요.
+   질문이 "무엇을 운영하나요?" 이면 정답도 운영 대상만 적습니다.
+   관계의 방향·조건 등 묻지 않은 정보는 넣지 마세요.
+
+③ 같은 엔티티가 여러 관계를 가지면, 어느 관계를 묻는지 드러내세요.
+   나쁨: "BI팀과 데이터 적재는 어떤 관계인가요?"
+   좋음: "BI팀이 데이터 적재 프로세스에 대해 수행한 역할은 무엇인가요?\""""
 
 
 def parse_qa_response(text: str) -> list:
@@ -263,7 +310,9 @@ def parse_qa_response(text: str) -> list:
 
 
 # ─── 검증 함수 ───────────────────────────────────────────────────────────────
-# 채택 기준은 "정답이 원문에 근거하는가"(verify_grounded) 입니다.
+# 채택하려면 두 관문을 모두 통과해야 합니다.
+#   ① verify_grounded    — 정답이 원문에 근거하는가 (환각 필터)
+#   ② verify_answerable  — 질문이 답을 하나로 특정하는가 (모호성 필터)
 #
 # ※ 중요 — 검색 파이프라인 통과 여부를 채택 기준으로 쓰면 안 됩니다:
 #   골든셋 채택 기준 = 평가 대상 파이프라인 → "이미 답할 수 있는 질문"만 남아
@@ -283,6 +332,36 @@ _GROUND_PROMPT = """다음 답변이 주어진 원문으로 뒷받침되는지 �
 - fail: 원문에 없는 내용 / 추측 / 원문과 불일치 / 원문보다 과도하게 구체적
 
 JSON으로만 응답: {{"verdict": "pass"|"fail", "reason": "한 줄"}}"""
+
+# 모호성 필터 — 실제 평가에서 반복 실패한 문항 유형을 걸러냅니다.
+#   · "쿼리에서 GROUP BY 항목은?"      → 문서에 쿼리가 여럿이라 답이 갈림
+#   · "테이블 조인 조건은?"             → 어느 조인인지 불명
+#   · Q "제공하는 곳은?" / A "…분기마다" → 묻지 않은 정보가 정답에 포함
+# 이런 문항은 시스템이 정답을 찾아도 채점에서 부분점수가 나와, 검색 품질이
+# 아니라 문항 품질을 측정하게 됩니다.
+_ANSWERABLE_PROMPT = """다음 Q&A가 검색 시스템 평가 문항으로 적절한지 판단하세요.
+
+원문:
+{source}
+
+질문: {question}
+정답: {answer}
+
+아래 중 하나라도 해당하면 reject:
+
+1. 대상 미특정 — 원문에 같은 종류의 대상(쿼리·테이블·단계·프로세스·문서 등)이
+   여럿인데 질문이 어느 것인지 밝히지 않아, 원문을 본 사람도 답을 하나로
+   고를 수 없음
+2. 범위 초과 — 정답이 질문에서 묻지 않은 정보를 포함
+   (예: "어디인가요?" 라고 물었는데 정답에 주기·시점·이유가 들어감)
+3. 문맥 의존 — "해당 쿼리", "이 단계", "위 문서" 처럼 질문만으로는
+   무엇을 가리키는지 알 수 없음
+4. 정답 불완전 — 원문에 근거가 더 있는데 정답이 일부만 담아, 완전한 답변이
+   오히려 오답 처리될 수 있음
+
+문제가 없으면 accept.
+
+JSON으로만 응답: {{"verdict": "accept"|"reject", "reason": "한 줄"}}"""
 
 _ANSWER_PROMPT = """아래 컨텍스트를 바탕으로 질문에 답하세요. 컨텍스트에 없는 내용은 답하지 마세요.
 
@@ -311,8 +390,8 @@ def _embed_text(text: str) -> list:
     return result.embeddings[0].values
 
 
-def _judge_verdict(prompt: str, max_tokens: int = 150) -> bool:
-    """LLM에 판정을 요청하고 verdict == 'pass' 여부를 반환."""
+def _judge_verdict(prompt: str, ok_value: str = "pass", max_tokens: int = 150) -> tuple[bool, str]:
+    """LLM 판정을 요청하고 (통과 여부, 사유) 를 반환."""
     resp = claude.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=max_tokens,
@@ -321,13 +400,18 @@ def _judge_verdict(prompt: str, max_tokens: int = 150) -> bool:
     text = resp.content[0].text.strip()
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if not m:
-        return False
-    return json.loads(m.group()).get("verdict", "fail") == "pass"
+        return False, "판정 파싱 실패"
+    d = json.loads(m.group())
+    return d.get("verdict", "") == ok_value, str(d.get("reason", ""))
 
 
 # API 오류를 조용히 삼키면 모든 문항이 탈락해도 원인을 알 수 없으므로
 # 첫 실패만 표면화합니다 (리전 설정 오류 등의 진단용).
 _err_shown: set[str] = set()
+
+# 탈락 사유 집계 — 생성 프롬프트를 어디로 고쳐야 할지 알려줍니다.
+_reject_counts: dict = {}
+_reject_samples: list = []
 
 
 def _warn_once(kind: str, exc: Exception) -> None:
@@ -337,22 +421,49 @@ def _warn_once(kind: str, exc: Exception) -> None:
 
 
 def verify_grounded(question: str, answer: str, source_text: str) -> bool:
-    """★ 채택 기준 — 정답이 소스 원문으로 뒷받침되는지 확인.
+    """★ 채택 관문 ① — 정답이 소스 원문으로 뒷받침되는지 확인.
 
     LLM이 생성한 정답의 환각을 걸러냅니다.
     검색 파이프라인을 거치지 않으므로 평가 대상과 독립적입니다.
     """
     try:
-        return _judge_verdict(
+        ok, _ = _judge_verdict(
             _GROUND_PROMPT.format(
                 source=source_text[:3000],
                 question=question,
                 answer=answer,
             )
         )
+        return ok
     except Exception as e:
         _warn_once("근거 검증", e)
         return False
+
+
+def verify_answerable(question: str, answer: str, source_text: str) -> tuple[bool, str]:
+    """★ 채택 관문 ② — 질문이 답을 하나로 특정하는지 확인.
+
+    근거가 있어도 질문이 모호하면 평가가 문항 품질을 재게 됩니다.
+    실제로 "쿼리에서 GROUP BY 항목은?"(문서에 쿼리 3개), "제공하는 곳은?"에
+    주기까지 담은 정답 같은 문항이 반복해서 부분점수를 받았습니다.
+
+    Returns:
+        (채택 여부, 사유)
+    """
+    try:
+        return _judge_verdict(
+            _ANSWERABLE_PROMPT.format(
+                source=source_text[:3000],
+                question=question,
+                answer=answer,
+            ),
+            ok_value="accept",
+        )
+    except Exception as e:
+        _warn_once("모호성 검증", e)
+        # 판정 불가 시에는 통과시킵니다 — 근거 검증은 이미 통과한 문항이므로
+        # 검증기 장애로 골든셋이 비는 것보다 낫습니다.
+        return True, "검증 생략"
 
 
 def baseline_search_pass(question: str, answer: str, search_limit: int = 7) -> bool:
@@ -390,10 +501,11 @@ def baseline_search_pass(question: str, answer: str, search_limit: int = 7) -> b
         )
         response = gen.content[0].text.strip()
 
-        return _judge_verdict(
+        ok, _ = _judge_verdict(
             _SCORE_PROMPT.format(question=question, answer=answer, response=response[:500]),
             max_tokens=100,
         )
+        return ok
     except Exception as e:
         _warn_once("baseline 검색", e)
         return False
@@ -434,8 +546,17 @@ for i, page in enumerate(pages):
 
         verified = 0
         for item in items:
-            # ★ 채택 기준: 정답이 이 문서 원문으로 뒷받침되는지 (환각 필터)
+            # ★ 관문 ①: 정답이 이 문서 원문으로 뒷받침되는지 (환각 필터)
             if not verify_grounded(item["question"], item["answer"], page["text"]):
+                _reject_counts["근거 없음"] = _reject_counts.get("근거 없음", 0) + 1
+                time.sleep(0.2)
+                continue
+
+            # ★ 관문 ②: 질문이 답을 하나로 특정하는지 (모호성 필터)
+            ok, why = verify_answerable(item["question"], item["answer"], page["text"])
+            if not ok:
+                _reject_counts["모호함"] = _reject_counts.get("모호함", 0) + 1
+                _reject_samples.append((item["question"][:48], why[:40]))
                 time.sleep(0.2)
                 continue
 
@@ -486,8 +607,17 @@ if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
             items = parse_qa_response(msg.content[0].text)
             verified = 0
             for item in items:
-                # ★ 채택 기준: 정답이 이 관계 데이터로 뒷받침되는지
+                # ★ 관문 ①: 정답이 이 관계 데이터로 뒷받침되는지
                 if not verify_grounded(item["question"], item["answer"], rel_text):
+                    _reject_counts["근거 없음"] = _reject_counts.get("근거 없음", 0) + 1
+                    time.sleep(0.2)
+                    continue
+
+                # ★ 관문 ②: 질문이 답을 하나로 특정하는지
+                ok, why = verify_answerable(item["question"], item["answer"], rel_text)
+                if not ok:
+                    _reject_counts["모호함"] = _reject_counts.get("모호함", 0) + 1
+                    _reject_samples.append((item["question"][:48], why[:40]))
                     time.sleep(0.2)
                     continue
 
@@ -573,7 +703,14 @@ for cat, target in CATEGORY_TARGETS.items():
 
     print(f"  {cat:<10}: {len(selected)}개 선택 (후보 {len(pool)}개)")
 
-print(f"\n  최종 선정: {len(final_set)}문항\n")
+print(f"\n  최종 선정: {len(final_set)}문항")
+
+# 탈락 사유 — 생성 프롬프트를 어디로 보강할지 알려줍니다.
+if _reject_counts:
+    print(f"  탈락: {', '.join(f'{k} {v}건' for k, v in _reject_counts.items())}")
+    for q, why in _reject_samples[:4]:
+        print(f"    · {q}  ← {why}")
+print()
 
 
 # ─── 6. 저장 ──────────────────────────────────────────────────────────────────
@@ -584,7 +721,9 @@ meta = {
     "collection": COLLECTION_NAME,
     "graph": GRAPH_NAME,
     "total": len(final_set),
-    "acceptance_criterion": "answer_grounded_in_source",
+    # 두 관문을 모두 통과한 문항만 채택됩니다.
+    "acceptance_criteria": ["answer_grounded_in_source", "question_answerable_unambiguously"],
+    "rejected": dict(_reject_counts),
     "category_counts": {
         c: sum(1 for q in final_set if q["category"] == c) for c in CATEGORY_TARGETS
     },
