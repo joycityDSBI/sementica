@@ -286,7 +286,12 @@ def extract_with_fallback(llm_extractor_fn, text: str) -> tuple[list, str]:
 
     Returns:
         (triplets: list, source: str)
-        source = "llm" | "empty"
+        source = "llm" | "empty" | "error"
+
+        "empty" 와 "error" 는 반드시 구분해야 합니다. 둘 다 빈 리스트지만
+        "empty" 는 "추출할 관계가 없다"는 확정 판단이고 "error" 는 아무것도
+        알지 못한다는 뜻입니다. 호출부가 이를 구분하지 못하면 일시적 API 오류를
+        "관계 없는 페이지"로 기록하고 재시도하지 않게 됩니다.
     """
     # LLM 추출
     try:
@@ -295,6 +300,7 @@ def extract_with_fallback(llm_extractor_fn, text: str) -> tuple[list, str]:
             return result, "llm"
     except Exception as e:
         print(f"    ⚠️  LLM 추출 실패: {e}")
+        return [], "error"
 
     return [], "empty"
 
@@ -1108,21 +1114,26 @@ def upsert_event_node(graph, event: dict) -> int:
     ts = datetime.now(UTC).isoformat()
 
     # ── 1. :Event 노드 MERGE ────────────────────────────────────────────────
+    # ON CREATE 와 ON MATCH 는 e.ts(최초 생성 시각)만 빼고 완전히 같은 필드를
+    # 씁니다. 두 목록을 따로 적었더니 실제로 어긋났습니다 — manager 는 ON CREATE
+    # 에 없어서 신규 이벤트의 담당자가 항상 null 이었고(키워드 검색이 조용히
+    # 실패), date·date_ts·event_type·target 은 ON MATCH 에 없어서 Notion 에서
+    # 날짜를 고쳐도 그래프에 영원히 반영되지 않았습니다. 아래처럼 한 벌만
+    # 정의해 양쪽에 끼워 넣어야 다시 어긋나지 않습니다.
+    _event_fields = (
+        "e.game = $game, e.event_type = $etype, e.category = $category, "
+        "e.scope = $scope, e.scope_type = $scope_type, "
+        "e.scope_verified = $scope_verified, "
+        "e.date = $date, e.date_ts = $date_ts, "
+        "e.year = $year, e.month = $month, e.quarter = $quarter, "
+        "e.title = $title, e.description = $desc, e.target = $target, "
+        "e.manager = $mgr, e.source_url = $url"
+    )
     try:
         r = graph.query(
             "MERGE (e:Event {event_id: $eid}) "
-            "ON CREATE SET "
-            "  e.game = $game, e.event_type = $etype, e.category = $category, "
-            "  e.scope = $scope, e.scope_type = $scope_type, "
-            "  e.scope_verified = $scope_verified, "
-            "  e.date = $date, e.date_ts = $date_ts, "
-            "  e.year = $year, e.month = $month, e.quarter = $quarter, "
-            "  e.title = $title, e.description = $desc, e.target = $target, "
-            "  e.source_url = $url, e.ts = $ts "
-            "ON MATCH SET "
-            "  e.title = $title, e.category = $category, e.description = $desc, "
-            "  e.manager = $mgr, e.scope = $scope, e.scope_type = $scope_type, "
-            "  e.scope_verified = $scope_verified, e.game = $game "
+            f"ON CREATE SET {_event_fields}, e.ts = $ts "
+            f"ON MATCH SET {_event_fields} "
             "RETURN id(e) AS nid",
             {
                 "eid": event_id,

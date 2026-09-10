@@ -1,4 +1,22 @@
 -- ================================================================
+-- ⚠️ 사용 중지 (DEPRECATED) — 실행하지 마세요
+-- ================================================================
+-- Snowflake 콘솔에서 만든 Analytics Agent + UDF 조합으로 대체되었습니다.
+-- 이 파일은 참고용으로만 남아 있으며, 그대로 실행하면 안 됩니다:
+--
+--   · sementica_agent 는 LLM 이 생성한 SQL 을 검증 없이
+--     session.sql(...).collect() 로 실행합니다. 프로시저 소유자가
+--     ACCOUNTADMIN(아래 USE ROLE)이라 질문 문자열만으로 임의 DDL/DML 이
+--     실행될 수 있습니다.
+--   · 파일 끝의 CALL 예시들이 파일을 통째로 실행하면 그대로 수행됩니다.
+--     그래서 주석 처리해 두었습니다.
+--
+-- 다시 쓰려면 최소한 (1) 최소 권한 롤로 소유자 변경,
+-- (2) 생성된 SQL 을 SELECT 로 제한하는 검증, (3) 결과 행 수 상한을
+-- 먼저 적용하세요.
+-- ================================================================
+
+-- ================================================================
 -- Semantica × Snowflake — Step 5: Cortex Agent 오케스트레이터
 -- ================================================================
 -- 기존 Cortex Analyst + Semantica 온톨로지를 통합하는 오케스트레이터.
@@ -247,22 +265,22 @@ $$;
 -- ================================================================
 
 -- KPI 질문 (Cortex Analyst만 호출)
-CALL sementica_agent('지난달 게임별 매출 합계를 보여줘');
+-- CALL sementica_agent('지난달 게임별 매출 합계를 보여줘');
 
 -- 온톨로지 질문 (Semantica만 호출)
-CALL sementica_agent('POTC Q2 마케팅 전략과 UA 예산 집행 이력을 알려줘');
+-- CALL sementica_agent('POTC Q2 마케팅 전략과 UA 예산 집행 이력을 알려줘');
 
 -- 복합 질문 (둘 다 호출 → 종합 분석)
-CALL sementica_agent('POTC 8월 DAU가 감소했는데 동 기간 운영 이슈나 마케팅 변화가 있었나?');
+-- CALL sementica_agent('POTC 8월 DAU가 감소했는데 동 기간 운영 이슈나 마케팅 변화가 있었나?');
 
 -- 결과에서 최종 답변만 추출
-SELECT r:answer::VARCHAR AS answer
-FROM (SELECT sementica_agent('POTC 8월 매출 감소 원인 분석') AS r);
+-- SELECT r:answer::VARCHAR AS answer
+-- FROM (SELECT sementica_agent('POTC 8월 매출 감소 원인 분석') AS r);
 
 -- 분류 결과 확인 (디버깅용)
-SELECT
-    r:classification::VARCHAR AS category,
-    r:kpi_sql::VARCHAR        AS generated_sql,
-    r:ontology_used::BOOLEAN  AS used_ontology,
-    r:answer::VARCHAR         AS answer
-FROM (SELECT sementica_agent('POTC 8월 DAU 감소와 UA 이력 연결 분석') AS r);
+-- SELECT
+--     r:classification::VARCHAR AS category,
+--     r:kpi_sql::VARCHAR        AS generated_sql,
+--     r:ontology_used::BOOLEAN  AS used_ontology,
+--     r:answer::VARCHAR         AS answer
+-- FROM (SELECT sementica_agent('POTC 8월 DAU 감소와 UA 이력 연결 분석') AS r);

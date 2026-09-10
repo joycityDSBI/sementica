@@ -76,6 +76,23 @@ def _deny() -> JSONResponse:
     return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
 
+# ─── 입력 상한 ────────────────────────────────────────────────────────────────
+# 이 API 는 ngrok 터널로 외부에 노출됩니다. limit 을 그대로 넘기면
+# {"limit": 100000} 한 번에 Qdrant 를 100000 페이지 스크롤하고 수백 MB 를
+# 조립하다 프로세스가 죽습니다.
+MAX_LIMIT = int(os.environ.get("REST_MAX_LIMIT", "50"))
+MAX_DEPTH = 3
+
+
+def _clamp(value, default: int, hi: int) -> int:
+    """정수로 강제하고 1..hi 로 자릅니다. 변환 불가면 default."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(n, hi))
+
+
 # ─── 헬스 체크 ────────────────────────────────────────────────────────────────
 async def health(request: Request):
     return JSONResponse(
@@ -102,7 +119,7 @@ async def rest_search(request: Request):
     try:
         body = await request.json()
         query = str(body.get("query", "")).strip()
-        limit = int(body.get("limit", 5))
+        limit = _clamp(body.get("limit"), 5, MAX_LIMIT)
         if not query:
             return JSONResponse({"error": "query 파라미터가 필요합니다"}, status_code=400)
         results = _srv.semantic_search(query=query, limit=limit)
@@ -122,7 +139,7 @@ async def rest_graph(request: Request):
     try:
         body = await request.json()
         entity = str(body.get("entity", "")).strip()
-        depth = int(body.get("depth", 1))
+        depth = _clamp(body.get("depth"), 1, MAX_DEPTH)
         if not entity:
             return JSONResponse({"error": "entity 파라미터가 필요합니다"}, status_code=400)
         result = _srv.graph_search(entity=entity, depth=depth)
@@ -146,7 +163,7 @@ async def rest_events(request: Request):
         event_type = str(body.get("event_type", "")).strip()
         from_date = str(body.get("from_date", "")).strip()
         to_date = str(body.get("to_date", "")).strip()
-        limit = int(body.get("limit", 20))
+        limit = _clamp(body.get("limit"), 20, MAX_LIMIT)
         if not game:
             return JSONResponse({"error": "game 파라미터가 필요합니다"}, status_code=400)
         result = _srv.timeline_search(
@@ -172,7 +189,7 @@ async def rest_hybrid(request: Request):
     try:
         body = await request.json()
         query = str(body.get("query", "")).strip()
-        limit = int(body.get("limit", 8))
+        limit = _clamp(body.get("limit"), 8, MAX_LIMIT)
         if not query:
             return JSONResponse({"error": "query 파라미터가 필요합니다"}, status_code=400)
         result = _srv.hybrid_search(query=query, limit=limit)
@@ -206,7 +223,7 @@ async def sf_search(request: Request):
         for row in rows:
             idx = row[0]
             query = str(row[1]).strip() if len(row) > 1 else ""
-            limit = int(row[2]) if len(row) > 2 else 5
+            limit = _clamp(row[2], 5, MAX_LIMIT) if len(row) > 2 else 5
             try:
                 results = _srv.semantic_search(query=query, limit=limit)
                 out.append([idx, {"results": results, "count": len(results)}])
@@ -241,7 +258,7 @@ async def sf_events(request: Request):
             event_type = str(row[2]).strip() if len(row) > 2 else ""
             from_date = str(row[3]).strip() if len(row) > 3 else ""
             to_date = str(row[4]).strip() if len(row) > 4 else ""
-            limit = int(row[5]) if len(row) > 5 else 20
+            limit = _clamp(row[5], 20, MAX_LIMIT) if len(row) > 5 else 20
             try:
                 result = _srv.timeline_search(
                     game=game,
@@ -278,7 +295,7 @@ async def sf_hybrid(request: Request):
         for row in rows:
             idx = row[0]
             query = str(row[1]).strip() if len(row) > 1 else ""
-            limit = int(row[2]) if len(row) > 2 else 8
+            limit = _clamp(row[2], 8, MAX_LIMIT) if len(row) > 2 else 8
             try:
                 result = _srv.hybrid_search(query=query, limit=limit)
                 out.append([idx, result])
@@ -339,6 +356,10 @@ if __name__ == "__main__":
     print(f"   통합:  POST {base}/rest/hybrid")
     print("")
     print(f"   Snowflake: POST {base}/snowflake/{{search|events|hybrid}}")
+    if not _REST_TOKEN:
+        print("   ⚠️  SNOWFLAKE_REST_TOKEN 미설정 — 이 API 는 인증 없이 열립니다.")
+        print("      ngrok 으로 노출한다면 반드시 토큰을 설정하세요")
+        print("      (.env 와 snowflake/01_network_access.sql 의 SECRET 을 같은 값으로).")
     print(
         f"   인증: {'Bearer 토큰 활성화' if _REST_TOKEN else '없음 (SNOWFLAKE_REST_TOKEN 미설정)'}"
     )

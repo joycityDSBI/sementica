@@ -406,8 +406,10 @@ def extract_events_from_text(text: str) -> list[dict]:
         if isinstance(parsed, list):
             return [e for e in parsed if isinstance(e, dict) and e.get("game") and e.get("date")]
         return []
-    except Exception:
-        return []
+    except Exception as e:
+        # 호출부가 "이벤트 없음"과 구분할 수 있도록 예외를 올립니다.
+        print(f"    ⚠️  이벤트 추출 실패: {type(e).__name__}: {e}")
+        raise
 
 
 def extract_triplets(text: str) -> list:
@@ -446,8 +448,10 @@ def extract_triplets(text: str) -> list:
                 }
             )
         return result
-    except Exception:
-        return []
+    except Exception as e:
+        # extract_with_fallback 이 "error" 로 표시할 수 있도록 예외를 올립니다.
+        print(f"    ⚠️  LLM 트리플 추출 실패: {type(e).__name__}: {e}")
+        raise
 
 
 # ─── 청킹 유틸 ───────────────────────────────────────────────────────────────
@@ -490,7 +494,11 @@ def _embed_batch(chunks: list[str]) -> list[list[float]]:
 def store_vector(page: dict) -> int:
     """페이지를 청크로 분할 → 배치 임베딩 → Qdrant 일괄 저장
     개선: 청크당 1회 API 호출 → 페이지당 1회 배치 호출 (최대 50배 빠름)
-    Returns: 저장된 청크 수 (0이면 실패)
+
+    Returns:
+        저장된 청크 수. 0 은 "저장할 본문이 없음"이라는 뜻이며, 실패는 예외로
+        올립니다 — 호출부가 둘을 구분하지 못하면 실패한 페이지에 content_hash
+        가 기록되어 다음 동기화에서 영영 건너뛰게 됩니다.
     """
     body = page["body"]
     if not body.strip():
@@ -507,7 +515,7 @@ def store_vector(page: dict) -> int:
         vecs = _embed_batch(chunks)
     except Exception as e:
         print(f"     ⚠️  임베딩 배치 실패: {e}")
-        return 0
+        raise
 
     # 2. 전체 ID·페이로드 구성
     all_ids = []
@@ -537,7 +545,7 @@ def store_vector(page: dict) -> int:
         return len(chunks)
     except Exception as e:
         print(f"     ⚠️  Qdrant 배치 저장 실패: {e}")
-        return 0
+        raise
 
 
 # ─── 그래프 저장 ─────────────────────────────────────────────────────────────
@@ -699,9 +707,24 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
         "skipped": False,
     }
 
+    # ── 쓰기 실패 추적 ────────────────────────────────────────────────────
+    # 실패한 페이지에 content_hash 를 남기면 이후 sync 가 hash 일치로 건너뛰어
+    # 영영 재처리되지 않습니다. 하나라도 실패하면 해시를 비워 둡니다.
+    write_failed: list[str] = []
+
+    def _persist_state() -> tuple[str, str, str | None]:
+        """(status, content_hash, error_msg)"""
+        if write_failed:
+            return "error", "", " / ".join(write_failed)[:500]
+        return "ok", body_hash, None
+
     if not dry_run:
         # 1. 벡터 저장 (청킹) — defer·core 모두 실행
-        chunk_count = store_vector(page)
+        try:
+            chunk_count = store_vector(page)
+        except Exception as e:
+            chunk_count = 0
+            write_failed.append(f"벡터 저장 실패: {type(e).__name__}: {e}")
         result["vector_stored"] = chunk_count > 0
         result["chunk_count"] = chunk_count
         print(f"     벡터: {'✅' if chunk_count > 0 else '❌'} {chunk_count}개 청크 저장")
@@ -712,6 +735,9 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
             result["triplet_count"] = 0
             result["graph"] = {"nodes": 0, "edges": 0}
             result["event_count"] = 0
+            _status, _hash, _err = _persist_state()
+            if _err:
+                result["error"] = _err
             if meta.get("page_id"):
                 _upsert_notion_page(
                     page_id=meta["page_id"],
@@ -723,14 +749,17 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
                     chunk_count=chunk_count,
                     is_db_item=bool(meta.get("db_properties")),
                     has_html_attachment=has_html_attach,
-                    status="ok",
+                    status=_status,
+                    error_msg=_err,
                     route="defer",
-                    content_hash=body_hash,
+                    content_hash=_hash,
                 )
             return result
 
         # 2. 트리플 추출 (LLM 우선 → 실패 시 Semantica fallback) — core만
         triplets, src = extract_with_fallback(extract_triplets, body)
+        if src == "error":
+            write_failed.append("트리플 추출 실패")
         result["triplet_count"] = len(triplets)
         print(f"     트리플: {len(triplets)}개 추출 [{src}]")
 
@@ -767,7 +796,11 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
 
         # 4b. DB 속성에 이벤트 없으면 LLM으로 텍스트 추출 (API 호출, 락 불필요)
         if not skip_llm_ev:
-            events = extract_events_from_text(body)
+            try:
+                events = extract_events_from_text(body)
+            except Exception as e:
+                events = []
+                write_failed.append(f"이벤트 추출 실패: {type(e).__name__}: {e}")
             if events:
                 with _falkordb_lock:
                     for ev in events:
@@ -783,6 +816,10 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
         result["event_count"] = ev_stored
 
         # ── notion_pages 레지스트리 업서트 (PostgreSQL) ──────────────────
+        _status, _hash, _err = _persist_state()
+        if _err:
+            result["error"] = _err
+            print(f"     ⚠️  일부 쓰기 실패 — 해시 미기록, 다음 동기화에서 재처리: {_err}")
         if meta.get("page_id"):
             _upsert_notion_page(
                 page_id=meta["page_id"],
@@ -796,9 +833,10 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
                 event_count=ev_stored,
                 is_db_item=bool(meta.get("db_properties")),
                 has_html_attachment=has_html_attach,
-                status="ok",
+                status=_status,
+                error_msg=_err,
                 route=route,
-                content_hash=body_hash,
+                content_hash=_hash,
             )
     else:
         print("     [DRY-RUN] 저장 없이 확인만")

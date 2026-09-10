@@ -480,8 +480,11 @@ def extract_events_from_text(llm_client, text: str) -> list[dict]:
         if isinstance(parsed, list):
             return [e for e in parsed if isinstance(e, dict) and e.get("game") and e.get("date")]
         return []
-    except Exception:
-        return []
+    except Exception as e:
+        # 삼키지 않고 올립니다 — 호출부가 "이벤트 없음"과 구분해야
+        # 실패한 페이지의 content_hash 기록을 막을 수 있습니다.
+        print(f"    ⚠️  이벤트 추출 실패: {type(e).__name__}: {e}")
+        raise
 
 
 def extract_triplets(llm_client, text: str) -> list:
@@ -494,8 +497,11 @@ def extract_triplets(llm_client, text: str) -> list:
         )
         raw = resp.content[0].text.strip()
         if raw.startswith("```"):
+            # ingest.py 와 동일한 처리 — 이전 코드는 parts[1][4:] 로 4자를 무조건
+            # 잘라내서, 언어 태그 없는 ``` 펜스가 오면 JSON 앞부분을 먹었습니다.
             parts = raw.split("```")
-            raw = parts[1][4:] if len(parts) > 1 else raw
+            raw = parts[1] if len(parts) > 1 else raw
+            raw = raw.removeprefix("json")
         parsed = json.loads(raw.strip())
         result = []
         for t in parsed:
@@ -517,10 +523,10 @@ def extract_triplets(llm_client, text: str) -> list:
         return result
     except json.JSONDecodeError as e:
         print(f"    ⚠️  LLM 응답 JSON 파싱 실패: {e} | 응답: {raw[:200]!r}")
-        return []
+        raise
     except Exception as e:
         print(f"    ⚠️  LLM 트리플 추출 실패 (API 오류): {type(e).__name__}: {e}")
-        return []
+        raise
 
 
 # ─── 페이지 동기화 (핵심 함수) ───────────────────────────────────────────────
@@ -633,30 +639,31 @@ def sync_page(
         )
         return result
 
-    # 2. 기존 벡터 삭제
-    deleted_v = delete_page_vectors(qc, collection_name, source_url)
-    result["deleted_vectors"] = deleted_v
-    print(f"     벡터 삭제: {deleted_v}개")
+    # ── 쓰기 실패 추적 ────────────────────────────────────────────────────
+    # 한 건이라도 실패하면 content_hash 를 기록하지 않습니다. 기록해 버리면
+    # 다음 동기화가 hash 일치로 건너뛰어, 삭제만 되고 재생성되지 않은 페이지가
+    # Notion 에서 수정될 때까지 영구히 검색에서 사라집니다.
+    write_failed: list[str] = []
 
-    # 3. 기존 엣지 삭제
-    deleted_e = delete_page_edges(graph, source_url)
-    result["deleted_edges"] = deleted_e
-    print(f"     엣지 삭제: {deleted_e}개")
+    def _persist_state() -> tuple[str, str, str | None]:
+        """(status, content_hash, error_msg) — 실패가 있으면 해시를 비워 다음 회차에 재시도."""
+        if write_failed:
+            return "error", "", " / ".join(write_failed)[:500]
+        return "ok", body_hash, None
 
-    # 4. 청킹 + 배치 임베딩 + Qdrant 일괄 저장
+    # 2. 청킹 + 배치 임베딩 — **기존 벡터를 지우기 전에** 수행합니다.
+    #    임베딩이 실패해도 기존 벡터가 남아 있어야 검색이 계속 동작합니다.
     chunks = _make_chunks(body)
     new_chunks = 0
+    points: list[dict] = []
     if chunks:
         try:
-            # 4-1. 배치 임베딩 (EMBED_BATCH_SIZE 단위, API 호출 최소화)
             all_vecs = []
             for bi in range(0, len(chunks), EMBED_BATCH_SIZE):
                 batch = chunks[bi : bi + EMBED_BATCH_SIZE]
                 res = embed_client.models.embed_content(model=EMBED_MODEL_NAME, contents=batch)
                 all_vecs.extend([list(e.values) for e in res.embeddings])
 
-            # 4-2. 전체 청크 한 번에 Qdrant upsert
-            points = []
             for i, (chunk, vec) in enumerate(zip(chunks, all_vecs, strict=True)):
                 points.append(
                     {
@@ -672,10 +679,21 @@ def sync_page(
                         },
                     }
                 )
+        except Exception as e:
+            write_failed.append(f"임베딩 실패: {type(e).__name__}: {e}")
+            print(f"     ⚠️  배치 임베딩 실패 — 기존 벡터를 보존합니다: {e}")
+
+    # 3. 벡터 교체 — 새 벡터가 준비된 경우에만 기존 것을 지웁니다.
+    if points:
+        try:
+            deleted_v = delete_page_vectors(qc, collection_name, source_url)
+            result["deleted_vectors"] = deleted_v
             qc.upsert(collection_name=collection_name, points=points)
             new_chunks = len(chunks)
+            print(f"     벡터 교체: {deleted_v}개 삭제 → {new_chunks}개 저장")
         except Exception as e:
-            print(f"     ⚠️  배치 임베딩/저장 실패: {e}")
+            write_failed.append(f"벡터 저장 실패: {type(e).__name__}: {e}")
+            print(f"     ⚠️  벡터 저장 실패: {e}")
 
     result["new_chunks"] = new_chunks
     print(f"     벡터 저장: {new_chunks}개 청크")
@@ -685,6 +703,9 @@ def sync_page(
         print("     ↩️  defer 경로 — LLM 추출 생략")
         result["new_triplets"] = 0
         result["new_events"] = 0
+        _status, _hash, _err = _persist_state()
+        if write_failed:
+            result["error"] = _err
         _upsert_notion_page(
             page_id=page_id,
             dept=dept,
@@ -695,9 +716,10 @@ def sync_page(
             chunk_count=new_chunks,
             is_db_item=bool(db_props_meta),
             has_html_attachment=has_html_attach,
-            status="ok",
+            status=_status,
+            error_msg=_err,
             route="defer",
-            content_hash=body_hash,
+            content_hash=_hash,
         )
         return result
 
@@ -717,9 +739,27 @@ def sync_page(
             _pool.submit(extract_events_from_text, llm_client, body) if ev_from_db is None else None
         )
         triplets, triplet_src = ft.result()
-        llm_events = fe.result() if fe is not None else []
+        llm_events = []
+        if fe is not None:
+            try:
+                llm_events = fe.result()
+            except Exception as e:
+                write_failed.append(f"이벤트 추출 실패: {type(e).__name__}: {e}")
 
-    # 5. 트리플 → FalkorDB 저장
+    if triplet_src == "error":
+        write_failed.append("트리플 추출 실패")
+
+    # 5. 기존 엣지 삭제 — **추출이 성공했을 때만** 지웁니다.
+    #    실패했는데 지우면 이 페이지의 관계가 통째로 사라지고,
+    #    아래에서 content_hash 도 기록하지 않으므로 다음 회차에 재시도됩니다.
+    if triplet_src == "error":
+        print("     ⚠️  트리플 추출 실패 — 기존 엣지를 보존하고 그래프 갱신을 건너뜁니다")
+    else:
+        deleted_e = delete_page_edges(graph, source_url)
+        result["deleted_edges"] = deleted_e
+        print(f"     엣지 삭제: {deleted_e}개")
+
+    # 6. 트리플 → FalkorDB 저장
     print(f"     트리플: {len(triplets)}개 추출 [{triplet_src}]")
     node_cache: dict[tuple, int] = {}
 
@@ -734,6 +774,7 @@ def sync_page(
         return nid
 
     edges_created = 0
+    edge_errors = 0
     seen_edges: set[tuple[int, str, int, str]] = set()  # 인메모리 중복 방지
     for t in triplets:
         sid = get_or_create_node(t["subject"])
@@ -795,6 +836,10 @@ def sync_page(
                 record_decision_node(graph, t, source_url)
         except Exception as e:
             print(f"    ⚠️  엣지 생성 실패 ({t['subject']['name']} → {t['object']['name']}): {e}")
+            edge_errors += 1
+
+    if edge_errors:
+        write_failed.append(f"엣지 생성 실패 {edge_errors}건")
 
     result["new_triplets"] = edges_created
     print(f"     그래프: {len(node_cache)}개 노드 / {edges_created}개 엣지")
@@ -825,6 +870,10 @@ def sync_page(
     result["new_events"] = ev_stored
 
     # ── notion_pages 레지스트리 업서트 (PostgreSQL) ───────────────────────────
+    _status, _hash, _err = _persist_state()
+    if write_failed:
+        result["error"] = _err
+        print(f"     ⚠️  일부 쓰기 실패 — 해시 미기록, 다음 회차 재시도: {_err}")
     _upsert_notion_page(
         page_id=page_id,
         dept=dept,
@@ -837,9 +886,10 @@ def sync_page(
         event_count=ev_stored,
         is_db_item=bool(db_props_meta),
         has_html_attachment=has_html_attach,
-        status="ok",
+        status=_status,
+        error_msg=_err,
         route=route,
-        content_hash=body_hash,
+        content_hash=_hash,
     )
 
     return result

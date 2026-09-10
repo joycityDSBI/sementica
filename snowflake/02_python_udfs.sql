@@ -22,17 +22,32 @@ CREATE OR REPLACE FUNCTION sementica_search(query VARCHAR, lim NUMBER)
   RUNTIME_VERSION = '3.11'
   HANDLER = 'run'
   EXTERNAL_ACCESS_INTEGRATIONS = (semantica_external_access)
+  SECRETS = ('rest_token' = semantica_rest_token)
   PACKAGES = ('requests')
 AS $$
 import requests, json
 
 _BASE = 'https://agility-unadvised-constrain.ngrok-free.dev'
 
+def _headers():
+    # SNOWFLAKE_REST_TOKEN 을 Authorization 으로 보냅니다. 이 헤더가 없으면
+    # 서버에서 토큰을 켜는 순간 모든 UDF 가 401 이 되어, 결국 아무도 토큰을
+    # 켜지 못하고 ngrok URL 이 무인증으로 남습니다.
+    h = {'ngrok-skip-browser-warning': '1'}
+    try:
+        import _snowflake
+        tok = (_snowflake.get_generic_secret_string('rest_token') or '').strip()
+        if tok and not tok.startswith('CHANGE_ME'):
+            h['Authorization'] = 'Bearer ' + tok
+    except Exception:
+        pass
+    return h
+
 def run(query: str, lim: float) -> dict:
     resp = requests.post(
         f'{_BASE}/rest/search',
         json={'query': query, 'limit': int(lim)},
-        headers={'ngrok-skip-browser-warning': '1'},
+        headers=_headers(),
         timeout=30,
     )
     resp.raise_for_status()
@@ -55,11 +70,26 @@ CREATE OR REPLACE FUNCTION sementica_events(
   RUNTIME_VERSION = '3.11'
   HANDLER = 'run'
   EXTERNAL_ACCESS_INTEGRATIONS = (semantica_external_access)
+  SECRETS = ('rest_token' = semantica_rest_token)
   PACKAGES = ('requests')
 AS $$
 import requests
 
 _BASE = 'https://agility-unadvised-constrain.ngrok-free.dev'
+
+def _headers():
+    # SNOWFLAKE_REST_TOKEN 을 Authorization 으로 보냅니다. 이 헤더가 없으면
+    # 서버에서 토큰을 켜는 순간 모든 UDF 가 401 이 되어, 결국 아무도 토큰을
+    # 켜지 못하고 ngrok URL 이 무인증으로 남습니다.
+    h = {'ngrok-skip-browser-warning': '1'}
+    try:
+        import _snowflake
+        tok = (_snowflake.get_generic_secret_string('rest_token') or '').strip()
+        if tok and not tok.startswith('CHANGE_ME'):
+            h['Authorization'] = 'Bearer ' + tok
+    except Exception:
+        pass
+    return h
 
 def run(game: str, event_type: str, from_date: str, to_date: str, lim: float) -> dict:
     resp = requests.post(
@@ -71,7 +101,7 @@ def run(game: str, event_type: str, from_date: str, to_date: str, lim: float) ->
             'to_date':    to_date    or '',
             'limit':      int(lim),
         },
-        headers={'ngrok-skip-browser-warning': '1'},
+        headers=_headers(),
         timeout=30,
     )
     resp.raise_for_status()
@@ -89,17 +119,32 @@ CREATE OR REPLACE FUNCTION sementica_hybrid(query VARCHAR, lim NUMBER)
   RUNTIME_VERSION = '3.11'
   HANDLER = 'run'
   EXTERNAL_ACCESS_INTEGRATIONS = (semantica_external_access)
+  SECRETS = ('rest_token' = semantica_rest_token)
   PACKAGES = ('requests')
 AS $$
 import requests
 
 _BASE = 'https://agility-unadvised-constrain.ngrok-free.dev'
 
+def _headers():
+    # SNOWFLAKE_REST_TOKEN 을 Authorization 으로 보냅니다. 이 헤더가 없으면
+    # 서버에서 토큰을 켜는 순간 모든 UDF 가 401 이 되어, 결국 아무도 토큰을
+    # 켜지 못하고 ngrok URL 이 무인증으로 남습니다.
+    h = {'ngrok-skip-browser-warning': '1'}
+    try:
+        import _snowflake
+        tok = (_snowflake.get_generic_secret_string('rest_token') or '').strip()
+        if tok and not tok.startswith('CHANGE_ME'):
+            h['Authorization'] = 'Bearer ' + tok
+    except Exception:
+        pass
+    return h
+
 def run(query: str, lim: float) -> dict:
     resp = requests.post(
         f'{_BASE}/rest/hybrid',
         json={'query': query, 'limit': int(lim)},
-        headers={'ngrok-skip-browser-warning': '1'},
+        headers=_headers(),
         timeout=30,
     )
     resp.raise_for_status()

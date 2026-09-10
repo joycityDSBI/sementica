@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from falkordb import FalkorDB  # type: ignore
-from src.pipeline.dept_config import list_depts
+from src.pipeline.dept_config import list_depts, load_dept
 
 # ── 생성할 인덱스 목록 (label, property) ──────────────────────────────────────
 # FalkorDB: CREATE INDEX FOR (n:Label) ON (n.prop)
@@ -98,10 +98,22 @@ def main() -> None:
     else:
         depts = args.dept  # type: ignore[assignment]
 
-    print(f"대상 그래프: {depts}")
-
+    # 부서 키(strategic)와 그래프명(strategic_kg)은 다릅니다. 예전에는 부서 키를
+    # 그대로 select_graph 에 넘겨, 인덱스가 새로 만들어진 빈 그래프에 붙고
+    # 운영 그래프는 계속 풀스캔이었습니다 — 화면에는 전부 성공으로 보였습니다.
+    targets: list[tuple[str, str]] = []
     for dept in depts:
-        _create_indexes_for_dept(dept, client)
+        try:
+            graph_name = load_dept(dept)["falkordb_graph"]
+        except Exception as exc:
+            print(f"❌ 부서 '{dept}' 설정을 읽을 수 없습니다: {exc}")
+            sys.exit(1)
+        targets.append((dept, graph_name))
+
+    print("대상 그래프: " + ", ".join(f"{d} → {g}" for d, g in targets))
+
+    for _dept, graph_name in targets:
+        _create_indexes_for_dept(graph_name, client)
 
     print("\n모든 인덱스 생성 완료.")
 

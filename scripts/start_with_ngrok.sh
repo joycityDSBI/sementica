@@ -29,6 +29,11 @@ cd "$PROJECT_ROOT"
 # ── logs 디렉토리 생성 ─────────────────────────────────────────
 mkdir -p logs
 
+# rest_api.py 는 .env 를 직접 읽으므로, 아래 토큰 검사도 같은 값을 봐야 합니다.
+if [ -z "${SNOWFLAKE_REST_TOKEN:-}" ] && [ -f .env ]; then
+    SNOWFLAKE_REST_TOKEN="$(grep -E '^SNOWFLAKE_REST_TOKEN=' .env | tail -1 | cut -d= -f2- | tr -d ' \r')"
+fi
+
 echo "================================================"
 echo "  Semantica REST API + ngrok 시작"
 echo "  본부: $DEPT  포트: $REST_PORT"
@@ -57,6 +62,18 @@ else
 fi
 
 # ── ngrok HTTPS 터널 시작 ─────────────────────────────────────
+# 공개 인터넷에 여는 것이므로 토큰이 없으면 여기서 멈춥니다.
+# 의도적으로 무인증 공개가 필요하면 ALLOW_UNAUTHENTICATED_NGROK=1 로 실행하세요.
+if [ -z "${SNOWFLAKE_REST_TOKEN:-}" ] && [ -z "${ALLOW_UNAUTHENTICATED_NGROK:-}" ]; then
+    echo "  ❌ SNOWFLAKE_REST_TOKEN 이 없습니다."
+    echo "     ngrok 은 공개 URL 이라 토큰 없이 열면 사내 문서 전체가 무인증 공개됩니다."
+    echo "     .env 에 SNOWFLAKE_REST_TOKEN 을 설정하고,"
+    echo "     snowflake/01_network_access.sql 의 SECRET 에도 같은 값을 넣으세요."
+    echo "     (그래도 열려면 ALLOW_UNAUTHENTICATED_NGROK=1)"
+    kill "$REST_PID" 2>/dev/null || true
+    exit 1
+fi
+
 echo "[3/3] ngrok HTTPS 터널 시작..."
 nohup ngrok http "$REST_PORT" \
     --log=stdout \

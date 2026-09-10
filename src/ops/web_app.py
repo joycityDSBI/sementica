@@ -51,7 +51,25 @@ except ImportError:
     raise SystemExit("pip install fastapi uvicorn") from None
 
 app = FastAPI(title="Semantica Ops", version="1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# CORS 는 기본적으로 열지 않습니다. 이전에는 allow_origins=["*"] 라서, 아무
+# 웹페이지나 브라우저에서 /api/batch/run 으로 인제스천 초기화를 걸 수 있었습니다.
+# 대시보드는 같은 출처에서 서빙되므로 CORS 가 없어도 동작합니다.
+# 다른 출처에서 붙여야 하면 OPS_ALLOWED_ORIGINS 에 쉼표로 나열하세요.
+_ALLOWED_ORIGINS = [
+    o.strip() for o in os.environ.get("OPS_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+if _ALLOWED_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_ALLOWED_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+# 파괴적 배치는 실행 전에 type 과 똑같은 문자열을 confirm 으로 받아야 합니다.
+# 오조작과, 인증이 없는 환경에서의 원격 트리거를 함께 막습니다.
+_DESTRUCTIVE_BATCH = {"ingest_reset", "reconcile"}
 
 # ─── 잡 저장소 ────────────────────────────────────────────────────────────────
 _jobs: dict[str, dict] = {}
@@ -277,11 +295,14 @@ def api_sync_log(dept: str = "strategic", limit: int = 20):
     try:
         with conn.cursor() as cur:
             cur.execute(
+                # sync_log 의 시각 컬럼명은 ts 입니다 (schema/ops_log.sql).
+                # created_at 으로 조회하던 코드가 매번 예외로 떨어져
+                # 동기화 이력 패널이 계속 비어 있었습니다.
                 """SELECT id, dept, since_time, modified_found, processed,
                           skipped, errors, new_chunks, new_triplets,
-                          duration_sec, status, created_at
+                          duration_sec, status, ts AS created_at
                    FROM sync_log WHERE dept=%s
-                   ORDER BY created_at DESC LIMIT %s""",
+                   ORDER BY ts DESC LIMIT %s""",
                 (dept, limit),
             )
             logs = _rows(cur)
@@ -311,9 +332,10 @@ def api_mcp_log(dept: str = "strategic", limit: int = 50):
             stats = _rows(cur)
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT id, tool, query, result_count, duration_ms, error, created_at
+                # mcp_request_log 도 시각 컬럼은 ts 입니다.
+                """SELECT id, tool, query, result_count, duration_ms, error, ts AS created_at
                    FROM mcp_request_log WHERE dept=%s
-                   ORDER BY created_at DESC LIMIT %s""",
+                   ORDER BY ts DESC LIMIT %s""",
                 (dept, limit),
             )
             recent = _rows(cur)
@@ -443,6 +465,7 @@ _BATCH_LABELS = {
 class BatchRequest(BaseModel):
     dept: str = "strategic"
     type: str
+    confirm: str = ""
 
 
 @app.post("/api/batch/run")
@@ -455,6 +478,12 @@ def batch_run(req: BatchRequest):
         )
     if req.type not in _BATCH_CMDS:
         raise HTTPException(400, f"알 수 없는 배치 타입: {req.type}")
+    if req.type in _DESTRUCTIVE_BATCH and req.confirm != req.type:
+        raise HTTPException(
+            400,
+            f"'{req.type}' 은(는) 기존 데이터를 삭제합니다. "
+            f"confirm 필드에 '{req.type}' 을(를) 그대로 보내야 실행됩니다.",
+        )
 
     script, extra = _BATCH_CMDS[req.type]
     venv_py = ROOT / ".venv" / "bin" / "python"
@@ -1541,14 +1570,16 @@ async function loadDashboard() {
     <td>+${l.new_chunks ?? 0}</td>
     <td>${l.duration_sec ?? '—'}s</td>
     <td><span class="badge badge-${l.status}">${l.status}</span></td>
-  </tr>`).join('') : '<tr><td colspan="6" class="empty">이력 없음</td></tr>';
+  </tr>`).join('') : `<tr><td colspan="6" class="empty">${
+    syncLog.error ? '조회 실패: ' + escHtml(syncLog.error) : '이력 없음'}</td></tr>`;
 
   // MCP 통계
   const mb     = document.getElementById('mcp-tbody');
   const mstats = mcpLog.stats || [];
   mb.innerHTML = mstats.length ? mstats.map(s => `<tr>
     <td>${s.tool}</td><td>${s.cnt}</td><td>${s.avg_ms ?? '—'}</td><td>${s.avg_results ?? '—'}</td>
-  </tr>`).join('') : '<tr><td colspan="4" class="empty">MCP 사용 기록 없음</td></tr>';
+  </tr>`).join('') : `<tr><td colspan="4" class="empty">${
+    mcpLog.error ? '조회 실패: ' + escHtml(mcpLog.error) : 'MCP 사용 기록 없음'}</td></tr>`;
 
   // Qdrant
   const qi   = document.getElementById('qdrant-info');
@@ -1654,13 +1685,25 @@ function renderPagination(cur, total) {
 }
 
 // ── 배치 실행 ─────────────────────────────────────────────────────────────────
+const DESTRUCTIVE_BATCH = {
+  ingest_reset: '컬렉션과 그래프를 통째로 삭제한 뒤 처음부터 다시 인제스천합니다.\n완료까지 수 시간이 걸리고, 그동안 검색 결과가 비어 있습니다.',
+  reconcile:    'Notion에서 삭제된 페이지의 벡터와 엣지를 DB에서 제거합니다.',
+};
+
 async function runBatch(type) {
   const dept = document.getElementById('batch-dept').value || 'strategic';
+
+  // 파괴적 배치는 눌러서 바로 나가지 않게 합니다.
+  let confirmToken = '';
+  if (DESTRUCTIVE_BATCH[type]) {
+    if (!confirm(`[${dept}] ${type}\n\n${DESTRUCTIVE_BATCH[type]}\n\n계속할까요?`)) return;
+    confirmToken = type;
+  }
 
   const resp = await fetch('/api/batch/run', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({type, dept}),
+    body: JSON.stringify({type, dept, confirm: confirmToken}),
   });
   const data = await resp.json();
 
@@ -1668,7 +1711,7 @@ async function runBatch(type) {
     if (data.job_id) {
       alert('이미 실행 중인 배치가 있습니다.\n현재 Job ID: ' + data.job_id);
     } else {
-      alert('실행 실패: ' + (data.error || resp.statusText));
+      alert('실행 실패: ' + (data.error || data.detail || resp.statusText));
     }
     return;
   }
