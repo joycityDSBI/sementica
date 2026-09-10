@@ -38,8 +38,10 @@ from datetime import UTC, datetime
 
 # ─── 동의어 해결기 (비즈니스 용어집 API) ────────────────────────────────────────
 try:
-    from utils.synonym_resolver import resolve as _resolve_entity
-    from utils.synonym_resolver import resolve_in as _resolve_in_category
+    from utils.synonym_resolver import (
+        resolve as _resolve_entity,
+        resolve_in as _resolve_in_category,
+    )
 except ImportError:
 
     def _resolve_entity(name: str) -> str:  # type: ignore[misc]

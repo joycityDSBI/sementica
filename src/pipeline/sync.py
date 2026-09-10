@@ -76,10 +76,12 @@ from semantica_helper import (  # noqa: E402
 # DB 로거 (POSTGRES_URL 없으면 no-op)
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 try:
-    from db_logger import get_page_hashes as _get_page_hashes
-    from db_logger import get_pages_edit_times as _get_pages_edit_times
-    from db_logger import log_sync_result
-    from db_logger import upsert_notion_page as _upsert_notion_page
+    from db_logger import (
+        get_page_hashes as _get_page_hashes,
+        get_pages_edit_times as _get_pages_edit_times,
+        log_sync_result,
+        upsert_notion_page as _upsert_notion_page,
+    )
 except Exception:
 
     def log_sync_result(*a, **kw):
@@ -1014,8 +1016,7 @@ def main():
     # ── 비즈니스 용어집 사전 미리 로드 (동의어 해결기 워밍업) ────────────────
     # 이벤트 주체 판정(게임 vs 조직)이 용어집 category 에 의존합니다.
     try:
-        from utils.synonym_resolver import categories as _syn_categories
-        from utils.synonym_resolver import preload as _syn_preload
+        from utils.synonym_resolver import categories as _syn_categories, preload as _syn_preload
 
         _syn_preload()
         _cats = _syn_categories()

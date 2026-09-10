@@ -828,8 +828,7 @@ def main():
     # 이벤트 주체 판정(게임 vs 조직)이 용어집 category 에 의존하므로
     # 인제스트 시작 전에 반드시 로드되어 있어야 합니다.
     try:
-        from utils.synonym_resolver import categories as _syn_categories
-        from utils.synonym_resolver import preload as _syn_preload
+        from utils.synonym_resolver import categories as _syn_categories, preload as _syn_preload
 
         _syn_preload()
         _cats = _syn_categories()
