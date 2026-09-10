@@ -46,9 +46,11 @@ from semantica_helper import (
     event_from_db_props,
     extract_with_fallback,
     find_evidence_chunk_id,
+    format_scope_report,
     is_decision_triplet,
     merge_node,
     record_decision_node,
+    reset_scope_report,
     upsert_event_node,
 )
 
@@ -618,8 +620,8 @@ def store_graph(
                 merge_params[pk] = v
                 on_create_parts.append(f"r.{k} = ${pk}")
             on_create_clause = (
-                "ON CREATE SET " + ", ".join(on_create_parts)
-            ) if on_create_parts else ""
+                ("ON CREATE SET " + ", ".join(on_create_parts)) if on_create_parts else ""
+            )
 
             _falkordb.query(
                 "MATCH (s) WHERE id(s) = $_s "
@@ -818,12 +820,23 @@ def main():
     args = parser.parse_args()
 
     # ── 비즈니스 용어집 사전 미리 로드 (동의어 해결기 워밍업) ────────────────
+    # 이벤트 주체 판정(게임 vs 조직)이 용어집 category 에 의존하므로
+    # 인제스트 시작 전에 반드시 로드되어 있어야 합니다.
     try:
+        from utils.synonym_resolver import categories as _syn_categories
         from utils.synonym_resolver import preload as _syn_preload
 
         _syn_preload()
-    except Exception:
-        pass  # 로드 실패해도 인제스트는 계속 진행
+        _cats = _syn_categories()
+        if _cats:
+            print(f"  📖 용어집 카테고리: {_cats}")
+        else:
+            print("  ⚠️  용어집 카테고리 없음 — 게임/조직 판정이 제한됩니다")
+    except Exception as _syn_err:
+        print(f"  ⚠️  용어집 로드 실패 — 동의어·주체 판정 비활성화: {_syn_err}")
+
+    # 주체 판정 리포트 초기화 (미등록 게임·미분류 이벤트 집계)
+    reset_scope_report()
 
     # ── 본부 설정 로드 ──────────────────────────────────────────────────────
     global COLLECTION_NAME, GRAPH_NAME
@@ -945,6 +958,12 @@ def main():
     print(f"  트리플:  {total_tri}개 추출")
     print(f"  그래프:  노드 {total_nod}개 / 엣지 {total_edg}개 저장")
     print(f"  이벤트:  {total_ev}개 :Event 노드 저장")
+
+    # ── 주체 판정 이슈 리포트 ────────────────────────────────────────────────
+    _scope_msg = format_scope_report()
+    if _scope_msg:
+        print()
+        print(_scope_msg)
 
     # ── 로그 저장 ────────────────────────────────────────────────────────────
     log = {

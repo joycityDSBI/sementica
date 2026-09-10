@@ -32,6 +32,7 @@ Semantica 프레임워크 통합 헬퍼
 import contextlib
 import hashlib
 import re
+import threading
 import uuid
 from datetime import UTC, datetime
 
@@ -748,6 +749,83 @@ SCOPE_GAME = "game"
 SCOPE_ORG = "org"
 SCOPE_UNKNOWN = "unknown"
 
+# ─── 주체 판정 리포트 ─────────────────────────────────────────────────────────
+# 인제스트 중 마스터에 없는 게임 후보와 판정 실패 건을 모아 요약에 노출합니다.
+# 이것이 없으면 미등록 게임이 조용히 unverified 로 저장되고, 용어집이
+# 갱신되지 않은 채 방치됩니다.
+_scope_lock = threading.Lock()
+_unverified_games: dict[str, int] = {}
+_unknown_scopes: dict[str, int] = {}  # {샘플 제목: 횟수}
+_unknown_total = 0
+_UNKNOWN_SAMPLE_LIMIT = 8
+
+
+def _record_scope_issue(kind: str, label: str) -> None:
+    """미검증/미분류 주체를 기록합니다 (스레드 안전 — 인제스트는 병렬 실행)."""
+    global _unknown_total
+    with _scope_lock:
+        if kind == SCOPE_GAME:
+            _unverified_games[label] = _unverified_games.get(label, 0) + 1
+        else:
+            _unknown_total += 1
+            if label and (label in _unknown_scopes or len(_unknown_scopes) < _UNKNOWN_SAMPLE_LIMIT):
+                _unknown_scopes[label] = _unknown_scopes.get(label, 0) + 1
+
+
+def scope_report() -> dict:
+    """주체 판정 리포트를 반환합니다.
+
+    Returns:
+        {
+          "unverified_games": {값: 횟수},   # 게임 컬럼 출처인데 용어집 미등록
+          "unknown_total": int,             # 주체를 판정하지 못한 이벤트 수
+          "unknown_samples": {제목: 횟수},  # 그중 일부 샘플
+        }
+    """
+    with _scope_lock:
+        return {
+            "unverified_games": dict(_unverified_games),
+            "unknown_total": _unknown_total,
+            "unknown_samples": dict(_unknown_scopes),
+        }
+
+
+def reset_scope_report() -> None:
+    """리포트를 초기화합니다. 인제스트/동기화 시작 시 호출하세요."""
+    global _unknown_total
+    with _scope_lock:
+        _unverified_games.clear()
+        _unknown_scopes.clear()
+        _unknown_total = 0
+
+
+def format_scope_report(report: dict | None = None) -> str:
+    """리포트를 사람이 읽을 형태로 포맷합니다. 이슈가 없으면 빈 문자열."""
+    rep = report if report is not None else scope_report()
+    unverified = rep.get("unverified_games") or {}
+    unknown_total = rep.get("unknown_total") or 0
+    if not unverified and not unknown_total:
+        return ""
+
+    lines: list[str] = []
+    if unverified:
+        items = sorted(unverified.items(), key=lambda x: x[1], reverse=True)
+        listed = ", ".join(f'"{name}"({cnt}건)' for name, cnt in items[:10])
+        more = f" 외 {len(items) - 10}종" if len(items) > 10 else ""
+        lines.append(f"  ⚠️  용어집 미등록 게임 {len(items)}종: {listed}{more}")
+        lines.append("      → 용어집(category=game)에 등록하거나 Notion 컬럼 배치를 확인하세요")
+    if unknown_total:
+        samples = sorted(
+            (rep.get("unknown_samples") or {}).items(), key=lambda x: x[1], reverse=True
+        )
+        listed = ", ".join(f'"{t[:30]}"' for t, _ in samples[:5])
+        lines.append(
+            f"  ⚠️  주체 미분류 이벤트 {unknown_total}건" + (f" (예: {listed})" if listed else "")
+        )
+        lines.append("      → 제목에 부서명이 없거나 :Team 노드가 아직 없는 경우입니다")
+    return "\n".join(lines)
+
+
 # game 컬럼이 비었을 때 쓰이던 기존 플레이스홀더 — 주체로 취급하지 않습니다.
 _SCOPE_PLACEHOLDERS: frozenset = frozenset({"", "기타", "미정", "없음", "-", "n/a", "na"})
 
@@ -991,6 +1069,12 @@ def upsert_event_node(graph, event: dict) -> int:
         game = scope or game
     elif scope_type == SCOPE_ORG:
         game = ""
+
+    # 인제스트 요약에 노출할 이슈 기록 — 용어집 갱신·데이터 점검의 근거
+    if scope_type == SCOPE_GAME and not scope_verified:
+        _record_scope_issue(SCOPE_GAME, scope or game)
+    elif scope_type == SCOPE_UNKNOWN:
+        _record_scope_issue(SCOPE_UNKNOWN, title)
 
     # event_type 정규화
     if event_type not in EVENT_TYPES:
