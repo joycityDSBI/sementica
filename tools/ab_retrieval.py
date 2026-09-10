@@ -66,15 +66,20 @@ LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
 ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 EMBED_MODEL = "text-multilingual-embedding-002"
-CLAUDE_MODEL = "claude-sonnet-4-6@default"
 
 # 비교할 설정 — (라벨, oversample, coverage_boost, dedupe_threshold)
 # dedupe 1.0 = 비활성화
+#
+# oversample 은 **후보 청크 풀**만 넓힙니다. 반환 페이지 수는 --limit 이
+# 정하므로, 값을 키워도 추가 비용은 Qdrant top-k 하나뿐입니다. 어디서
+# 포화되는지 보려고 12·16 까지 넣었습니다.
 CONFIGS = [
     ("기준 (현행)", 4, 0.20, 1.0),
     ("oversample 1", 1, 0.20, 1.0),
     ("oversample 2", 2, 0.20, 1.0),
     ("oversample 8", 8, 0.20, 1.0),
+    ("oversample 12", 12, 0.20, 1.0),
+    ("oversample 16", 16, 0.20, 1.0),
     ("boost 0.0", 4, 0.00, 1.0),
     ("boost 0.10", 4, 0.10, 1.0),
     ("dedupe 0.85", 4, 0.20, 0.85),
@@ -89,8 +94,8 @@ def main() -> int:
     ap.add_argument(
         "--limit",
         type=int,
-        default=10,
-        help="서브쿼리당 페이지 수 (evaluate.RETRIEVE_LIMIT 과 동일)",
+        default=0,
+        help="서브쿼리당 페이지 수 (0 이면 운영값 utils.retrieval.DEFAULT_PAGE_LIMIT)",
     )
     ap.add_argument(
         "--budget",
@@ -109,6 +114,8 @@ def main() -> int:
     from qdrant_client import QdrantClient
 
     from utils.retrieval import (
+        DECOMPOSE_MODEL_VERTEX,
+        DEFAULT_PAGE_LIMIT,
         dedupe_documents,
         merge_semantic_results,
         search_queries,
@@ -119,11 +126,16 @@ def main() -> int:
     claude = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
     qc = QdrantClient(url=QDRANT_URL)
 
+    # 페이지 수·분해 모델은 운영값을 그대로 씁니다. 여기서 다른 값을 쓰면
+    # 운영과 다른 서브쿼리·다른 문서 집합을 튜닝하게 됩니다.
+    page_limit = args.limit or DEFAULT_PAGE_LIMIT
     budget = args.budget or 60000
 
     def _complete(prompt: str) -> str:
         msg = claude.messages.create(
-            model=CLAUDE_MODEL, max_tokens=400, messages=[{"role": "user", "content": prompt}]
+            model=DECOMPOSE_MODEL_VERTEX,
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
         )
         return msg.content[0].text
 
@@ -133,7 +145,10 @@ def main() -> int:
 
     golden = json.loads(Path(args.golden).read_text(encoding="utf-8"))
     questions = [q for q in golden.get("questions", golden) if q.get("source_url")]
-    print(f"  컬렉션: {collection} | 문항 {len(questions)}개 | 예산 {budget}자\n")
+    print(
+        f"  컬렉션: {collection} | 문항 {len(questions)}개 | "
+        f"페이지/서브쿼리 {page_limit} | 예산 {budget}자\n"
+    )
 
     # ── 1. 분해·임베딩은 문항당 1회만 (모든 설정이 동일 입력을 공유) ──────
     print("  쿼리 분해 + 임베딩 중...")
@@ -151,7 +166,7 @@ def main() -> int:
         print(f"  벡터 검색 (oversample {over})...", end="\r", flush=True)
         for item in cache:
             item["by_over"][over] = [
-                vector_search_pages(qc, collection, v, args.limit, oversample=over)
+                vector_search_pages(qc, collection, v, page_limit, oversample=over)
                 for v in item["vecs"]
             ]
     print(" " * 48, end="\r")
