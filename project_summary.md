@@ -1,7 +1,7 @@
 # Semantica — 프로젝트 전체 요약
 
 > JoyCity 전략사업본부 Notion 기반 온톨로지 검색 솔루션  
-> 최종 업데이트: 2026-09-09 (Entity Linking, FalkorDB 엣지 중복 수정, 재인제스트 성능 개선, Event 노드 개선)
+> 최종 업데이트: 2026-09-10 (이벤트 주체 분류, 타임라인 통합, 한국어 조사 매칭, `sys.path` 버그 수정)
 
 ---
 
@@ -186,11 +186,12 @@ python src/pipeline/sync.py --dept strategic
 
 ### 4-5. Entity Linking — 동의어 해결기 (`src/utils/synonym_resolver.py`)
 
-회사 비즈니스 용어집 API를 통해 엔티티 이름을 정규화하고, 검색 시 동의어를 자동 확장합니다.
+회사 비즈니스 용어집 API를 통해 엔티티 이름을 정규화하고, 검색 시 동의어를 자동 확장하며,
+이벤트 주체가 게임인지 판정하는 근거(`category`)를 제공합니다.
 
 ```
 https://catalog.joycityplay.com/api/glossary/all  (인증 없음)
-→ { "terms": [{ "term": "MAU", "synonyms": ["월간활성유저", "월별활성사용자"] }, ...] }
+→ { "terms": [{ "term": "POTC", "synonyms": ["캐리비안의 해적"], "category": "game" }, ...] }
 ```
 
 **동작 원리**
@@ -199,12 +200,41 @@ https://catalog.joycityplay.com/api/glossary/all  (인증 없음)
 |------|---------|------|
 | `resolve(name)` | 인제스트 시 `merge_node()` 직전 | alias → canonical 정규화 (예: "드래곤슈퍼" → "DS") |
 | `expand(name)` | 검색 시 `graph_search()`, `timeline_search()` | canonical 또는 alias → 모든 표현 확장 (쿼리 포괄 검색) |
+| `resolve_in(name, cat)` | `classify_scope()` | 해당 카테고리 안에서만 canonical 조회 (게임 판정) |
+| `category_of(name)` | 진단 | 용어 분류 반환 (`game` / `KPI` / …) |
+| `terms_in(cat)` | 진단 | 카테고리별 canonical 목록 |
 | `preload()` | `ingest.py` / `sync.py` / `server.py` 시작 | TTL(1시간) 캐시 강제 갱신 |
 
 **FalkorDB 노드 정규화 흐름**:
 ```
 LLM 추출 → "드래곤슈퍼" → resolve() → "DS" → merge_node() → FalkorDB (:Team {name: "DS"})
 ```
+
+**용어집 현황** (2026-09-10 기준): 전체 109개 term, 그중 23개가 `category=game`
+(`3on3, BLESS, CBZ, CCCC, DS, FS1, FS1R, FS2, FSF2, GBTW, GNSS, GOD, GW-CHINA,
+HBZ, IMGN, JTWN, KOFS, ONE, POTC, RESU, TERA, WSB, WWM`).
+`organization` 카테고리는 존재하지 않아 조직 판정은 그래프의 `:Team` 노드로 대체합니다.
+
+**오프라인 스냅샷 폴백 (2026-09-10 추가)**
+
+운영 VM에서 `catalog.joycityplay.com` 접근이 차단되어(`curl` → `000`) 용어집을 받을 수 없습니다.
+용어집이 없으면 동의어 정규화와 주체 판정이 **모두 비활성화**되므로 스냅샷 폴백을 두었습니다.
+
+```bash
+# 접근 가능한 환경에서 스냅샷 갱신 후 커밋
+python tools/fetch_glossary_snapshot.py     # → config/glossary_snapshot.json
+```
+
+| 순서 | 동작 |
+|------|------|
+| 1 | API 호출 (`GLOSSARY_TIMEOUT`, 기본 5초) |
+| 2 | 실패 시 `config/glossary_snapshot.json` 로드 |
+| 3 | 둘 다 실패하면 `_FAIL_RETRY`(120초) 간격으로 재시도, 연속 3회 실패 시 프로세스 내 포기 |
+
+> ⚠️ **재시도 폭주 주의**: `resolve()`/`resolve_in()`은 인제스트 중 **이벤트마다** 호출됩니다.
+> 실패 시 매번 네트워크를 재시도하면 타임아웃마다 파이프라인이 멈추므로,
+> 시도 시각을 기록해 백오프를 걸고 일정 횟수 후 포기합니다.
+> 스냅샷은 `term`·`synonyms`·`category`만 보존하며 `definition` 등은 저장하지 않습니다.
 
 **MCP 검색 확장 흐름**:
 ```
@@ -238,7 +268,7 @@ query: "DS" → expand() → ["DS", "드래곤슈퍼", "Dragon Super"]
 | `Issue` | 문제/리스크 | 이탈율 상승 |
 | `Insight` | 분석 결과 | 세그먼트별 LTV 차이 |
 
-**이벤트 노드 주요 속성** (2026-09-09 개선)
+**이벤트 노드 주요 속성** (2026-09-10 기준)
 ```
 :Event {
     event_id,        # uuid5(source_url) — Notion 행마다 고유
@@ -246,9 +276,13 @@ query: "DS" → expand() → ["DS", "드래곤슈퍼", "Dragon Super"]
     date,            # "YYYY-MM-DD"
     date_ts,         # Unix timestamp (쿼리 범위 필터용)
     year, month, quarter,
-    game,            # PROJECT 컬럼 (예: "RESU")
+    scope,           # 주체 — 게임 코드 또는 조직명 (정본)
+    scope_type,      # game | org | unknown
+    scope_verified,  # 용어집 마스터로 확인되었는지 (bool)
+    game,            # scope_type=game 일 때만 채움 (하위 호환)
     event_type,      # 정규화된 유형 (ua_campaign, ua_creative 등)
-    category,        # 변경카테고리 원문 (예: "캠페인조정") — 신규
+    category,        # 변경카테고리 원문 (예: "캠페인조정")
+    manager,         # 담당자
     source_url,      # Notion 개별 행 URL
 }
 ```
@@ -257,12 +291,42 @@ query: "DS" → expand() → ["DS", "드래곤슈퍼", "Dragon Super"]
 - `title` = page ID 문제: `meta["title"]`(= 파일명 = page_id)이 아닌 DB "메모" 컬럼 우선 사용
 - `event_id` 충돌: 기존 `uuid5(game|event_type|date)` → 같은 날 같은 유형 N건이 1개로 덮임  
   → `uuid5(source_url)` 로 변경 (Notion 행마다 고유 URL)
-- `category` 신규: "캠페인조정", "소재 변경" 등 원문 보존 (event_type 변환 전 값)
+- `category` 추가: "캠페인조정", "소재 변경" 등 원문 보존 (event_type 변환 전 값)
+- `scope` 도입: 아래 "주체 판정" 참고
 
 **`DB_TITLE_KEYS` 우선순위** (메모 컬럼 추출):
 ```
 메모 > memo > 제목 > 이벤트명 > 이벤트제목 > 내용 > description > 설명 > name > 이름
 ```
+
+#### 주체(scope) 판정 — `classify_scope()` (2026-09-10 추가)
+
+**해결한 문제**: 게임 컬럼이 없는 이벤트는 전부 `game="기타"`로 저장되어
+재무실·인사팀 등 서로 다른 부서의 일정이 한 버킷에 뒤섞였고,
+`FOLLOWED_BY`가 `e.game` 기준이라 **재무실 일정이 인사팀 일정의 직전 이벤트로 연결**됐습니다.
+`"기타"`도 `MERGE (g:Game {name: ...})`를 타서 게임이 아닌 것이 게임 목록에 들어갔습니다.
+
+| 순서 | 판정 근거 | 결과 |
+|------|----------|------|
+| ① | 용어집 `category=game` 매칭 (동의어 포함) | `game` / verified |
+| ② | 용어집 `category=organization` 매칭 | `org` / verified |
+| ③ | 게임 컬럼 출처인데 마스터 미등록 | `game` / **unverified** (등록 후보) |
+| ④ | 제목·본문에 등장하는 `:Team` 노드 | `org` |
+| ⑤ | 해당 없음 | `unknown` (scope 비움) |
+
+- ④가 부서 판정의 실질 경로입니다 — Notion DB에 부서 컬럼이 없어 조직 정보가 제목·본문에만 존재하며,
+  트리플 추출이 이미 만든 `:Team` 노드와 대조합니다.
+- ②는 현재 항상 실패합니다 (용어집에 `organization` 카테고리 없음). 추가되면 자동 적용됩니다.
+- `HAD_EVENT`가 `scope_type`에 따라 `:Game` 또는 `:Team`에 연결됩니다.
+- `FOLLOWED_BY`는 `e.scope` 기준이며, scope가 비면 체인을 만들지 않습니다.
+
+**미등록 게임·미분류 리포트**: 인제스트/동기화 종료 시 출력됩니다.
+```
+⚠️  용어집 미등록 게임 2종: "신규타이틀X"(2건), "프로젝트Y"(1건)
+    → 용어집(category=game)에 등록하거나 Notion 컬럼 배치를 확인하세요
+⚠️  주체 미분류 이벤트 2건 (예: "일반 업무 메모", "주간 회의")
+```
+> 이 리포트가 없으면 미등록 게임이 조용히 `unverified`로 쌓이고 용어집이 갱신되지 않습니다.
 
 **관계 어휘 (20종 고정)**
 ```
@@ -338,8 +402,70 @@ python falkordb/export_graph.py --output graph.json --html graph.html
 - **도구 (Tools)**:
   - `semantic_search(query, limit)` — 벡터 유사도 검색 + **Parent Document Retrieval**
   - `graph_search(entity, depth)` — 그래프 엔티티 탐색
-  - `timeline_search(game, event_type, from_date, to_date, limit)` — 이벤트 이력 + **벡터 크로스링킹**
-  - `hybrid_search(query, limit)` — 벡터 + 그래프 통합 + **Parent Document Retrieval** + **linked_pages**
+  - `timeline_search(game, event_type, from_date, to_date, limit, keyword)` — 이벤트 이력 + **벡터 크로스링킹**
+  - `hybrid_search(query, limit)` — 벡터 + 그래프 + **이벤트 타임라인** 통합
+
+#### 한국어 조사 매칭 (`src/utils/korean.py`, 2026-09-10 추가)
+
+**해결한 문제**: 그래프 검색이 질문을 `.split()`으로 쪼개 `n.name CONTAINS <토큰>`을 실행했는데,
+한국어 토큰에는 조사가 붙어 비교가 **자기 자신과 반대 방향**이 됐습니다.
+
+```
+질문 "데사실은 어느 부서와…"  → 토큰 "데사실은"
+노드 이름                      → "데사실"
+n.name CONTAINS "데사실은"     → 매칭 실패
+```
+
+조사가 우연히 없는 토큰만 매칭되어, 그래프 결과가 질문과 무관하게 0~42건으로 요동쳤습니다.
+골든셋 20문항 중 6문항이 그래프 0건이었고, 그중 3문항이 온톨로지가 담당해야 할 관계 질문이었습니다.
+
+| 함수 | 역할 |
+|------|------|
+| `match_nodes_in_text(graph, text)` | **역방향 매칭** — `$text CONTAINS n.name`. 조사와 무관하게 동작 |
+| `strip_particle(word)` | 토큰 끝 조사 1회 제거 (어간 2자 보존 → `고명수`·`우편` 유지) |
+| `entity_candidates(text)` | 원본 + 조사 제거 토큰을 모두 반환 (잘못된 제거로 매치를 잃지 않음) |
+| `contains_as_token(text, name)` | 영문 코드의 단어 경계 검사 — `ONE ⊄ MILESTONE`, `DS ⊄ DSBI` |
+
+> `contains_as_token`이 필요한 이유: 게임 마스터에 `ONE`·`GOD`·`DS` 같은 짧은 코드가 있어
+> 단순 `CONTAINS`는 `MILESTONE`에서 `ONE`을 잡습니다. 한글은 조사가 바로 붙어
+> 경계 판정이 불가능하므로 그대로 통과시키고, 조사 처리는 위 세 함수가 담당합니다.
+
+#### 날짜 범위 추출 (`src/utils/datespan.py`, 2026-09-10 추가)
+
+| 입력 | 결과 |
+|------|------|
+| `2026년 6월 19일` / `2026-06-19` | `2026-06-19` ~ `2026-06-19` |
+| `26년 6월 19일` | 2자리 연도 보정 |
+| `2026년 6월` | `2026-06-01` ~ `2026-06-30` |
+| `2026년 2분기` / `Q2` | `2026-04-01` ~ `2026-06-30` |
+| `2026년 2월 30일` | `2026-02-28` (말일 보정) |
+
+- 분기를 월보다 **먼저** 매칭 — `"2분기"`의 `2`가 월로 오인되지 않도록
+- `"지난달"` 등 상대 표현은 기준 시각에 따라 결과가 달라지므로 **의도적으로 미지원**
+- `has_timeline_intent(text)` — 날짜 표현 또는 시계열 키워드 존재 여부
+
+#### 이벤트 타임라인 통합 (2026-09-10 추가)
+
+날짜 기반 질문이 `:Event` 노드에 닿지 못하던 문제를 해결했습니다.
+`timeline_search`가 별도 도구로만 존재해, 호출자가 그 도구를 직접 고르지 않으면
+이벤트 그래프에 아예 접근할 수 없었습니다.
+
+`hybrid_search`가 `semantica_helper.resolve_timeline_query()`를 **기존 스레드 풀에서 병렬 호출**하므로
+레이턴시가 추가되지 않습니다. 평가 파이프라인(`evaluate.py`)도 같은 함수를 사용해 판정이 어긋나지 않습니다.
+
+**주체 결정 순서**
+1. `:Game` / `:Event.game`에 이름이 있으면 그 게임으로 조회
+2. 아니면 질문에 등장하는 그래프 노드 이름을 `keywords`로 조회
+   — 게임 없는 이벤트는 `"기타"`로 저장되므로 부서명은 `game`이 아닌 제목·설명·카테고리·담당자에서 탐색
+3. 주체 없이 날짜만 있으면 그 기간 전체 조회
+
+**호출 조건**: 날짜 표현 또는 시계열 키워드가 **필수**. 주체·날짜가 모두 없으면 조회하지 않습니다
+(`:Event` 전체 스캔 방지). `"점검 시작은 어느 팀 담당?"`처럼 키워드만 걸리는 질문은 제외됩니다.
+
+```python
+# 부서 업무 일정 — game 이 아닌 keyword 로 전달해야 함
+timeline_search(keyword="재무실", from_date="2026-06-01", to_date="2026-06-30")
+```
 
 **Parent Document Retrieval (2026-09-03 적용)**
 ```
@@ -372,11 +498,11 @@ python falkordb/export_graph.py --output graph.json --html graph.html
 ```python
 # 이벤트 노드의 source_url → 연결된 Notion 원문 첨부
 {
-  "title": "GBTW UA예산 증액",
-  "date": "2026-08",
-  "source_url": "https://app.notion.com/p/...",
-  "page_content": "…Notion 원문 본문 (최대 1500자)…",
-  "page_chunk_count": 12
+    "title": "GBTW UA예산 증액",
+    "date": "2026-08",
+    "source_url": "https://app.notion.com/p/...",
+    "page_content": "…Notion 원문 본문 (최대 1500자)…",
+    "page_chunk_count": 12,
 }
 ```
 
@@ -384,10 +510,10 @@ python falkordb/export_graph.py --output graph.json --html graph.html
 ```python
 # 반환 구조
 {
-  "semantic_results": [...],   # 벡터 검색 결과 (Parent Document Retrieval 적용)
-  "graph_results":   [...],   # 그래프 엔티티
-  "linked_pages":    [...]    # 그래프 엣지 source_url로 연결된 추가 문서
-                              # (semantic_results에 없는 페이지만 포함)
+    "semantic_results": [...],  # 벡터 검색 결과 (Parent Document Retrieval 적용)
+    "graph_results": [...],  # 그래프 엔티티
+    "linked_pages": [...],  # 그래프 엣지 source_url로 연결된 추가 문서
+    # (semantic_results에 없는 페이지만 포함)
 }
 ```
 
@@ -525,6 +651,9 @@ Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 �
 | `scripts/test_mcp.py` | MCP 서버 테스트 |
 | `tools/backfill_html_flag.py` | `has_html_attachment` DB 백필 |
 | `tools/debug_html_blocks.py` | Notion 페이지 HTML 블록 구조 진단 |
+| `tools/fetch_glossary_snapshot.py` | 용어집 오프라인 스냅샷 생성 (VM 네트워크 차단 대응) |
+| `src/eval/gen_golden_set.py` | 현재 데이터에서 골든셋 자동 생성 |
+| `src/eval/evaluate.py` | 골든셋 기반 검색 품질 평가 |
 
 **`tools/backfill_html_flag.py` 사용법**:
 ```bash
@@ -624,6 +753,63 @@ curl http://localhost:4040/api/tunnels
 > ⚠️ **ngrok 무료 플랜**: 재시작 시 URL 변경됨.  
 > URL 변경 후 `snowflake/01_network_access.sql` (Network Rule) 및 `snowflake/02_python_udfs.sql` (UDF 엔드포인트)를 새 URL로 재생성해야 함.
 
+### 7-5. 검색 품질 평가 (골든셋)
+
+```bash
+# ① 현재 데이터에서 골든셋 자동 생성
+python src/eval/gen_golden_set.py --dept strategic --count 20 --baseline
+
+# ② 평가 실행
+python src/eval/evaluate.py --dept strategic --golden data/eval/golden_set_YYYYMMDD.json
+```
+
+결과: `data/eval/eval_result_*.json`, `eval_report_*.md`
+
+**채택 기준 — 검색 통과가 아니라 원문 근거** (2026-09-09 수정)
+
+기존 생성기는 `verify_by_search()`로 **검색 파이프라인이 답할 수 있는 질문만** 채택했습니다.
+그런데 그 함수는 평가와 **동일한 파이프라인**입니다.
+
+```
+질문 생성 → [검색이 답할 수 있는가?] → pass만 채택
+                                          ↓
+              그 골든셋으로 같은 파이프라인 평가 → 당연히 ~100%
+```
+
+결과적으로 "이미 답할 수 있는 질문"만 남아 점수가 인위적으로 높아지고 약점이 측정되지 않았습니다.
+현재는 `verify_grounded()`가 **정답이 소스 원문으로 뒷받침되는지**만 확인하며(LLM 환각 필터),
+검색 통과 여부는 `--baseline` 플래그로 `baseline_pass` 필드에 **참고 기록**만 합니다.
+
+> `baseline_pass: false`인 문항이 곧 **개선 대상**입니다. 이전 방식에서는 그 문항들이 아예 제외됐습니다.
+
+**평가 파이프라인 정렬** (2026-09-09 수정)
+
+평가가 실제 서비스와 다른 파이프라인을, 약 1/6의 정보량으로 측정하고 있었습니다.
+
+| | `server.py` (서비스) | `evaluate.py` (수정 전) |
+|---|---|---|
+| 문서 단위 | 페이지 전체 재조립 (Parent Document Retrieval) | 청크 원본 |
+| 문서당 길이 | 4000자 | 2000자 |
+| 총 전달량 | 자르지 않음 | **5000자 → 실질 2건** |
+
+벡터를 8건 검색해도 LLM은 2건만 봤습니다. 검색은 성공했는데 **전달 단계에서 실패**한 문항들이
+검색 실패로 오인됐습니다. 현재는 `_fetch_full_pages()`를 이식하고 예산 상수를 서비스와 맞췄습니다
+(`PAGE_MAX_CHARS=4000`, `TOP_PAGES=6`, `CONTEXT_MAX_CHARS=26000`).
+
+**평가 이력**
+
+| 일자 | 전체 | 담당자 | 정책·규정 | 관계 | 문서위치 | 복합 | 비고 |
+|------|------|--------|----------|------|---------|------|------|
+| 2026-09-09 ① | 0.775 | 1.00 | 1.00 | 0.70 | 0.67 | 0.33 | 조사 수정 전 |
+| 2026-09-09 ② | 0.825 | 1.00 | 1.00 | **0.90** | 0.67 | 0.33 | 조사 매칭 수정 후 |
+
+② 이후 컨텍스트 예산 정렬·이벤트 통합·동의어 정규화가 추가되어 **측정 조건이 바뀌었으므로
+이전 점수와 직접 비교할 수 없습니다.** 총점보다 카테고리별 변화와 개별 문항의 성패를 봐야 합니다.
+
+> ⚠️ **평가와 서비스가 다른 코드를 탄다**는 점이 반복해서 문제를 일으켰습니다.
+> 컨텍스트 예산 불일치, `utils` 임포트 실패(평가만 통과) 모두 같은 원인입니다.
+> 타임라인 판정은 `resolve_timeline_query()`로 공통화했지만, 벡터·그래프 검색은 여전히 분리돼 있습니다.
+
 ---
 
 ## 8. 구현 완료 / 예정
@@ -652,12 +838,29 @@ curl http://localhost:4040/api/tunnels
 | 20 | 재인제스트 성능 개선 | ✅ | DB 체크 스킵 + 워커 10, 2026-09-09 |
 | 21 | sync.py 코드 검증 및 수정 | ✅ | DB 체크 제거(항상 무의미), seen_edges 타입 수정, preload 추가, 2026-09-09 |
 | 22 | LLM 할루시네이션 방지 | ✅ | EXTRACT_PROMPT 규칙 ② 수정 — 약칭 원형 추측 금지, 2026-09-09 |
-| 23 | Cortex Analyst YAML 모델 | 🔜 | KPI/매출 테이블 시맨틱 모델 작성 필요 |
-| 24 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
-| 25 | LLM 결과 캐싱 | 🔜 | content_hash 기반 triplets 캐시 → --reset 속도 대폭 단축 |
-| 26 | 동의어 사전 "데사실" 등록 | 🔜 | Business Glossary API에 데사실 → 데이터사이언스실 추가 필요 |
-| 27 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
-| 28 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
+| 23 | 엣지 생성 MERGE 전환 | ✅ | `CREATE` → `MERGE {rel_name, source_url}` — DB 레벨 멱등성, 2026-09-09 |
+| 24 | 골든셋 채택 기준 수정 | ✅ | 자기충족 검증 제거 → 원문 근거 기반, `--baseline` 분리, 2026-09-09 |
+| 25 | Claude 리전 분리 | ✅ | 임베딩 리전 오용 수정 (`ANTHROPIC_VERTEX_REGION`), 2026-09-09 |
+| 26 | 한국어 조사 매칭 | ✅ | `utils/korean.py` — 역방향 매칭·조사 제거·단어 경계, 2026-09-10 |
+| 27 | 평가 파이프라인 정렬 | ✅ | Parent Document Retrieval 이식 + 컨텍스트 예산 서비스 일치, 2026-09-09 |
+| 28 | 이벤트 타임라인 통합 | ✅ | `hybrid_search` + `resolve_timeline_query()`, `utils/datespan.py`, 2026-09-10 |
+| 29 | 게임 없는 타임라인 조회 | ✅ | `get_event_chain(keywords=...)` — 부서 업무 일정 대응, 2026-09-10 |
+| 30 | 용어집 카테고리 인덱싱 | ✅ | `category_of()` / `resolve_in()` / `terms_in()`, 2026-09-10 |
+| 31 | 이벤트 주체(scope) 분류 | ✅ | `classify_scope()` — game/org/unknown, `"기타"` 버킷 해소, 2026-09-10 |
+| 32 | 미등록 게임·미분류 리포트 | ✅ | 인제스트 요약에 노출 → 용어집 갱신 순환, 2026-09-10 |
+| 33 | `sys.path` 버그 수정 | ✅ | `eval/` 외 전 진입점에서 `utils` 임포트 실패 → Entity Linking 미작동, 2026-09-10 |
+| 34 | 용어집 오프라인 스냅샷 | ✅ | VM 네트워크 차단 대응 + 재시도 폭주 방지, 2026-09-10 |
+| 35 | VM 용어집 네트워크 복구 | 🔜 | `catalog.joycityplay.com` 접근 차단 (curl → 000). 스냅샷으로 우회 중 |
+| 36 | 평가·서비스 검색 경로 통합 | 🔜 | 타임라인만 공통화됨. 벡터·그래프는 여전히 이중 구현 |
+| 37 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
+| 38 | LLM 결과 캐싱 | 🔜 | content_hash 기반 triplets 캐시 → --reset 속도 대폭 단축 |
+| 39 | 동의어 사전 "데사실" 등록 | 🔜 | Business Glossary API에 데사실 → 데이터사이언스실 추가 필요 |
+| 40 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
+| 41 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
+
+> **Cortex Analyst YAML 모델**은 대상에서 제외되었습니다 — Cortex에 Analytics Agent를 직접 생성하고
+> UDF로 온톨로지 API를 호출하는 구조로 동작 확인이 완료되어, `05_cortex_agent.sql`의
+> Stored Procedure 오케스트레이터와 함께 불필요해졌습니다.
 
 ---
 
@@ -736,6 +939,19 @@ SNOWFLAKE_REST_PORT=8766
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-10 | **`sys.path` 버그 수정** — `eval/` 외 모든 진입점에서 `utils` 임포트 실패. 전부 `try/except` 폴백이라 조용히 넘어갔고, **Entity Linking이 인제스트에서 한 번도 작동한 적 없었음** |
+| 2026-09-10 | 용어집 오프라인 스냅샷 (`config/glossary_snapshot.json`, `tools/fetch_glossary_snapshot.py`) — VM에서 API 차단(curl → 000) 대응 |
+| 2026-09-10 | 용어집 재시도 폭주 방지 — 실패 시 백오프(120초)·3회 후 포기. 이벤트마다 재시도해 인제스트가 멈추던 문제 |
+| 2026-09-10 | 이벤트 주체 분류 `classify_scope()` — game/org/unknown. `"기타"` 버킷 해소, `HAD_EVENT`를 `:Game`/`:Team`으로 분기, `FOLLOWED_BY`를 `scope` 기준으로 |
+| 2026-09-10 | 미등록 게임·미분류 이벤트 리포트 — 인제스트 요약에 노출 |
+| 2026-09-10 | 용어집 카테고리 인덱싱 — `category_of()` / `resolve_in()` / `terms_in()` (game 23종) |
+| 2026-09-10 | 게임명 없는 타임라인 조회 — `get_event_chain(keywords=...)`, `timeline_search(keyword=...)` |
+| 2026-09-10 | 이벤트 타임라인을 `hybrid_search`에 통합 (`resolve_timeline_query()`), 날짜 파서 `utils/datespan.py` 추가 |
+| 2026-09-10 | 한국어 조사 매칭 수정 (`utils/korean.py`) — 역방향 매칭·조사 제거·영문 코드 단어 경계. 관계 카테고리 0.70 → 0.90 |
+| 2026-09-09 | 평가 파이프라인을 서비스와 정렬 — Parent Document Retrieval 이식, 컨텍스트 예산 5000자 → 26000자 |
+| 2026-09-09 | 골든셋 채택 기준 수정 — 자기충족 검증(`verify_by_search`) 제거, 원문 근거(`verify_grounded`) 기반으로 전환 |
+| 2026-09-09 | Claude 리전 분리 — `evaluate.py`·`week1_verify.py`가 임베딩 리전을 Claude에 전달해 400 오류 |
+| 2026-09-09 | 엣지 생성을 `CREATE` → `MERGE {rel_name, source_url}` 로 전환 — DB 레벨 멱등성 확보 |
 | 2026-09-09 | Entity Linking 추가 (`synonym_resolver.py`) — Business Glossary API 기반 동의어 해결, `resolve()` / `expand()` / `preload()` |
 | 2026-09-09 | FalkorDB 엣지 중복 생성 근본 원인 수정 — ① 쿼리 패턴 3-MATCH 분리, ② `db.delete_graph()` → `graph.delete()`, ③ `--reset` 시 DB 체크 스킵 |
 | 2026-09-09 | `ingest.py` `--workers` 기본값 5 → 10, `--reset` 시 DB 중복 체크 건너뜀으로 재인제스트 성능 개선 |
