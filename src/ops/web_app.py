@@ -697,16 +697,21 @@ def _embed_query(query: str) -> list[float]:
     return list(res.embeddings[0].values)
 
 
-def _qdrant_search(collection: str, vec: list[float], top_k: int):
+def _qdrant_search(collection: str, vec: list[float], top_k: int) -> list[dict]:
+    """골든셋 채점용 검색 — **서비스와 같은 경로**(utils.retrieval)를 씁니다.
+
+    이전에는 여기서 raw 청크를 직접 조회했습니다. 그러면 대시보드 점수는
+    청크 검색을, 실제 서비스는 페이지 검색을 재던 셈이라, retrieval.py 를
+    튜닝해도 이 숫자는 움직이지 않았습니다.
+
+    Returns:
+        [{title, source_url, content, score, ...}] — 점수 내림차순
+    """
     from qdrant_client import QdrantClient
 
-    result = QdrantClient(url=QDRANT_URL).query_points(
-        collection_name=collection,
-        query=vec,
-        limit=top_k,
-        with_payload=True,
-    )
-    return result.points  # ScoredPoint 리스트 반환 (deprecated .search() 대체)
+    from utils.retrieval import vector_search_pages
+
+    return vector_search_pages(QdrantClient(url=QDRANT_URL), collection, vec, top_k)
 
 
 @app.post("/api/golden/run")
@@ -724,9 +729,13 @@ def golden_run(dept: str = "strategic"):
     except Exception as e:
         conn.close()
         raise HTTPException(500, str(e)) from e
+    finally:
+        # 임베딩·검색이 수십 초 걸리는 동안 트랜잭션을 열어두면 연결이
+        # idle in transaction 으로 남아 autovacuum 을 막습니다. 결과 기록은
+        # 아래에서 새 연결로 합니다.
+        conn.close()
 
     if not items:
-        conn.close()
         return {"total": 0, "passed": 0, "failed": 0, "avg_score": None, "detail": []}
 
     try:
@@ -734,7 +743,6 @@ def golden_run(dept: str = "strategic"):
 
         collection = load_dept(dept)["qdrant_collection"]
     except Exception as e:
-        conn.close()
         raise HTTPException(500, f"dept_config 오류: {e}") from e
 
     detail = []
@@ -743,8 +751,8 @@ def golden_run(dept: str = "strategic"):
         try:
             vec = _embed_query(query)
             hits = _qdrant_search(collection, vec, top_k)
-            result_titles = [h.payload.get("title", "") for h in hits]
-            result_scores = [round(h.score, 4) for h in hits]
+            result_titles = [h.get("title", "") for h in hits]
+            result_scores = [round(h.get("score", 0.0), 4) for h in hits]
 
             # 기대 제목 중 하나라도 결과 제목에 포함되면 Pass (부분 매칭)
             matched = [
@@ -790,21 +798,30 @@ def golden_run(dept: str = "strategic"):
     failed = total - passed
     avg_score = round(sum(scores) / len(scores), 4) if scores else None
 
-    # 실행 이력 저장
-    try:
-        import json as _json
+    # 실행 이력 저장 — 검색이 끝난 뒤 새 연결로 짧게 씁니다.
+    log_conn = _pg_conn()
+    if log_conn:
+        try:
+            import json as _json
 
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO golden_run_log (dept, total, passed, failed, avg_score, detail) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (dept, total, passed, failed, avg_score, _json.dumps(detail, ensure_ascii=False)),
-            )
-        conn.commit()
-    except Exception:
-        pass
-    finally:
-        conn.close()
+            with log_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO golden_run_log (dept, total, passed, failed, avg_score, detail) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        dept,
+                        total,
+                        passed,
+                        failed,
+                        avg_score,
+                        _json.dumps(detail, ensure_ascii=False),
+                    ),
+                )
+            log_conn.commit()
+        except Exception as e:
+            print(f"⚠️  골든셋 실행 이력 저장 실패: {e}")
+        finally:
+            log_conn.close()
 
     return {
         "total": total,

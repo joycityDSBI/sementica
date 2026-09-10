@@ -12,10 +12,24 @@
 
 이 도구는 LLM 생성·채점을 거치지 않고 검색 단계만 봅니다:
   · 쿼리 분해는 문항당 1회만 수행해 모든 설정이 **동일한 서브쿼리**를 씁니다
-  · 이후 벡터 검색 → 병합 → 중복 제거 → 예산 채우기까지 재현
+  · 임베딩도 문항당 1회만 계산해 재사용합니다
+  · 벡터 검색은 oversample 값마다 실제로 다시 수행합니다 (아래 주의)
+  · 이후 병합 → 중복 제거 → 예산 채우기까지 재현
   · 근거 페이지(source_url)가 최종 컨텍스트에 포함되는지 판정
 
 따라서 같은 입력에 대해 결과가 항상 같고, 설정 간 차이만 드러납니다.
+
+⚠️ **oversample 은 결과를 잘라서 흉내낼 수 없습니다.**
+   vector_search_pages 에서 limit 은 *페이지* 수이고 oversample 은 후보
+   *청크* 풀만 넓힙니다. 예전 구현은 캐시된 페이지 목록을 상위 N개만 남기는
+   식으로 재현하려 했는데, 그건 "페이지를 몇 개 넘길까"를 바꾼 것이라
+   oversample 을 전혀 측정하지 못했습니다. 그래서 지금은 oversample 값마다
+   Qdrant 검색을 다시 돌립니다 (임베딩은 재사용하므로 비용은 낮습니다).
+
+⚠️ **예산 계산은 evaluate.py 보다 낙관적입니다.**
+   evaluate.py 는 그래프·타임라인 텍스트를 먼저 빼고 남은 예산을 문서에
+   씁니다. 여기서는 문서 채널만 보므로, 타임라인이 긴 문항에서는 실제보다
+   많이 들어가는 것으로 나옵니다. 설정 간 *비교*에는 영향이 없습니다.
 
 ⚠️ **관계 카테고리는 이 지표로 판단하지 마세요.**
    관계 문항의 근거는 그래프 트리플이고 source_url 은 벡터 문서를 가리킵니다.
@@ -72,8 +86,18 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="검색 파라미터 A/B")
     ap.add_argument("--dept", default="strategic")
     ap.add_argument("--golden", required=True)
-    ap.add_argument("--limit", type=int, default=10, help="서브쿼리당 페이지 수")
-    ap.add_argument("--budget", type=int, default=0, help="컨텍스트 예산 (0=evaluate.py 값)")
+    ap.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="서브쿼리당 페이지 수 (evaluate.RETRIEVE_LIMIT 과 동일)",
+    )
+    ap.add_argument(
+        "--budget",
+        type=int,
+        default=0,
+        help="컨텍스트 예산 문자 수 (0 이면 evaluate.CONTEXT_MAX_CHARS 기본값 60000)",
+    )
     args = ap.parse_args()
 
     from dept_config import load_dept
@@ -111,29 +135,36 @@ def main() -> int:
     questions = [q for q in golden.get("questions", golden) if q.get("source_url")]
     print(f"  컬렉션: {collection} | 문항 {len(questions)}개 | 예산 {budget}자\n")
 
-    # ── 1. 분해·임베딩·검색은 문항당 1회만 (모든 설정이 동일 입력을 공유) ──
-    print("  쿼리 분해 + 벡터 검색 캐싱 중...")
+    # ── 1. 분해·임베딩은 문항당 1회만 (모든 설정이 동일 입력을 공유) ──────
+    print("  쿼리 분해 + 임베딩 중...")
     cache: list = []
-    max_over = max(c[1] for c in CONFIGS)
     for i, q in enumerate(questions, 1):
         subs, _ = search_queries(q["question"], _complete)
-        # 최대 oversample 로 한 번 검색해두고, 낮은 설정은 상위만 잘라 재현합니다
-        per_sub = [
-            vector_search_pages(qc, collection, _embed_text(sq), args.limit, oversample=max_over)
-            for sq in subs
-        ]
-        cache.append({"q": q, "subs": subs, "per_sub": per_sub})
+        vecs = [_embed_text(sq) for sq in subs]
+        cache.append({"q": q, "subs": subs, "vecs": vecs, "by_over": {}})
         print(f"    [{i}/{len(questions)}] {q['id']}", end="\r", flush=True)
     print(" " * 40, end="\r")
 
-    # ── 2. 설정별 recall 측정 ──────────────────────────────────────────────
+    # ── 2. oversample 값마다 실제 벡터 검색 (같은 임베딩 재사용) ──────────
+    overs = sorted({c[1] for c in CONFIGS})
+    for over in overs:
+        print(f"  벡터 검색 (oversample {over})...", end="\r", flush=True)
+        for item in cache:
+            item["by_over"][over] = [
+                vector_search_pages(qc, collection, v, args.limit, oversample=over)
+                for v in item["vecs"]
+            ]
+    print(" " * 48, end="\r")
+
+    # ── 3. 설정별 recall 측정 ──────────────────────────────────────────────
     # 관계 카테고리는 그래프가 답하므로 벡터 recall 로 판단할 수 없습니다.
     VECTOR_CATS = ("담당자", "정책/규정", "문서위치", "복합")
+    MAX_CONTEXT_DOCS = 25  # evaluate.py 와 동일
     n_vec = sum(1 for it in cache if it["q"].get("category") in VECTOR_CATS)
     n_rel = len(cache) - n_vec
     print(f"\n  설정별 근거 포함률 — 벡터 의존 {n_vec}문항 / 관계 {n_rel}문항\n")
-    print(f"  {'설정':<26} {'벡터recall':>10} {'전체':>7} {'평균순위':>8} {'평균투입':>8}")
-    print("  " + "-" * 64)
+    print(f"  {'설정':<26} {'벡터recall':>10} {'전체':>7} {'평균순위':>12} {'평균투입':>8}")
+    print("  " + "-" * 68)
 
     results: list = []
     for label, over, boost, dedup in CONFIGS:
@@ -146,18 +177,16 @@ def main() -> int:
         for item in cache:
             gold = item["q"]["source_url"]
             is_vec = item["q"].get("category") in VECTOR_CATS
-            # oversample 축소 재현: 상위 (limit*over/max_over) 페이지만 사용
-            keep = max(1, round(args.limit * over / max_over))
-            per_sub = [s[:keep] for s in item["per_sub"]]
+            per_sub = item["by_over"][over]
 
             merged = merge_semantic_results(per_sub, boost=boost)
             if dedup < 1.0:
                 merged = dedupe_documents(merged, threshold=dedup)
 
-            # 예산 채우기 (evaluate.py 와 동일 규칙)
+            # 예산 채우기 — evaluate.py 의 문서 채널만 재현 (docstring 참고)
             total, used = 0, 0
             found = False
-            for j, d in enumerate(merged[:25]):
+            for j, d in enumerate(merged[:MAX_CONTEXT_DOCS]):
                 block = len(d.get("content", "")) + len(d.get("title", "")) + 20
                 if j and total + block > budget:
                     break
@@ -183,7 +212,10 @@ def main() -> int:
         avg_rank = sum(ranks) / len(ranks) if ranks else 0
         avg_used = sum(used_counts) / len(used_counts) if used_counts else 0
         results.append((label, vec_recall, misses))
-        print(f"  {label:<26} {vec_recall:>9.1%} {recall:>7.1%} {avg_rank:>8.1f} {avg_used:>8.1f}")
+        # 평균순위 옆의 (n) 은 근거를 찾은 문항 수입니다. n 이 작을수록 평균이
+        # 좋아 보이므로 (못 찾은 문항이 평균에서 빠지므로) 반드시 같이 봐야 합니다.
+        rank_cell = f"{avg_rank:.1f} ({len(ranks)})"
+        print(f"  {label:<26} {vec_recall:>9.1%} {recall:>7.1%} {rank_cell:>12} {avg_used:>8.1f}")
 
     # ── 3. 기준 대비 차이 ─────────────────────────────────────────────────
     base_label, base_recall, base_misses = results[0]

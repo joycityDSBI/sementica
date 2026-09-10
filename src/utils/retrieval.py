@@ -26,25 +26,42 @@ import re
 PAGE_MAX_CHARS: int = int(os.environ.get("PAGE_MAX_CHARS", "16000"))
 
 # 청크 오버샘플 배수 — 청크를 page_id 로 묶으면 결과 수가 줄어드는 것을 보정합니다.
-# A/B 측정(40문항 근거 포함률): 1배 57.5% / 2배 70.0% / 4배 77.5% / 8배 77.5%.
-# 4 가 적정값이며 8 은 이득이 없습니다. 낮추면 크게 손해입니다.
+# ⚠️ 근거 미확정: 이전에 여기 적혀 있던 "1배 57.5% / 2배 70.0% / 4배 77.5%"는
+#    무효입니다. 측정 도구가 oversample 을 낮추는 대신 결과 페이지 수를 줄이고
+#    있어서, 실제로는 "페이지를 몇 개 넘기느냐"를 잰 값이었습니다.
+#    도구는 고쳤으니(tools/ab_retrieval.py) 다시 측정한 뒤 이 주석을 채우세요.
+#    그전까지 4 는 검증된 값이 아니라 기존 설정을 유지하는 것뿐입니다.
 CHUNK_OVERSAMPLE: int = int(os.environ.get("CHUNK_OVERSAMPLE", "4"))
 
 # 여러 서브쿼리에 공통으로 걸린 문서에 주는 가산율.
-# A/B 측정상 0.0 / 0.10 / 0.20 모두 근거 포함률 77.5% 로 동일했습니다 —
-# 예산이 찰 때까지 채우므로 순위가 조금 달라져도 결국 포함되기 때문입니다.
+# A/B 측정상 0.0 / 0.10 / 0.20 모두 근거 포함률이 같았습니다 — 예산이 찰
+# 때까지 채우므로 순위가 조금 달라져도 결국 포함되기 때문입니다.
+# (이 비교는 같은 oversample 끼리라 위 결함의 영향을 받지 않습니다.)
 # 답변 품질에는 영향이 있을 수 있어 현행값을 유지합니다.
 COVERAGE_BOOST: float = float(os.environ.get("COVERAGE_BOOST", "0.20"))
 
 # near-duplicate 제거 — **기본 비활성(1.0)**.
 # 같은 문서의 여러 버전이 컨텍스트를 중복 점유하는 문제를 노렸으나,
-# A/B 측정 결과 근거 포함률이 77.5% → 70.0% 로 **떨어졌습니다**.
+# A/B 측정 결과 근거 포함률이 **떨어졌습니다** (동일 oversample 비교).
 # 0.85 임계값에서 Q03·Q05, 그리고 정작 고치려던 Q36 까지 잃었습니다 —
 # 유사해 보이는 문서도 세부가 다르고 답은 그 세부에 있으며, 근거가 중복
 # 그룹의 최상위가 아니면 지워지기 때문입니다.
-# 켜려면 환경변수로 임계값을 내리되, 반드시 tools/ab_retrieval.py 로 확인하세요.
+# 파이프라인에는 **연결되어 있지 않습니다** — dedupe_documents 를 호출하는 곳은
+# tools/ab_retrieval.py 뿐이라, 이 환경변수만 바꿔서는 아무것도 달라지지 않습니다.
+# 실제로 켜려면 merge_semantic_results 소비자 쪽에서 호출을 추가해야 하며,
+# 그 전에 반드시 tools/ab_retrieval.py 로 재측정하세요.
 NEAR_DUP_THRESHOLD: float = float(os.environ.get("NEAR_DUP_THRESHOLD", "1.0"))
 NEAR_DUP_PREFIX: int = int(os.environ.get("NEAR_DUP_PREFIX", "600"))
+
+# 서브쿼리당 가져올 페이지 수. 평가와 서비스가 같은 값을 써야 골든셋 점수가
+# 실제 서비스 결과를 뜻합니다 (이전: 평가 10 / 서비스 12).
+DEFAULT_PAGE_LIMIT: int = int(os.environ.get("RETRIEVE_LIMIT", "10"))
+
+# 쿼리 분해용 모델 — 평가와 서비스가 반드시 같아야 합니다. 분해는 검색의 첫
+# 단계라 여기서 갈리면 이후 모든 결과가 갈립니다 (이전: 서비스 Haiku / 평가
+# Sonnet). 서비스는 Anthropic API, 평가는 Vertex 라 모델 ID 표기만 다릅니다.
+DECOMPOSE_MODEL_API: str = os.environ.get("DECOMPOSE_MODEL_API", "claude-haiku-4-5-20251001")
+DECOMPOSE_MODEL_VERTEX: str = os.environ.get("DECOMPOSE_MODEL_VERTEX", "claude-haiku-4-5@20251001")
 
 # 복합 쿼리 판정 임계값.
 COMPLEX_MIN_CHARS: int = 12

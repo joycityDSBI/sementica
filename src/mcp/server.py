@@ -70,6 +70,7 @@ FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 # 평가 파이프라인(evaluate.py)도 같은 모듈을 쓰므로 한쪽만 튜닝되어
 # 서로 다른 검색을 하던 문제가 재발하지 않습니다.
 from utils.retrieval import (
+    DEFAULT_PAGE_LIMIT as _DEFAULT_PAGE_LIMIT,
     fetch_pages_by_source_urls as _fetch_pages_by_source_urls,
     find_entities_in_query as _find_entities,
     merge_semantic_results as _merge_semantic_results,
@@ -86,8 +87,10 @@ def _complete_for_decompose(prompt: str) -> str:
     """
     import anthropic
 
+    from utils.retrieval import DECOMPOSE_MODEL_API
+
     msg = anthropic.Anthropic().messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=DECOMPOSE_MODEL_API,
         max_tokens=400,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -576,7 +579,7 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
 
 
 @mcp.tool()
-def hybrid_search(query: str, limit: int = 12) -> dict[str, Any]:
+def hybrid_search(query: str, limit: int = _DEFAULT_PAGE_LIMIT) -> dict[str, Any]:
     """
     벡터 검색(문서 내용) + 그래프 탐색(관계 구조)을 동시에 수행하는 통합 검색입니다.
     복합 질문을 자동으로 서브쿼리로 분해하여 각각 검색한 뒤 결과를 병합합니다.

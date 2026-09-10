@@ -55,6 +55,8 @@ EMBED_MODEL = "text-multilingual-embedding-002"
 # 서비스(server.py)와 같은 모듈을 쓰므로, 한쪽만 튜닝되어 평가가 다른 검색을
 # 측정하던 문제(coverage 부스트 0.15 vs 0.20, 복합 판정 임계값 등)가 사라집니다.
 from utils.retrieval import (
+    DECOMPOSE_MODEL_VERTEX as _DECOMPOSE_MODEL_VERTEX,
+    DEFAULT_PAGE_LIMIT as _DEFAULT_PAGE_LIMIT,
     find_entities_in_query as _find_entities,
     merge_semantic_results as _merge_semantic_results,
     search_queries as _search_queries,
@@ -62,10 +64,10 @@ from utils.retrieval import (
 )
 
 # 검색·컨텍스트 구성
-# TOP_PAGES 를 개수로만 제한하면 짧은 문서가 상위를 차지할 때 컨텍스트가 텅 빕니다
+# 문서 수로만 제한하면 짧은 문서가 상위를 차지할 때 컨텍스트가 텅 빕니다
 # (실측: 51자 단편 6건이 상위를 독점해 컨텍스트가 958자, 예산 60000자 중 1.6%).
 # 그 상태로 근거 문서가 7위로 밀려 답을 못 했습니다. 이제 예산이 찰 때까지 채웁니다.
-RETRIEVE_LIMIT = 10  # 서브쿼리당 검색할 페이지 수
+RETRIEVE_LIMIT = _DEFAULT_PAGE_LIMIT  # 서브쿼리당 검색할 페이지 수 (서비스와 동일)
 MAX_CONTEXT_DOCS = 25  # 컨텍스트에 넣을 문서 수 상한 (안전장치)
 TOP_RELATIONS = 15  # 컨텍스트에 넣을 그래프 관계 수
 # 전체 컨텍스트 상한 — Sonnet 200K 토큰(한국어 약 13만 자) 대비 여유 있는 값.
@@ -74,10 +76,6 @@ CONTEXT_MAX_CHARS = int(os.environ.get("CONTEXT_MAX_CHARS", "60000"))
 ANSWER_MAX_TOKENS = 800  # 나열형 답변이 중간에 끊기지 않도록
 SCORE_RESPONSE_CHARS = 2500  # 채점 시 응답을 자르는 한도
 
-# 청크 검색 개수 — 페이지 단위 집계 후 TOP_PAGES 만큼 남기므로 넉넉히 가져옵니다.
-# 청크 k개를 page_id 로 묶으면 결과가 1~k개로 줄어듭니다. 긴 문서가 상위를
-# 독점하면 k=5 일 때 페이지 1건만 남아 다른 문서를 아예 보지 못합니다.
-CHUNK_SEARCH_LIMIT = 24
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
@@ -118,7 +116,12 @@ def _load_golden(path: str) -> list:
 
 
 _GOLDEN_PATH = _known.golden
-if _GOLDEN_PATH and Path(_GOLDEN_PATH).exists():
+if _GOLDEN_PATH and not Path(_GOLDEN_PATH).exists():
+    # 조용히 내장 골든셋으로 떨어지면 안 됩니다. 경로를 하루 틀리게 적었을 때
+    # 다른 부서의 옛 문항으로 평가하고도 헤더에는 지정한 파일명이 찍혀,
+    # 점수만 보고 회귀로 오해하게 됩니다.
+    raise SystemExit(f"❌ 골든셋 파일을 찾을 수 없습니다: {_GOLDEN_PATH}")
+if _GOLDEN_PATH:
     GOLDEN_SET = _load_golden(_GOLDEN_PATH)
     print(f"  📂 외부 골든셋 로드: {_GOLDEN_PATH} ({len(GOLDEN_SET)}문항)")
 else:
@@ -312,7 +315,10 @@ def timeline_lookup(graph, qdrant, query: str, limit: int = 20) -> dict:
         return resolve_timeline_query(
             graph, query, limit=limit, qc=qdrant, collection_name=COLLECTION_NAME
         )
-    except Exception:
+    except Exception as e:
+        # 조용히 {} 를 돌려주면 날짜 문항이 근거 없이 채점되고, 그 결과가
+        # 시스템 품질 저하로 보고됩니다. 최소한 눈에는 띄게 남깁니다.
+        print(f"    ⚠️  타임라인 조회 실패: {type(e).__name__}: {e}")
         return {}
 
 
@@ -378,8 +384,9 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
     if claude:
 
         def _complete(prompt: str) -> str:
+            # 분해 모델은 서비스와 동일해야 합니다 (utils.retrieval 정본).
             msg = claude.messages.create(
-                model=CLAUDE_MODEL,
+                model=_DECOMPOSE_MODEL_VERTEX,
                 max_tokens=400,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -505,11 +512,18 @@ def score_with_claude(claude, question: str, answer: str, response: str) -> dict
             return json.loads(text[start:end])
     except Exception as e:
         print(f"    ⚠️  채점 오류: {e}")
-    return {"score": 0.0, "reason": "채점 실패"}
+    # harness_error 로 표시해 "틀린 답"과 구분합니다. 429 한 번에 평균이
+    # 떨어지면 시스템 회귀로 오해하게 됩니다.
+    return {"score": 0.0, "reason": "채점 실패", "harness_error": "채점 실패"}
 
 
-def generate_response(context: str, question: str, claude) -> str:
-    """검색 결과를 바탕으로 답변 생성"""
+def generate_response(context: str, question: str, claude) -> tuple[str, bool]:
+    """검색 결과를 바탕으로 답변 생성.
+
+    Returns:
+        (응답 텍스트, 성공 여부). 실패를 빈 답변으로 뭉개면 채점에서 0.0 이
+        되어 시스템 품질 문제처럼 보입니다.
+    """
     prompt = f"""아래 컨텍스트를 바탕으로 질문에 답하세요. 컨텍스트에 없는 내용은 답하지 마세요.
 
 컨텍스트:
@@ -524,9 +538,9 @@ def generate_response(context: str, question: str, claude) -> str:
             max_tokens=ANSWER_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         )
-        return msg.content[0].text.strip()
+        return msg.content[0].text.strip(), True
     except Exception as e:
-        return f"응답 생성 실패: {e}"
+        return f"응답 생성 실패: {e}", False
 
 
 # ─── 평가 실행 ────────────────────────────────────────────────────────────────
@@ -576,22 +590,24 @@ def run_evaluation():
                     **item,
                     "score": 0.0,
                     "reason": f"검색 실패: {e}",
+                    "harness_error": "검색 실패",
                     "response": "",
                     "search_time": 0,
                 }
             )
-            continue
+            continue  # harness_error 문항은 평균에서 제외됩니다
 
         search_time = round(time.time() - t0, 2)
 
         # 2. 응답 생성
-        response = generate_response(context, question, claude)
+        response, gen_ok = generate_response(context, question, claude)
         print(f"  A: {response[:100]}{'...' if len(response) > 100 else ''}")
 
         # 3. Claude 채점
         scored = score_with_claude(claude, question, answer, response)
         score = scored.get("score", 0.0)
         reason = scored.get("reason", "")
+        harness_error = scored.get("harness_error") or (None if gen_ok else "응답 생성 실패")
 
         score_icon = "✅" if score >= 0.8 else ("⚡" if score >= 0.4 else "❌")
         print(f"  {score_icon} 점수: {score:.1f} | {reason}")
@@ -611,18 +627,27 @@ def run_evaluation():
             "search_time": search_time,
             "sem_count": sem_count,
             "grp_count": grp_count,
+            "used_docs": search_result.get("used_docs"),
         }
+        if harness_error:
+            row["harness_error"] = harness_error
         results.append(row)
 
-        if cat not in category_scores:
-            category_scores[cat] = []
-        category_scores[cat].append(score)
+        # 평가 하네스 자체가 실패한 문항은 카테고리·전체 평균 어디에도 넣지
+        # 않습니다. 예전에는 검색 실패만 카테고리에서 빠지고 전체 평균에는
+        # 0.0 으로 들어가, 카테고리 표에는 1.00 인데 전체는 0.4 인 상태가
+        # 나올 수 있었습니다.
+        if not harness_error:
+            category_scores.setdefault(cat, []).append(score)
 
         time.sleep(0.5)  # API 요청 간격
 
     # ─── 결과 집계 ────────────────────────────────────────────────────────────
-    total_score = sum(r["score"] for r in results) / len(results) if results else 0
-    passed = sum(1 for r in results if r["score"] >= 0.7)
+    # 하네스 실패(API 오류 등)는 시스템 품질이 아니므로 분모에서 뺍니다.
+    scored_rows = [r for r in results if not r.get("harness_error")]
+    failed_rows = [r for r in results if r.get("harness_error")]
+    total_score = sum(r["score"] for r in scored_rows) / len(scored_rows) if scored_rows else 0
+    passed = sum(1 for r in scored_rows if r["score"] >= 0.7)
 
     print("=" * 60)
     print("  📊 평가 결과 요약")
@@ -630,7 +655,14 @@ def run_evaluation():
     print(
         f"  전체 평균:  {total_score:.3f} ({'✅ 목표 달성' if total_score >= 0.7 else '❌ 목표 미달'}, 목표 0.70)"
     )
-    print(f"  통과 (≥0.7): {passed}/{len(results)}문항")
+    print(f"  통과 (≥0.7): {passed}/{len(scored_rows)}문항")
+    if failed_rows:
+        kinds: dict[str, int] = {}
+        for r in failed_rows:
+            kinds[r["harness_error"]] = kinds.get(r["harness_error"], 0) + 1
+        detail = ", ".join(f"{k} {v}건" for k, v in sorted(kinds.items()))
+        print(f"  ⚠️  집계 제외 {len(failed_rows)}문항 (평가 하네스 실패: {detail})")
+        print(f"      해당 문항: {', '.join(r['id'] for r in failed_rows)}")
     print()
     print("  카테고리별:")
     for cat, scores in category_scores.items():
@@ -641,7 +673,7 @@ def run_evaluation():
 
     # 난이도별
     for diff in ["easy", "medium", "hard"]:
-        d_scores = [r["score"] for r in results if r["difficulty"] == diff]
+        d_scores = [r["score"] for r in scored_rows if r["difficulty"] == diff]
         if d_scores:
             avg = sum(d_scores) / len(d_scores)
             print(f"  {diff:<8}: {avg:.2f} ({len(d_scores)}문항)")
@@ -656,8 +688,12 @@ def run_evaluation():
         json.dumps(
             {
                 "timestamp": ts,
+                "golden_set": _GOLDEN_PATH or "(내장 기본 골든셋)",
+                "collection": COLLECTION_NAME,
                 "total_score": round(total_score, 4),
                 "passed": passed,
+                "scored": len(scored_rows),
+                "harness_failed": len(failed_rows),
                 "category_scores": {
                     c: round(sum(s) / len(s), 4) for c, s in category_scores.items()
                 },
@@ -674,7 +710,10 @@ def run_evaluation():
         "# Semantica 골든셋 평가 결과\n",
         f"- **평가일시**: {ts}",
         f"- **전체 평균**: {total_score:.3f} ({'✅ 목표 달성' if total_score >= 0.7 else '❌ 목표 미달'})",
-        f"- **통과 문항**: {passed}/20\n",
+        f"- **골든셋**: {_GOLDEN_PATH or '(내장 기본 골든셋)'}",
+        f"- **통과 문항**: {passed}/{len(scored_rows)}"
+        + (f" (하네스 실패로 {len(failed_rows)}문항 제외)" if failed_rows else "")
+        + "\n",
         "## 카테고리별 점수\n",
         "| 카테고리 | 평균 점수 | 문항 수 |",
         "|---------|---------|--------|",
