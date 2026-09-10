@@ -80,6 +80,8 @@ FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 COLLECTION_NAME = "joycity_pages"  # --dept 없을 때 기본값
 GRAPH_NAME = "joycity_kg"  # --dept 없을 때 기본값
+# 용어집 진단 메시지용 기본 URL (synonym_resolver 와 동일 값)
+GLOSSARY_DEFAULT = "https://catalog.joycityplay.com/api/glossary/all"
 # Vertex AI 다국어 임베딩 (한국어 지원, 768차원)
 EMBED_MODEL_NAME = "text-multilingual-embedding-002"
 EMBED_DIM = 768
@@ -834,7 +836,10 @@ def main():
         if _cats:
             print(f"  📖 용어집 카테고리: {_cats}")
         else:
-            print("  ⚠️  용어집 카테고리 없음 — 게임/조직 판정이 제한됩니다")
+            print("  ⚠️  용어집을 사용할 수 없습니다 (네트워크·서비스 확인 필요)")
+            print("      → 동의어 정규화와 게임/조직 판정이 비활성화됩니다.")
+            print("      → 모든 이벤트가 scope_type='unknown' 으로 저장됩니다.")
+            print(f"      → 확인: curl -m 5 {os.environ.get('GLOSSARY_API_URL', GLOSSARY_DEFAULT)}")
     except Exception as _syn_err:
         print(f"  ⚠️  용어집 로드 실패 — 동의어·주체 판정 비활성화: {_syn_err}")
 

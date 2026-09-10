@@ -57,6 +57,16 @@ GLOSSARY_CATEGORY_URL: str = os.environ.get(
 _FALLBACK_CATEGORIES: tuple[str, ...] = ("game", "organization")
 
 _TTL: float = 3600.0  # 1시간 캐시
+_HTTP_TIMEOUT: float = float(os.environ.get("GLOSSARY_TIMEOUT", "5"))
+# 로드 실패 후 재시도까지의 최소 간격. 이것이 없으면 캐시가 비어 있는 동안
+# resolve()/resolve_in() 호출마다 네트워크 재시도가 일어나, 이벤트 단위로
+# 호출되는 인제스트가 타임아웃마다 멈춥니다.
+_FAIL_RETRY: float = 120.0
+# 연속 실패가 이 횟수에 도달하면 해당 프로세스에서는 더 시도하지 않습니다.
+# (용어집 서버에 접근할 수 없는 환경에서 인제스트 전체가 지연되는 것을 방지)
+_MAX_FAILS: int = 3
+_fail_count: int = 0
+_last_attempt: float = -1e9
 
 # {alias/term → canonical_term}
 _alias_map: dict[str, str] = {}
@@ -97,9 +107,13 @@ def _index_terms(terms: list, alias: dict, expand_m: dict, cat_of: dict, by_cat:
 def _load() -> None:
     """용어집 API에서 전체 사전을 로드하고 내부 캐시를 갱신합니다."""
     global _alias_map, _expand_map, _category_of, _by_category, _loaded_at
+    global _fail_count, _last_attempt
+
+    # 성공·실패와 무관하게 시도 시각을 기록해 재시도 폭주를 막습니다.
+    _last_attempt = time.monotonic()
 
     try:
-        resp = httpx.get(GLOSSARY_URL, timeout=10)
+        resp = httpx.get(GLOSSARY_URL, timeout=_HTTP_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
 
@@ -115,7 +129,9 @@ def _load() -> None:
         if not by_cat:
             for cat in _FALLBACK_CATEGORIES:
                 try:
-                    r = httpx.get(GLOSSARY_CATEGORY_URL, params={"category": cat}, timeout=10)
+                    r = httpx.get(
+                        GLOSSARY_CATEGORY_URL, params={"category": cat}, timeout=_HTTP_TIMEOUT
+                    )
                     r.raise_for_status()
                     _index_terms(r.json().get("terms", []), alias, expand_m, cat_of, by_cat)
                 except Exception as cat_exc:
@@ -126,6 +142,7 @@ def _load() -> None:
         _category_of = cat_of
         _by_category = by_cat
         _loaded_at = time.monotonic()
+        _fail_count = 0
         logger.info(
             "용어집 로드 완료: %d개 term, %d개 alias, 카테고리 %s (URL: %s)",
             len(expand_m),
@@ -135,9 +152,17 @@ def _load() -> None:
         )
 
     except Exception as exc:
+        _fail_count += 1
         if not _alias_map:
             # 최초 로드 실패 — 동의어 해결 없이 계속 동작
-            logger.warning("용어집 최초 로드 실패 — 동의어 해결 비활성화: %s", exc)
+            giving_up = " (이 프로세스에서 재시도 중단)" if _fail_count >= _MAX_FAILS else ""
+            logger.warning(
+                "용어집 최초 로드 실패 %d/%d — 동의어 해결 비활성화%s: %s",
+                _fail_count,
+                _MAX_FAILS,
+                giving_up,
+                exc,
+            )
         else:
             # 갱신 실패 — 이전 캐시 유지
             logger.warning(
@@ -148,8 +173,22 @@ def _load() -> None:
 
 
 def _ensure() -> None:
-    """TTL 초과 시 사전을 갱신합니다."""
-    if time.monotonic() - _loaded_at > _TTL:
+    """필요 시 사전을 로드/갱신합니다.
+
+    ※ 재시도 폭주 방지: resolve()/resolve_in() 은 인제스트 중 이벤트마다
+      호출되므로, 캐시가 비어 있다고 매번 네트워크를 때리면 타임아웃마다
+      파이프라인이 멈춥니다. 실패 시에는 _FAIL_RETRY 간격을 두고,
+      연속 _MAX_FAILS 회 실패하면 해당 프로세스에서 완전히 포기합니다.
+    """
+    if _alias_map:
+        if time.monotonic() - _loaded_at > _TTL:
+            _load()
+        return
+
+    # 아직 한 번도 로드하지 못한 상태
+    if _fail_count >= _MAX_FAILS:
+        return  # 접근 불가 환경 — 더 시도하지 않음
+    if time.monotonic() - _last_attempt > _FAIL_RETRY:
         _load()
 
 
@@ -234,9 +273,16 @@ def categories() -> dict[str, int]:
     return {c: len(set(m.values())) for c, m in _by_category.items()}
 
 
+def is_available() -> bool:
+    """용어집이 로드되어 사용 가능한 상태인지 — 진단용."""
+    return bool(_alias_map)
+
+
 def preload() -> None:
     """
     인제스트 파이프라인·MCP 서버 시작 시 명시적으로 미리 로드합니다.
-    TTL과 무관하게 강제 갱신합니다.
+    TTL·실패 카운터와 무관하게 강제로 한 번 시도합니다.
     """
+    global _fail_count
+    _fail_count = 0  # 명시적 요청이므로 이전 실패 이력을 무시하고 재시도
     _load()
