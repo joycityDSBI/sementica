@@ -694,6 +694,33 @@ if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
 # ─── 5. 후보 선별 및 균형 조정 ───────────────────────────────────────────────
 print("⚖️  카테고리 균형 조정 중...")
 
+
+def _norm_question(q: str) -> str:
+    """중복 판정용 정규화 — 공백·문장부호·대소문자 차이를 무시합니다."""
+    return re.sub(r"[\s\W_]+", "", (q or "").lower())
+
+
+# 같은 질문 중복 제거.
+# 같은 문서의 여러 버전(예: "점검 진행 프로세스" 사본들)이 각각 후보로 들어와
+# 글자 하나 다르지 않은 질문이 여러 문항으로 채택된 적이 있습니다. 전부 같은
+# 점수를 받으므로 평균이 부풀고, 40문항인데 실제로 검증하는 것은 37개였습니다.
+_seen_q: set = set()
+_dupes: list = []
+_deduped: list = []
+for item in all_candidates:
+    key = _norm_question(item.get("question", ""))
+    if not key or key in _seen_q:
+        _dupes.append(item.get("question", ""))
+        continue
+    _seen_q.add(key)
+    _deduped.append(item)
+
+if _dupes:
+    print(f"  중복 질문 {len(_dupes)}건 제거 (후보 {len(all_candidates)} → {len(_deduped)})")
+    for q in _dupes[:3]:
+        print(f"    - {q[:60]}")
+all_candidates = _deduped
+
 # 카테고리별로 분류
 by_cat: dict = {c: [] for c in CATEGORY_TARGETS}
 for item in all_candidates:
@@ -795,6 +822,17 @@ if args.baseline:
         "measured": len(_bp),
         "passed": sum(1 for q in _bp if q["baseline_pass"]),
     }
+# 최종 점검 — 위에서 걸렀어도 한 번 더 확인합니다. 중복이 남으면 평균이
+# 부풀고 실제 검증 범위가 문항 수보다 좁아집니다.
+_final_keys = [_norm_question(q["question"]) for q in final_set]
+_final_dupes = len(_final_keys) - len(set(_final_keys))
+_sources = {q.get("source_url", "") for q in final_set if q.get("source_url")}
+print(f"  최종 {len(final_set)}문항 / 서로 다른 출처 문서 {len(_sources)}개")
+if _final_dupes:
+    print(f"  ⚠️  중복 질문 {_final_dupes}건이 최종 세트에 남아 있습니다 — 확인하세요")
+meta["distinct_sources"] = len(_sources)
+meta["duplicate_questions"] = _final_dupes
+
 output = {"meta": meta, "questions": final_set}
 Path(OUT_PATH).write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
 print(f"💾 저장 완료: {OUT_PATH}")
