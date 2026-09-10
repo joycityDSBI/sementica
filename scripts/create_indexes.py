@@ -23,55 +23,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from falkordb import FalkorDB  # type: ignore
 from src.pipeline.dept_config import list_depts, load_dept
 
-# ── 생성할 인덱스 목록 (label, property) ──────────────────────────────────────
-# FalkorDB: CREATE INDEX FOR (n:Label) ON (n.prop)
-INDEX_SPECS: list[tuple[str, str]] = [
-    # ── 공통 노드 ────────────────────────────────────────────────────
-    ("Person", "name"),
-    ("Team", "name"),
-    ("Process", "name"),
-    ("System", "name"),
-    ("Policy", "name"),
-    ("Document", "name"),
-    ("Role", "name"),
-    # ── Decision 온톨로지 ─────────────────────────────────────────────
-    ("Decision", "subject"),
-    ("Decision", "outcome"),
-    ("Decision", "date"),
-    # ── Event·Game 온톨로지 ───────────────────────────────────────────
-    ("Event", "game"),
-    ("Event", "event_type"),
-    ("Event", "date_ts"),  # range 탐색 핵심
-    ("Game", "name"),
-]
+# 인덱스 목록은 semantica_helper 가 정본입니다. ingest 도 --reset 직후 같은
+# 목록으로 인덱스를 만드므로, 여기에 따로 두면 두 곳이 어긋납니다.
+from src.pipeline.semantica_helper import INDEX_SPECS, ensure_indexes
 
 
 def _create_indexes_for_dept(graph_name: str, client: FalkorDB) -> None:
     """단일 그래프에 모든 인덱스를 생성합니다."""
     graph = client.select_graph(graph_name)
-    print(f"\n[{graph_name}] 인덱스 생성 시작…")
-
-    created = 0
-    skipped = 0
-    failed = 0
-
-    for label, prop in INDEX_SPECS:
-        cypher = f"CREATE INDEX FOR (n:{label}) ON (n.{prop})"
-        try:
-            graph.query(cypher)
-            print(f"  ✅ {label}.{prop}")
-            created += 1
-        except Exception as exc:
-            msg = str(exc).lower()
-            # "already indexed" 계열 메시지는 정상 (멱등)
-            if "already indexed" in msg or "already exists" in msg or "equivalent index" in msg:
-                print(f"  ⏭  {label}.{prop} (이미 존재)")
-                skipped += 1
-            else:
-                print(f"  ❌ {label}.{prop} — {exc}")
-                failed += 1
-
-    print(f"[{graph_name}] 완료: 생성 {created}, 기존 {skipped}, 실패 {failed}")
+    print(f"\n[{graph_name}] 인덱스 생성 시작… ({len(INDEX_SPECS)}개)")
+    stats = ensure_indexes(graph, verbose=True)
+    print(
+        f"[{graph_name}] 완료: 생성 {stats['created']}, "
+        f"기존 {stats['existing']}, 실패 {stats['failed']}"
+    )
 
 
 def main() -> None:

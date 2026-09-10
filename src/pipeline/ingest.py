@@ -46,6 +46,7 @@ from semantica_helper import (
     classify_page,
     content_hash,
     detect_realization_status,
+    ensure_indexes,
     event_from_db_props,
     extract_with_fallback,
     find_evidence_chunk_id,
@@ -321,6 +322,11 @@ def init_falkordb(reset: bool = False):
 
         _falkordb = db.select_graph(GRAPH_NAME)
         print(f"  ✅ FalkorDB 연결 완료 — 그래프: {GRAPH_NAME}")
+        # 인덱스는 여기서 만듭니다. --reset 이 그래프를 지우면 인덱스도 함께
+        # 사라지는데, 인제스트는 노드마다 name 으로, 이벤트마다 event_id 로
+        # MERGE 하므로 인덱스 없이 돌리면 전건 스캔이 쌓여 급격히 느려집니다.
+        # (별도 실행하던 scripts/create_indexes.py 와 같은 목록을 씁니다.)
+        ensure_indexes(_falkordb)
         return True
     except Exception as e:
         print(f"  ❌ FalkorDB 연결 실패: {e}")

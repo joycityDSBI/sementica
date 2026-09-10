@@ -81,6 +81,66 @@ def _check_semantica_once():
         print(f"  [Semantica] 초기화 실패: {e}")
 
 
+# ─── 0. 인덱스 ───────────────────────────────────────────────────────────────
+# (label, property). ingest 와 scripts/create_indexes.py 가 같은 목록을 씁니다.
+#
+# 인덱스는 조회 성능만의 문제가 아닙니다. 인제스트 자체가 노드마다
+# MERGE (n:Label {name: ...}) 를, 이벤트마다 MERGE (e:Event {event_id: ...}) 를
+# 실행하므로, 인덱스가 없으면 매 건이 레이블 전체 스캔이 되어 O(n²) 로 늘어납니다.
+INDEX_SPECS: list[tuple[str, str]] = [
+    # ── 트리플 엔티티 8종 (+ 타입 미상 폴백) — merge_node 가 name 으로 MERGE ──
+    ("Person", "name"),
+    ("Team", "name"),
+    ("Process", "name"),
+    ("System", "name"),
+    ("Policy", "name"),
+    ("Document", "name"),
+    ("Role", "name"),
+    ("Decision", "name"),
+    ("Unknown", "name"),
+    # ── Decision 온톨로지 ─────────────────────────────────────────────
+    ("Decision", "subject"),
+    ("Decision", "outcome"),
+    ("Decision", "date"),
+    # ── Event·Game 온톨로지 ───────────────────────────────────────────
+    ("Event", "event_id"),  # upsert_event_node 의 MERGE 키
+    ("Event", "scope"),  # FOLLOWED_BY 앞뒤 탐색 · get_event_chain 필터
+    ("Event", "game"),
+    ("Event", "event_type"),
+    ("Event", "date_ts"),  # range 탐색 핵심
+    ("Game", "name"),
+]
+
+# 이미 존재하는 인덱스를 다시 만들 때 FalkorDB 가 내는 메시지들
+_INDEX_EXISTS_MARKERS = ("already indexed", "already exists", "equivalent index")
+
+
+def ensure_indexes(graph, verbose: bool = True) -> dict:
+    """INDEX_SPECS 를 멱등적으로 생성합니다. {created, existing, failed} 반환.
+
+    그래프를 삭제하면 인덱스도 함께 사라지므로, --reset 인제스트에서는
+    데이터를 넣기 **전에** 호출해야 합니다.
+    """
+    stats = {"created": 0, "existing": 0, "failed": 0}
+    for label, prop in INDEX_SPECS:
+        try:
+            graph.query(f"CREATE INDEX FOR (n:{label}) ON (n.{prop})")
+            stats["created"] += 1
+        except Exception as exc:
+            if any(m in str(exc).lower() for m in _INDEX_EXISTS_MARKERS):
+                stats["existing"] += 1
+            else:
+                stats["failed"] += 1
+                if verbose:
+                    print(f"    ⚠️  인덱스 실패 {label}.{prop} — {exc}")
+    if verbose:
+        print(
+            f"  🔑 인덱스: 생성 {stats['created']} / 기존 {stats['existing']}"
+            + (f" / 실패 {stats['failed']}" if stats["failed"] else "")
+        )
+    return stats
+
+
 # ─── 1. 엔티티 중복 제거 (MERGE) ─────────────────────────────────────────────
 
 
