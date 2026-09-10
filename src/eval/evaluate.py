@@ -51,10 +51,15 @@ EMBED_MODEL = "text-multilingual-embedding-002"
 # 실제 서비스(server.py)와 조건을 일치시킵니다. 이전에는 페이지당 2000자,
 # 전체 5000자로 잘라 벡터를 8건 검색해도 LLM은 2건만 보았고, 검색이 성공한
 # 문항도 전달 단계에서 실패했습니다(평가가 시스템을 과소평가).
-PAGE_MAX_CHARS = 4000  # server.py `_fetch_full_pages(max_chars=4000)` 와 동일
-TOP_PAGES = 6  # 컨텍스트에 넣을 페이지 수 (4000자 x 6 = 24000자)
+# 페이지 본문 한도 — server.py PAGE_MAX_CHARS 와 동일.
+# 4000자는 과도하게 보수적이어서 긴 문서의 뒤쪽 근거가 잘려나갔습니다.
+# 한도를 넘으면 매칭 청크 중심으로 윈도우를 잡습니다.
+PAGE_MAX_CHARS = int(os.environ.get("PAGE_MAX_CHARS", "16000"))
+TOP_PAGES = 6  # 컨텍스트에 넣을 페이지 수
 TOP_RELATIONS = 15  # 컨텍스트에 넣을 그래프 관계 수
-CONTEXT_MAX_CHARS = 26000  # 문서 24000자 + 그래프 요약 여유분
+# 전체 컨텍스트 상한 — Sonnet 200K 토큰(한국어 약 13만 자) 대비 여유 있는 값.
+# 문서를 점수 순으로 채우다 이 한도에서 중단합니다.
+CONTEXT_MAX_CHARS = int(os.environ.get("CONTEXT_MAX_CHARS", "60000"))
 ANSWER_MAX_TOKENS = 800  # 나열형 답변이 중간에 끊기지 않도록
 SCORE_RESPONSE_CHARS = 2500  # 채점 시 응답을 자르는 한도
 
@@ -279,11 +284,45 @@ def embed(client, text: str) -> list:
 
 
 # ─── 검색 함수 ────────────────────────────────────────────────────────────────
-def _fetch_full_pages(qdrant, page_ids: list, max_chars: int = PAGE_MAX_CHARS) -> dict:
+def _window_around_anchor(full_text: str, ordered: list, max_chars: int, anchor) -> str:
+    """max_chars 초과 시 잘라낼 구간 결정 — server.py 와 동일한 정책.
+
+    매칭된 청크(anchor)를 반드시 포함하도록 윈도우를 잡습니다.
+    앞부분만 남기면 문서 뒤쪽에서 찾은 근거를 버리게 됩니다.
+    """
+    if len(full_text) <= max_chars:
+        return full_text
+    if anchor is None:
+        return full_text[:max_chars]
+
+    offset = 0
+    for c in ordered:
+        if c["index"] == anchor:
+            break
+        offset += len(c["text"]) + 2
+    else:
+        return full_text[:max_chars]
+
+    start = max(0, offset - max_chars // 3)
+    end = min(len(full_text), start + max_chars)
+    start = max(0, end - max_chars)
+    piece = full_text[start:end]
+    if start > 0:
+        piece = "…(앞부분 생략)…\n\n" + piece
+    if end < len(full_text):
+        piece = piece + "\n\n…(뒷부분 생략)…"
+    return piece
+
+
+def _fetch_full_pages(
+    qdrant, page_ids: list, max_chars: int = PAGE_MAX_CHARS, anchors: dict | None = None
+) -> dict:
     """page_id 목록의 모든 청크를 chunk_index 순으로 이어붙여 전체 본문을 반환합니다.
 
     Parent Document Retrieval — server.py `_fetch_full_pages()`와 동일한 방식입니다.
     평가가 실제 서비스와 다른 정보량으로 측정되지 않도록 조건을 일치시킵니다.
+
+    anchors: {page_id: chunk_index} — 잘라야 할 때 이 청크가 포함되도록 합니다.
     """
     if not page_ids:
         return {}
@@ -328,8 +367,10 @@ def _fetch_full_pages(qdrant, page_ids: list, max_chars: int = PAGE_MAX_CHARS) -
         out[pid] = {
             "title": page["title"],
             "url": page["url"],
-            "text": full[:max_chars],
+            "text": _window_around_anchor(full, ordered, max_chars, (anchors or {}).get(pid)),
             "chunk_count": len(ordered),
+            "total_chars": len(full),
+            "truncated": len(full) > max_chars,
         }
     return out
 
@@ -365,8 +406,9 @@ def semantic_search(embed_client, qdrant, query: str, limit: int = CHUNK_SEARCH_
         with_payload=True,
     )
 
-    # 청크 → page_id 단위로 최고 점수 집계
+    # 청크 → page_id 단위로 최고 점수 집계 (+ 잘라낼 때 기준이 될 청크 기록)
     page_scores: dict = {}
+    anchors: dict = {}
     fallback: dict = {}
     for h in result.points:
         p = h.payload or {}
@@ -376,13 +418,14 @@ def semantic_search(embed_client, qdrant, query: str, limit: int = CHUNK_SEARCH_
             continue
         if pid not in page_scores or score > page_scores[pid]:
             page_scores[pid] = score
+            anchors[pid] = p.get("chunk_index", 0)
             fallback[pid] = {
                 "title": p.get("title", ""),
                 "text": p.get("text", ""),
                 "url": p.get("source_url", ""),
             }
 
-    full_pages = _fetch_full_pages(qdrant, list(page_scores.keys()))
+    full_pages = _fetch_full_pages(qdrant, list(page_scores.keys()), anchors=anchors)
 
     out = []
     for pid, score in page_scores.items():
@@ -590,11 +633,16 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
         if ev.get("description"):
             timeline_text += f"    {ev['description'][:300]}\n"
 
-    # 상위 TOP_PAGES 건만 — 무제한이면 CONTEXT_MAX_CHARS 에서 뒤쪽이 잘려
-    # 하위 순위 문서가 상위 문서를 밀어내는 문제가 생깁니다.
+    # 상위 순위부터 예산 안에서 채웁니다. 개수(TOP_PAGES)와 총량
+    # (CONTEXT_MAX_CHARS) 중 먼저 도달하는 쪽에서 멈추므로, 문서 하나가
+    # 길더라도 뒤쪽이 통째로 잘려나가지 않습니다.
+    doc_budget = CONTEXT_MAX_CHARS - len(graph_text) - len(timeline_text) - 200
     vector_text = ""
-    for s in sem_final[:TOP_PAGES]:
-        vector_text += f"[{s['title']}]\n{s['text']}\n\n"
+    for i, s in enumerate(sem_final[:TOP_PAGES]):
+        block = f"[{s['title']}]\n{s['text']}\n\n"
+        if i and len(vector_text) + len(block) > doc_budget:
+            break  # 최소 1건은 넣되, 이후로는 예산을 지킵니다
+        vector_text += block
 
     # 타임라인은 날짜 질문의 직접 근거이므로 문서보다 앞에 배치합니다.
     context_parts = ["=== 그래프 관계 ===\n" + graph_text]

@@ -69,6 +69,13 @@ FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 # 청크를 조회해야 합니다 (한 페이지가 상위 청크를 독점하는 경우 대비).
 CHUNK_OVERSAMPLE = 4
 
+# 페이지 본문 전달 한도.
+# 이전 값 4000자는 과도하게 보수적이었습니다 — 대부분의 문서는 이보다 짧아
+# 영향이 없지만, 긴 기술 문서는 앞부분만 남고 뒤쪽 근거가 잘려나갔습니다.
+# 하필 그런 문서가 어려운 질문의 근거인 경우가 많습니다.
+# 한도를 넘는 경우에도 매칭 청크 중심으로 윈도우를 잡아 근거를 보존합니다.
+PAGE_MAX_CHARS = int(os.environ.get("PAGE_MAX_CHARS", "16000"))
+
 # 기본값 (--dept 없을 때 / legacy)
 COLLECTION_NAME = "joycity_pages"
 GRAPH_NAME = "joycity_kg"
@@ -230,11 +237,52 @@ def _decompose_query(query: str) -> list[str]:
     return [query]  # 분해 실패 시 원본 유지
 
 
+def _window_around_anchor(
+    full_text: str,
+    sorted_chunks: list,
+    max_chars: int,
+    anchor_index: "int | None",
+) -> str:
+    """문서가 max_chars 를 넘을 때 잘라낼 구간을 정합니다.
+
+    anchor_index(벡터 검색에 걸린 chunk_index)가 주어지면 그 청크가 반드시
+    포함되도록 앞뒤로 윈도우를 잡습니다. 앞부분만 남기는 방식은 문서 뒤쪽에서
+    찾아낸 근거를 그대로 버리게 됩니다.
+    """
+    if len(full_text) <= max_chars:
+        return full_text
+
+    if anchor_index is None:
+        return full_text[:max_chars]
+
+    # 앵커 청크의 시작 오프셋 계산 (조립 시 "\n\n" 로 이었으므로 그만큼 가산)
+    offset = 0
+    for c in sorted_chunks:
+        if c["index"] == anchor_index:
+            break
+        offset += len(c["text"]) + 2
+    else:
+        return full_text[:max_chars]
+
+    # 앵커 앞쪽에 1/3 을 배정해 선행 문맥을 남깁니다.
+    start = max(0, offset - max_chars // 3)
+    end = min(len(full_text), start + max_chars)
+    start = max(0, end - max_chars)  # 끝에 닿았으면 앞으로 당겨 예산을 모두 사용
+
+    piece = full_text[start:end]
+    if start > 0:
+        piece = "…(앞부분 생략)…\n\n" + piece
+    if end < len(full_text):
+        piece = piece + "\n\n…(뒷부분 생략)…"
+    return piece
+
+
 def _fetch_full_pages(
     qc,
     collection_name: str,
     page_ids: list,
-    max_chars: int = 4000,
+    max_chars: int = PAGE_MAX_CHARS,
+    anchors: "dict | None" = None,
 ) -> dict:
     """
     주어진 page_id 목록의 모든 청크를 Qdrant scroll로 조회해
@@ -244,8 +292,20 @@ def _fetch_full_pages(
       벡터 유사도로 청크를 찾은 뒤, 같은 page_id를 가진 모든 청크를
       chunk_index 순으로 이어붙여 문맥 손실 없이 전체 페이지를 반환합니다.
 
+    잘라내기 정책:
+      대부분의 문서는 max_chars 안에 들어가 전문이 그대로 전달됩니다.
+      초과하는 경우, 예전처럼 앞부분만 남기면 **검색으로 찾아낸 청크가
+      뒤쪽에 있을 때 그 대목을 버리게 됩니다** — 정답을 찾아놓고 전달
+      단계에서 잃는 셈입니다. anchors 가 주어지면 매칭된 청크를 중심으로
+      윈도우를 잡아 근거가 반드시 포함되도록 합니다.
+
+    Args:
+        anchors: {page_id: chunk_index} — 벡터 검색에 걸린 청크.
+                 없으면 문서 앞부분을 사용합니다.
+
     Returns:
-        {page_id: {"title", "source_url", "page_id", "content", "chunk_count"}}
+        {page_id: {"title", "source_url", "page_id", "content", "chunk_count",
+                   "truncated", "total_chars"}}
     """
     if not page_ids:
         return {}
@@ -299,12 +359,20 @@ def _fetch_full_pages(
     for pid, page in pages.items():
         sorted_chunks = sorted(page["chunks"], key=lambda c: c["index"])
         full_text = "\n\n".join(c["text"] for c in sorted_chunks)
+        content = _window_around_anchor(
+            full_text,
+            sorted_chunks,
+            max_chars,
+            (anchors or {}).get(pid),
+        )
         assembled[pid] = {
             "title": page["title"],
             "source_url": page["source_url"],
             "page_id": pid,
-            "content": full_text[:max_chars],
+            "content": content,
             "chunk_count": len(sorted_chunks),
+            "total_chars": len(full_text),
+            "truncated": len(full_text) > max_chars,
         }
 
     return assembled
@@ -451,15 +519,17 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
                 with_payload=True,
             )
             page_scores: dict = {}
+            anchors: dict = {}  # {page_id: 최고 점수 청크의 index} — 잘라낼 때 기준점
             for h in hit.points:
                 p = h.payload or {}
                 pid = p.get("page_id", "")
                 score = round(h.score, 4)
                 if pid and (pid not in page_scores or score > page_scores[pid]):
                     page_scores[pid] = score
+                    anchors[pid] = p.get("chunk_index", 0)
             # 점수 상위 limit 개 페이지만 전문 조립 (오버샘플한 만큼 잘라냄)
             top_pids = sorted(page_scores, key=lambda k: page_scores[k], reverse=True)[:limit]
-            full_pages = _fetch_full_pages(qc, COLLECTION_NAME, top_pids)
+            full_pages = _fetch_full_pages(qc, COLLECTION_NAME, top_pids, anchors=anchors)
             result = [
                 {
                     "title": page["title"],
