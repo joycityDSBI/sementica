@@ -34,11 +34,20 @@ API 구조 (catalog.joycityplay.com):
 인증 불필요. term 이 canonical, synonyms 가 대안 표현, category 가 분류.
 카테고리는 이벤트 주체가 게임인지 조직인지 판정하는 근거로 사용합니다
 (semantica_helper.classify_scope 참고).
+
+오프라인 폴백:
+  API 접근이 불가능한 환경(운영 VM 등)에서는 config/glossary_snapshot.json
+  을 대신 읽습니다. 용어집이 아예 없으면 동의어 정규화와 주체 판정이 모두
+  꺼지므로, 스냅샷은 접근 가능한 환경에서 갱신해 커밋해 두어야 합니다:
+      python tools/fetch_glossary_snapshot.py
+  경로는 GLOSSARY_SNAPSHOT 환경변수로 바꿀 수 있습니다.
 """
 
+import json
 import logging
 import os
 import time
+from pathlib import Path
 
 import httpx
 
@@ -55,6 +64,15 @@ GLOSSARY_CATEGORY_URL: str = os.environ.get(
 )
 # 폴백 시 조회할 카테고리 (이벤트 주체 분류에 필요한 것만)
 _FALLBACK_CATEGORIES: tuple[str, ...] = ("game", "organization")
+
+# 오프라인 폴백 스냅샷 — 용어집 API에 접근할 수 없는 환경(운영 VM 등)에서 사용.
+# tools/fetch_glossary_snapshot.py 로 갱신합니다.
+_SNAPSHOT_PATH: Path = Path(
+    os.environ.get(
+        "GLOSSARY_SNAPSHOT",
+        str(Path(__file__).parent.parent.parent / "config" / "glossary_snapshot.json"),
+    )
+)
 
 _TTL: float = 3600.0  # 1시간 캐시
 _HTTP_TIMEOUT: float = float(os.environ.get("GLOSSARY_TIMEOUT", "5"))
@@ -102,6 +120,46 @@ def _index_terms(terms: list, alias: dict, expand_m: dict, cat_of: dict, by_cat:
             bucket = by_cat.setdefault(category, {})
             for form in all_forms:
                 bucket[form] = canonical
+
+
+def _load_from_snapshot() -> bool:
+    """오프라인 스냅샷 파일에서 사전을 로드합니다. 성공하면 True.
+
+    용어집 API에 접근할 수 없는 환경에서도 동의어 정규화와 게임/조직 판정이
+    동작하도록 하는 폴백입니다. 파일이 없거나 비어 있으면 False 를 반환하고
+    호출부가 기존 실패 처리를 이어갑니다.
+    """
+    global _alias_map, _expand_map, _category_of, _by_category, _loaded_at
+
+    try:
+        if not _SNAPSHOT_PATH.exists():
+            return False
+        data = json.loads(_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("용어집 스냅샷 읽기 실패 (%s): %s", _SNAPSHOT_PATH, exc)
+        return False
+
+    alias: dict[str, str] = {}
+    expand_m: dict[str, list[str]] = {}
+    cat_of: dict[str, str] = {}
+    by_cat: dict[str, dict[str, str]] = {}
+    _index_terms(data.get("terms", []), alias, expand_m, cat_of, by_cat)
+    if not alias:
+        return False
+
+    _alias_map = alias
+    _expand_map = expand_m
+    _category_of = cat_of
+    _by_category = by_cat
+    # TTL 을 적용해 이후 API 재시도 기회를 남깁니다.
+    _loaded_at = time.monotonic()
+    logger.info(
+        "용어집 스냅샷 로드: %d개 term, 카테고리 %s (생성 %s)",
+        len(expand_m),
+        {c: len(set(v.values())) for c, v in by_cat.items()} or "없음",
+        (data.get("_meta") or {}).get("fetched_at", "?"),
+    )
+    return True
 
 
 def _load() -> None:
@@ -154,7 +212,14 @@ def _load() -> None:
     except Exception as exc:
         _fail_count += 1
         if not _alias_map:
-            # 최초 로드 실패 — 동의어 해결 없이 계속 동작
+            # 최초 로드 실패 — 오프라인 스냅샷으로 폴백 시도
+            if _load_from_snapshot():
+                logger.warning(
+                    "용어집 API 실패(%s) — 스냅샷으로 대체: %s",
+                    exc,
+                    _SNAPSHOT_PATH.name,
+                )
+                return
             giving_up = " (이 프로세스에서 재시도 중단)" if _fail_count >= _MAX_FAILS else ""
             logger.warning(
                 "용어집 최초 로드 실패 %d/%d — 동의어 해결 비활성화%s: %s",

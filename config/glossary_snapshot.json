@@ -1,0 +1,888 @@
+{
+  "_meta": {
+    "fetched_at": "2026-09-10T01:25:10.006899+00:00",
+    "source": "https://catalog.joycityplay.com/api/glossary/all",
+    "count": 109,
+    "categories": {
+      "game": 23
+    }
+  },
+  "terms": [
+    {
+      "term": "3on3",
+      "synonyms": [
+        "3ON3",
+        "3온3"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "AAA",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "ACU",
+      "synonyms": [
+        "Average current user",
+        "평균 동접",
+        "평균 동접자"
+      ],
+      "category": ""
+    },
+    {
+      "term": "AEO",
+      "synonyms": [
+        "App Event Optimization"
+      ],
+      "category": ""
+    },
+    {
+      "term": "Android",
+      "synonyms": [
+        "안드로이드",
+        "안드",
+        "ANDROID"
+      ],
+      "category": ""
+    },
+    {
+      "term": "ARPDAU",
+      "synonyms": [
+        "ARPU",
+        "유저 평균 과금액",
+        "1인당 매출"
+      ],
+      "category": ""
+    },
+    {
+      "term": "ARPNNPU",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "ARPNPU",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "ARPPU",
+      "synonyms": [
+        "구매 유저 평균 과금액",
+        "PU 평균 결제"
+      ],
+      "category": ""
+    },
+    {
+      "term": "BAU",
+      "synonyms": [
+        "Business As Usual"
+      ],
+      "category": ""
+    },
+    {
+      "term": "BEP",
+      "synonyms": [
+        "손익분기점"
+      ],
+      "category": ""
+    },
+    {
+      "term": "BLESS",
+      "synonyms": [
+        "블레스",
+        "블레스 모바일"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "CBZ",
+      "synonyms": [
+        "크립토볼",
+        "크립토볼 제트"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "CCCC",
+      "synonyms": [
+        "크라임 앤 체이스 컨플릭트 시티",
+        "crime and chase conflict city"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "Churn rate",
+      "synonyms": [
+        "이탈률",
+        "탈퇴율"
+      ],
+      "category": ""
+    },
+    {
+      "term": "CPA",
+      "synonyms": [
+        "cost per action",
+        "회원가입형"
+      ],
+      "category": ""
+    },
+    {
+      "term": "CPC",
+      "synonyms": [
+        "클릭당비용",
+        "클릭 당 비용"
+      ],
+      "category": ""
+    },
+    {
+      "term": "CPE",
+      "synonyms": [
+        "실행형",
+        "cost per execute",
+        "실행형 광고"
+      ],
+      "category": ""
+    },
+    {
+      "term": "CPI",
+      "synonyms": [
+        "설치형",
+        "cost per install",
+        "설치형 리워드"
+      ],
+      "category": ""
+    },
+    {
+      "term": "CPM",
+      "synonyms": [
+        "cost per mile"
+      ],
+      "category": ""
+    },
+    {
+      "term": "CPRU",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "CPT",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "CTR",
+      "synonyms": [
+        "클릭율"
+      ],
+      "category": ""
+    },
+    {
+      "term": "CU",
+      "synonyms": [
+        "동접",
+        "동시 접속자",
+        "ccu",
+        "CCU"
+      ],
+      "category": ""
+    },
+    {
+      "term": "CVR",
+      "synonyms": [
+        "전환율",
+        "전환률",
+        "컨버전",
+        "conversion",
+        "conversion rate"
+      ],
+      "category": ""
+    },
+    {
+      "term": "DAU",
+      "synonyms": [
+        "AU",
+        "유저 수",
+        "액티브 유저 수",
+        "일별 접속자"
+      ],
+      "category": ""
+    },
+    {
+      "term": "DRB",
+      "synonyms": [
+        "디즈니 렐름 브레이커스",
+        "relm breakers",
+        "렐름"
+      ],
+      "category": ""
+    },
+    {
+      "term": "DRU",
+      "synonyms": [
+        "RU",
+        "가입 신규",
+        "가입 신규 유저 수",
+        "신규 가입자"
+      ],
+      "category": ""
+    },
+    {
+      "term": "DS",
+      "synonyms": [
+        "드래곤 시즈",
+        "DRSG",
+        "드래곤시즈",
+        "Dragon Empire",
+        "드래곤엠파이어"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "eCPM",
+      "synonyms": [
+        "이씨피엠",
+        "유효 CPM"
+      ],
+      "category": ""
+    },
+    {
+      "term": "FS1",
+      "synonyms": [
+        "프리스타일1",
+        "Free style 1",
+        "freestyle 1"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "FS1R",
+      "synonyms": [
+        "프리스타일 1 리부트",
+        "프리스타일 리부트"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "FS2",
+      "synonyms": [
+        "프리스타일2",
+        "프리스타일 농구 2"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "FSF2",
+      "synonyms": [
+        "프리스타일 풋볼 2",
+        "프풋2",
+        "풋볼 2",
+        "프리스타일 축구 2"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "GBTW",
+      "synonyms": [
+        "GW",
+        "건쉽배틀",
+        "건쉽",
+        "Gunship Battle",
+        "Gunship Battle: Total Warfare"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "GNSS",
+      "synonyms": [
+        "창세기전",
+        "창세기전 안타리아의 전쟁",
+        "안타리아의 전쟁"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "GOD",
+      "synonyms": [
+        "주사위의 신",
+        "주사위의신",
+        "god of dice"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "GW-CHINA",
+      "synonyms": [
+        "건쉽 워 페어 - 중국",
+        "GBTW-CHINA"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "HAU",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "HBZ",
+      "synonyms": [
+        "히어로볼",
+        "히어로볼 제트"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "HRU",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "IAA 매출",
+      "synonyms": [
+        "IAA_rev",
+        "광고 매출액",
+        "광고 수익",
+        "인앱 광고"
+      ],
+      "category": ""
+    },
+    {
+      "term": "IAP 매출",
+      "synonyms": [
+        "IAP_rev",
+        "매출액",
+        "구매액",
+        "IAP 구매액",
+        "인앱 결제"
+      ],
+      "category": ""
+    },
+    {
+      "term": "IMGN",
+      "synonyms": [
+        "임진왜란",
+        "임진"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "impression",
+      "synonyms": [
+        "노출수",
+        "imp"
+      ],
+      "category": ""
+    },
+    {
+      "term": "iOS",
+      "synonyms": [
+        "ios",
+        "아이오에스",
+        "애플os"
+      ],
+      "category": ""
+    },
+    {
+      "term": "JTWN",
+      "synonyms": [
+        "조이타운",
+        "조이 타운"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "KOFS",
+      "synonyms": [
+        "킹오파",
+        "킹 오브 파이터즈",
+        "킹오브파이터즈"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "LTV",
+      "synonyms": [
+        "Lifetime value",
+        "생애가치"
+      ],
+      "category": ""
+    },
+    {
+      "term": "MAIA",
+      "synonyms": [
+        "Mobile App Install Ad"
+      ],
+      "category": ""
+    },
+    {
+      "term": "MAIE",
+      "synonyms": [
+        "Mobile App Install + Event"
+      ],
+      "category": ""
+    },
+    {
+      "term": "MAU",
+      "synonyms": [
+        "Monthly Active Users",
+        "월간 엑티브 유저"
+      ],
+      "category": ""
+    },
+    {
+      "term": "MMP",
+      "synonyms": [
+        "트래커",
+        "tracker",
+        "appsflyer"
+      ],
+      "category": ""
+    },
+    {
+      "term": "nCPA",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "nCPI",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "NNPU",
+      "synonyms": [
+        "가입자 중 구매자로 전환된 수",
+        "신규 구매 전환"
+      ],
+      "category": ""
+    },
+    {
+      "term": "NNPUR",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "NPU",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "NPUR",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "ONE",
+      "synonyms": [
+        "오션앤엠파이어",
+        "오션 앤 엠파이어"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "PCU",
+      "synonyms": [
+        "최고 동접",
+        "peak current user"
+      ],
+      "category": ""
+    },
+    {
+      "term": "pLTV",
+      "synonyms": [
+        "예측 LTV",
+        "PLTV",
+        "예상 LTV"
+      ],
+      "category": ""
+    },
+    {
+      "term": "POTC",
+      "synonyms": [
+        "캐리비안의 해적",
+        "캐리비안의해적",
+        "캐비",
+        "POC"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "PS",
+      "synonyms": [
+        "Playstaion",
+        "플스",
+        "플레이스테이션"
+      ],
+      "category": ""
+    },
+    {
+      "term": "PU",
+      "synonyms": [
+        "DPU",
+        "구매 유저",
+        "구매 유저 수",
+        "결제 유저",
+        "BU"
+      ],
+      "category": ""
+    },
+    {
+      "term": "PUR",
+      "synonyms": [
+        "구매 유저 비율",
+        "결제 전환율",
+        "BUR"
+      ],
+      "category": ""
+    },
+    {
+      "term": "PV",
+      "synonyms": [
+        "page view"
+      ],
+      "category": ""
+    },
+    {
+      "term": "Re-engage",
+      "synonyms": [
+        "리인게이지",
+        "re engage"
+      ],
+      "category": ""
+    },
+    {
+      "term": "RESU",
+      "synonyms": [
+        "레지던트 이블",
+        "레주",
+        "레쥬",
+        "서바이벌유닛",
+        "서바이벌 유닛",
+        "스트랏",
+        "STRAT",
+        "Resident Evil Survival Unit"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "Retention",
+      "synonyms": [
+        "리텐션",
+        "ret",
+        "잔존율",
+        "잔존률",
+        "재방문률",
+        "재방문율"
+      ],
+      "category": ""
+    },
+    {
+      "term": "ROAS",
+      "synonyms": [
+        "광고 수익률",
+        "광고 ROI",
+        "return on ads spending"
+      ],
+      "category": ""
+    },
+    {
+      "term": "ROI",
+      "synonyms": [
+        "Return on investment"
+      ],
+      "category": ""
+    },
+    {
+      "term": "RU",
+      "synonyms": [
+        "신규가입자",
+        "NRU",
+        "ru",
+        "dru"
+      ],
+      "category": ""
+    },
+    {
+      "term": "steamOS",
+      "synonyms": [
+        "steam",
+        "스팀",
+        "스팀os"
+      ],
+      "category": ""
+    },
+    {
+      "term": "Stickness",
+      "synonyms": [
+        "고착율",
+        "고착률",
+        "스티크니스"
+      ],
+      "category": ""
+    },
+    {
+      "term": "tCPA",
+      "synonyms": [
+        "target CPA"
+      ],
+      "category": ""
+    },
+    {
+      "term": "tCPI",
+      "synonyms": [
+        "target CPI"
+      ],
+      "category": ""
+    },
+    {
+      "term": "tCPI_Adv",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "TERA",
+      "synonyms": [
+        "테라"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "tROAS",
+      "synonyms": [
+        "Target ROAS"
+      ],
+      "category": ""
+    },
+    {
+      "term": "TS",
+      "synonyms": [
+        "플레이타임",
+        "time spent",
+        "플탐"
+      ],
+      "category": ""
+    },
+    {
+      "term": "UA",
+      "synonyms": [
+        "User Acquisition",
+        "UA 광고"
+      ],
+      "category": ""
+    },
+    {
+      "term": "UAC",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "UACVideo",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "UV",
+      "synonyms": [
+        "Unique visitor",
+        "순방문자"
+      ],
+      "category": ""
+    },
+    {
+      "term": "VO",
+      "synonyms": [
+        "Value Optimization"
+      ],
+      "category": ""
+    },
+    {
+      "term": "WAU",
+      "synonyms": [
+        "Weekly Active User",
+        "주간 엑티브 유저"
+      ],
+      "category": ""
+    },
+    {
+      "term": "WSB",
+      "synonyms": [
+        "워쉽배틀",
+        "워쉽"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "WWM",
+      "synonyms": [
+        "월드워머신",
+        "월드 워 머신",
+        "떠떠엠",
+        "WWMC",
+        "워머신",
+        "World War: Machines Conquest"
+      ],
+      "category": "game"
+    },
+    {
+      "term": "xbox",
+      "synonyms": [
+        "XBOX",
+        "엑박",
+        "엑스박스"
+      ],
+      "category": ""
+    },
+    {
+      "term": "가입 경과일",
+      "synonyms": [
+        "reg_datediff",
+        "가입 후 경과",
+        "Day Since Registration"
+      ],
+      "category": ""
+    },
+    {
+      "term": "공통 로그",
+      "synonyms": [
+        "공통로그",
+        "common log"
+      ],
+      "category": ""
+    },
+    {
+      "term": "관심사 타게팅",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "구글플레이",
+      "synonyms": [
+        "구글플레이스토어",
+        "구글 플레이 스토어",
+        "구글 스토어"
+      ],
+      "category": ""
+    },
+    {
+      "term": "논오가닉",
+      "synonyms": [
+        "non-organic",
+        "유료 유입",
+        "paid install",
+        "인오가닉"
+      ],
+      "category": ""
+    },
+    {
+      "term": "누적 구매액",
+      "synonyms": [
+        "stacked_rev"
+      ],
+      "category": ""
+    },
+    {
+      "term": "데이터사이언스실",
+      "synonyms": [
+        "데사실",
+        "data science실",
+        "DS실"
+      ],
+      "category": ""
+    },
+    {
+      "term": "마케팅 비용",
+      "synonyms": [
+        "cost_currency",
+        "광고비",
+        "집행 비용",
+        "캠페인 비용"
+      ],
+      "category": ""
+    },
+    {
+      "term": "스티키니스",
+      "synonyms": [
+        "stickiness",
+        "접속 빈도",
+        "재방문 빈도"
+      ],
+      "category": ""
+    },
+    {
+      "term": "애플 앱스토어",
+      "synonyms": [
+        "애플스토어",
+        "앱스토어",
+        "애플 앱스토어"
+      ],
+      "category": ""
+    },
+    {
+      "term": "오가닉",
+      "synonyms": [
+        "organic",
+        "자연유입",
+        "오가닉 설치"
+      ],
+      "category": ""
+    },
+    {
+      "term": "원스토어",
+      "synonyms": [
+        "one store",
+        "onestroe"
+      ],
+      "category": ""
+    },
+    {
+      "term": "유사 유저 타게",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "인구통계학적 타겟팅",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "인스톨",
+      "synonyms": [
+        "installs_appsflyer",
+        "install 수",
+        "설치 수",
+        "신규 설치"
+      ],
+      "category": ""
+    },
+    {
+      "term": "전략사업본부",
+      "synonyms": [
+        "전사본",
+        "전략사업부"
+      ],
+      "category": ""
+    },
+    {
+      "term": "총 매출",
+      "synonyms": [
+        "total_rev",
+        "전체 매출",
+        "합산 매출"
+      ],
+      "category": ""
+    },
+    {
+      "term": "최소 ROAS 방식",
+      "synonyms": [],
+      "category": ""
+    },
+    {
+      "term": "코호트",
+      "synonyms": [
+        "cohort",
+        "가입 경과일"
+      ],
+      "category": ""
+    }
+  ]
+}
