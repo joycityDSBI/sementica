@@ -56,8 +56,8 @@ FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 CLAUDE_MODEL = "claude-sonnet-4-6@default"
 
-# 카테고리별 목표 문항 수
-CATEGORY_TARGETS = {
+# 카테고리 배분 비율 (합 20 기준) — 실제 목표는 --count 에 맞춰 스케일됩니다.
+CATEGORY_RATIO = {
     "담당자": 5,
     "정책/규정": 4,
     "관계": 5,
@@ -66,12 +66,52 @@ CATEGORY_TARGETS = {
 }
 DIFFICULTY_DIST = {"easy": 0.3, "medium": 0.5, "hard": 0.2}
 
+
+def _scale_targets(ratio: dict, total: int) -> dict:
+    """카테고리 비율을 유지하며 목표 문항 수를 total 로 맞춥니다.
+
+    이전에는 CATEGORY_TARGETS 가 고정(합 20)이라 --count 40 을 줘도 20문항만
+    생성됐습니다. --count 는 안내 문구에만 쓰이고 선별 로직은 고정값을 봤습니다.
+
+    >>> _scale_targets({"a": 5, "b": 4, "c": 5, "d": 3, "e": 3}, 40)
+    {'a': 10, 'b': 8, 'c': 10, 'd': 6, 'e': 6}
+    >>> sum(_scale_targets({"a": 5, "b": 4, "c": 5, "d": 3, "e": 3}, 30).values())
+    30
+    """
+    base = sum(ratio.values())
+    if total <= 0 or base <= 0:
+        return dict(ratio)
+    scaled = {c: max(1, round(n * total / base)) for c, n in ratio.items()}
+
+    # 반올림 오차 보정 — 큰 카테고리부터 ±1 조정해 합계를 total 에 맞춥니다.
+    order = sorted(scaled, key=lambda c: (-scaled[c], c))
+    i = 0
+    while sum(scaled.values()) != total and i < 1000:
+        c = order[i % len(order)]
+        if sum(scaled.values()) < total:
+            scaled[c] += 1
+        elif scaled[c] > 1:
+            scaled[c] -= 1
+        i += 1
+    return scaled
+
+
 # ─── 인수 파싱 ────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
 parser.add_argument("--dept", default="", help="본부 키 (config/departments.yaml)")
 parser.add_argument("--count", type=int, default=20, help="목표 문항 수 (기본 20)")
-parser.add_argument("--sample-pages", type=int, default=60, help="Qdrant 샘플 페이지 수 (기본 60)")
-parser.add_argument("--sample-rels", type=int, default=80, help="FalkorDB 샘플 관계 수 (기본 80)")
+parser.add_argument(
+    "--sample-pages",
+    type=int,
+    default=0,
+    help="Qdrant 샘플 페이지 수 (0=자동, count x 3 이상). 후보 부족 시 늘리세요",
+)
+parser.add_argument(
+    "--sample-rels",
+    type=int,
+    default=0,
+    help="FalkorDB 샘플 관계 수 (0=자동, count x 4 이상)",
+)
 parser.add_argument(
     "--out", default="", help="출력 파일 경로 (기본: data/eval/golden_set_YYYYMMDD.json)"
 )
@@ -85,6 +125,12 @@ parser.add_argument(
 args = parser.parse_args()
 
 random.seed(args.seed)
+
+# --count 를 카테고리별 목표로 환산 (이 값이 실제 선별 기준)
+CATEGORY_TARGETS = _scale_targets(CATEGORY_RATIO, args.count)
+# 샘플 페이지·관계 수 — 문항이 늘면 후보도 그만큼 필요합니다.
+SAMPLE_PAGES = args.sample_pages or max(60, args.count * 3)
+SAMPLE_RELS = args.sample_rels or max(80, args.count * 4)
 
 COLLECTION_NAME = "joycity_pages"
 GRAPH_NAME = "joycity_kg"
@@ -132,11 +178,11 @@ print("✅ 완료\n")
 
 
 # ─── 1. Qdrant 페이지 샘플링 ─────────────────────────────────────────────────
-print(f"📄 Qdrant 페이지 샘플링 (최대 {args.sample_pages}개)...")
+print(f"📄 Qdrant 페이지 샘플링 (최대 {SAMPLE_PAGES}개)...")
 
 pages = []
 offset = None
-while len(pages) < args.sample_pages:
+while len(pages) < SAMPLE_PAGES:
     batch, next_offset = qdrant.scroll(
         collection_name=COLLECTION_NAME,
         limit=50,
@@ -157,18 +203,18 @@ while len(pages) < args.sample_pages:
         break
 
 random.shuffle(pages)
-pages = pages[: args.sample_pages]
+pages = pages[:SAMPLE_PAGES]
 print(f"  수집: {len(pages)}개 페이지\n")
 
 
 # ─── 2. FalkorDB 관계 샘플링 ─────────────────────────────────────────────────
-print(f"🔗 FalkorDB 관계 샘플링 (최대 {args.sample_rels}개)...")
+print(f"🔗 FalkorDB 관계 샘플링 (최대 {SAMPLE_RELS}개)...")
 
 try:
     rel_result = graph.query(
         "MATCH (n)-[r:REL]->(m) "
         "RETURN n.name, r.rel_name, m.name, r.condition, r.source_url "
-        f"LIMIT {args.sample_rels}"
+        f"LIMIT {SAMPLE_RELS}"
     )
     relations = [
         {
@@ -582,8 +628,10 @@ print()
 # ─── 4. 관계 기반 Q&A 생성 ───────────────────────────────────────────────────
 if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
     print("🤖 관계 기반 Q&A 생성 중...")
-    # 관계를 묶음으로 처리 (5개씩)
-    for chunk_start in range(0, min(len(relations), 30), 5):
+    # 관계를 5개씩 묶어 처리. 훑을 관계 수는 목표 문항에 비례합니다
+    # (고정 30개였을 때는 --count 를 올려도 관계 후보가 늘지 않았습니다).
+    _rel_scan = min(len(relations), max(30, CATEGORY_TARGETS["관계"] * 8))
+    for chunk_start in range(0, _rel_scan, 5):
         if cat_counts.get("관계", 0) >= CATEGORY_TARGETS["관계"] * 3:
             break
         chunk = relations[chunk_start : chunk_start + 5]
@@ -701,9 +749,16 @@ for cat, target in CATEGORY_TARGETS.items():
         final_set.append(entry)
         qid += 1
 
-    print(f"  {cat:<10}: {len(selected)}개 선택 (후보 {len(pool)}개)")
+    short = f"  ⚠️ 목표 {target}개 미달" if len(selected) < target else ""
+    print(f"  {cat:<10}: {len(selected)}개 선택 (후보 {len(pool)}개){short}")
 
-print(f"\n  최종 선정: {len(final_set)}문항")
+print(f"\n  최종 선정: {len(final_set)}문항 (목표 {args.count})")
+
+# 목표 미달 — 원인에 따라 대응이 다르므로 구분해 안내합니다.
+if len(final_set) < args.count:
+    print(f"  ⚠️  목표보다 {args.count - len(final_set)}문항 부족합니다.")
+    print(f"      · 샘플 확대: --sample-pages {SAMPLE_PAGES * 2} --sample-rels {SAMPLE_RELS * 2}")
+    print("      · 탈락이 많으면 아래 사유를 보고 생성 프롬프트를 보강하세요")
 
 # 탈락 사유 — 생성 프롬프트를 어디로 보강할지 알려줍니다.
 if _reject_counts:
