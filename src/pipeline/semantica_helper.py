@@ -38,10 +38,14 @@ from datetime import UTC, datetime
 # ─── 동의어 해결기 (비즈니스 용어집 API) ────────────────────────────────────────
 try:
     from utils.synonym_resolver import resolve as _resolve_entity
+    from utils.synonym_resolver import resolve_in as _resolve_in_category
 except ImportError:
 
     def _resolve_entity(name: str) -> str:  # type: ignore[misc]
         return name
+
+    def _resolve_in_category(name: str, category: str) -> str:  # type: ignore[misc]
+        return ""
 
 
 # ─── Semantica 가용 여부 자동 감지 ──────────────────────────────────────────────
@@ -740,6 +744,97 @@ _CATEGORY_TO_EVENT_TYPE: dict[str, str] = {
 }
 
 
+SCOPE_GAME = "game"
+SCOPE_ORG = "org"
+SCOPE_UNKNOWN = "unknown"
+
+# game 컬럼이 비었을 때 쓰이던 기존 플레이스홀더 — 주체로 취급하지 않습니다.
+_SCOPE_PLACEHOLDERS: frozenset = frozenset({"", "기타", "미정", "없음", "-", "n/a", "na"})
+
+
+def classify_scope(
+    value: str = "",
+    source_key: str = "",
+    text: str = "",
+    graph=None,
+) -> dict:
+    """이벤트 주체(scope)와 그 종류를 판정합니다.
+
+    기존에는 게임명이 없으면 무조건 "기타" 로 저장돼, 재무실·인사팀 등
+    서로 다른 부서의 일정이 한 버킷에 뒤섞였습니다. 이 함수는 주체를
+    게임/조직으로 구분해 그 문제를 해소합니다.
+
+    판정 순서:
+      ① 용어집 game 카테고리 매칭       → game, verified=True
+      ② 용어집 organization 카테고리    → org,  verified=True
+      ③ 게임 컬럼 출처인데 용어집에 없음 → game, verified=False (마스터 등록 후보)
+      ④ 제목·본문에 등장하는 :Team 노드  → org,  verified=False
+      ⑤ 해당 없음                       → unknown
+
+    ④가 필요한 이유: Notion DB에 부서 컬럼이 따로 없어 조직 정보가
+    제목·본문에만 존재합니다. 그래프에 이미 적재된 :Team 노드와 대조합니다.
+
+    Args:
+        value:      주체 후보 값 (DB 게임 컬럼 값 또는 LLM 추출 game)
+        source_key: value 를 읽어온 Notion 컬럼명. 없으면 빈 문자열.
+        text:       제목·본문 등 조직명을 찾을 텍스트
+        graph:      FalkorDB graph — ④에만 사용. None 이면 ④ 생략.
+
+    Returns:
+        {"scope": str, "scope_type": "game"|"org"|"unknown", "scope_verified": bool}
+    """
+    val = str(value or "").strip()
+    is_placeholder = val.lower() in _SCOPE_PLACEHOLDERS
+
+    if val and not is_placeholder:
+        # ① 게임 마스터 (동의어 포함): "캐리비안의 해적" → "POTC"
+        canonical = _resolve_in_category(val, "game")
+        if canonical:
+            return {"scope": canonical, "scope_type": SCOPE_GAME, "scope_verified": True}
+
+        # ② 조직 마스터 (용어집에 organization 카테고리가 생기면 자동 적용)
+        canonical = _resolve_in_category(val, "organization")
+        if canonical:
+            return {"scope": canonical, "scope_type": SCOPE_ORG, "scope_verified": True}
+
+        # ③ 게임 컬럼에서 왔지만 마스터 미등록 — 신규 게임 후보로 표시
+        if source_key and source_key.lower() in {k.lower() for k in DB_GAME_KEYS}:
+            return {"scope": val, "scope_type": SCOPE_GAME, "scope_verified": False}
+
+    # ④ 텍스트에서 조직 탐색 — 그래프의 :Team 노드와 대조
+    if graph is not None and text:
+        try:
+            from utils.korean import contains_as_token
+
+            res = graph.query(
+                "MATCH (t:Team) WHERE t.name IS NOT NULL AND $text CONTAINS t.name "
+                "RETURN DISTINCT t.name AS name LIMIT 20",
+                {"text": text},
+            )
+            cands = [
+                str(r[0])
+                for r in res.result_set
+                if r and r[0] and len(str(r[0])) >= 2 and contains_as_token(text, str(r[0]))
+            ]
+            if cands:
+                # 가장 구체적인(긴) 이름 우선: "데이터사이언스실" > "데이터"
+                cands.sort(key=len, reverse=True)
+                return {
+                    "scope": _resolve_entity(cands[0]),
+                    "scope_type": SCOPE_ORG,
+                    "scope_verified": False,
+                }
+        except Exception:
+            pass  # 그래프 조회 실패 시 unknown 으로 처리
+
+    # ⑤ 판정 불가 — 값이 있으면 보존하되 종류는 unknown
+    return {
+        "scope": "" if is_placeholder else val,
+        "scope_type": SCOPE_UNKNOWN,
+        "scope_verified": False,
+    }
+
+
 def event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | None:
     """
     Notion DB 속성 딕셔너리에서 :Event 노드 dict를 생성합니다.
@@ -759,18 +854,24 @@ def event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | N
     # 소문자 키 매핑으로 case-insensitive 비교
     lower = {k.lower(): v for k, v in db_props.items()}
 
-    def _first(keys: set) -> str | None:
+    def _first_with_key(keys: set) -> tuple[str | None, str]:
+        """(값, 매칭된 컬럼명) — 값의 출처를 알아야 주체 종류를 추론할 수 있습니다."""
         for k in keys:
             v = lower.get(k.lower())
             if v is not None:
-                return ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
-        return None
+                val = ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
+                return val, k
+        return None, ""
+
+    def _first(keys: set) -> str | None:
+        return _first_with_key(keys)[0]
 
     date = _first(DB_DATE_KEYS)
     if not date:
         return None  # 날짜 없으면 이벤트 아님
 
-    game = _first(DB_GAME_KEYS) or "기타"
+    game_raw, game_key = _first_with_key(DB_GAME_KEYS)
+    game = game_raw or "기타"
     raw_type = _first(DB_TYPE_KEYS) or ""
     # 변경카테고리 → EVENT_TYPES 정규값 변환
     event_type = _CATEGORY_TO_EVENT_TYPE.get(raw_type.strip(), raw_type.strip())
@@ -799,6 +900,9 @@ def event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | N
         "description": "",
         "manager": manager_raw,
         "source_url": source_url,
+        # 주체 판정용 — upsert_event_node 의 classify_scope 가 사용합니다.
+        # 어느 컬럼에서 읽었는지 알아야 게임/조직을 추론할 수 있습니다.
+        "scope_source_key": game_key,
     }
 
 
@@ -835,10 +939,21 @@ def upsert_event_node(graph, event: dict) -> int:
         manager     — 담당자/팀 이름 (기존 Person/Team 노드와 연결)
         source_url  — 출처 URL
 
+    주체(scope) 판정:
+        classify_scope() 로 게임/조직을 구분해 다음 속성을 기록합니다.
+          e.scope          — 주체 이름 (게임 코드 또는 조직명)
+          e.scope_type     — game | org | unknown
+          e.scope_verified — 용어집 마스터로 확인되었는지
+
+        게임으로 판정된 경우에만 e.game 이 유지됩니다. 조직이면 e.game 은
+        비워집니다 — 이전에는 game="기타" 로 저장돼 :Game 노드에 게임이
+        아닌 것이 섞였습니다.
+
     부수 효과:
-        - :Game 노드 MERGE (없으면 자동 생성)
-        - (Game)-[:HAD_EVENT]->(Event) 엣지 생성
-        - 같은 게임의 이전/이후 이벤트와 FOLLOWED_BY 엣지 자동 연결
+        - scope_type=game → :Game 노드 MERGE + (Game)-[:HAD_EVENT]->(Event)
+        - scope_type=org  → :Team 노드 MERGE + (Team)-[:HAD_EVENT]->(Event)
+        - 같은 scope 의 이전/이후 이벤트와 FOLLOWED_BY 엣지 자동 연결
+          (scope 가 비면 체인을 만들지 않아 서로 무관한 주체가 섞이지 않음)
 
     Returns:
         FalkorDB node id (실패 시 -1)
@@ -857,6 +972,25 @@ def upsert_event_node(graph, event: dict) -> int:
 
     if not (game and date and title):
         return -1
+
+    # ── 주체(scope) 판정 ────────────────────────────────────────────────────
+    # game 값이 "기타" 같은 플레이스홀더면 제목·본문에서 조직을 찾습니다.
+    # 이전에는 전부 game="기타" 로 뭉쳐져 부서별 구분이 불가능했습니다.
+    scope_info = classify_scope(
+        value=game,
+        source_key=str(event.get("scope_source_key", "")),
+        text=f"{title} {description}",
+        graph=graph,
+    )
+    scope = scope_info["scope"]
+    scope_type = scope_info["scope_type"]
+    scope_verified = scope_info["scope_verified"]
+    # 게임으로 판정된 경우에만 game 필드를 유지합니다 (:Game 노드 오염 방지).
+    # 판정 실패 시에는 기존 값을 그대로 두어 하위 호환을 유지합니다.
+    if scope_type == SCOPE_GAME:
+        game = scope or game
+    elif scope_type == SCOPE_ORG:
+        game = ""
 
     # event_type 정규화
     if event_type not in EVENT_TYPES:
@@ -893,19 +1027,25 @@ def upsert_event_node(graph, event: dict) -> int:
             "MERGE (e:Event {event_id: $eid}) "
             "ON CREATE SET "
             "  e.game = $game, e.event_type = $etype, e.category = $category, "
+            "  e.scope = $scope, e.scope_type = $scope_type, "
+            "  e.scope_verified = $scope_verified, "
             "  e.date = $date, e.date_ts = $date_ts, "
             "  e.year = $year, e.month = $month, e.quarter = $quarter, "
             "  e.title = $title, e.description = $desc, e.target = $target, "
             "  e.source_url = $url, e.ts = $ts "
             "ON MATCH SET "
             "  e.title = $title, e.category = $category, e.description = $desc, "
-            "  e.manager = $mgr "
+            "  e.manager = $mgr, e.scope = $scope, e.scope_type = $scope_type, "
+            "  e.scope_verified = $scope_verified, e.game = $game "
             "RETURN id(e) AS nid",
             {
                 "eid": event_id,
                 "game": game,
                 "etype": event_type,
                 "category": category,
+                "scope": scope,
+                "scope_type": scope_type,
+                "scope_verified": scope_verified,
                 "date": date,
                 "date_ts": date_ts,
                 "year": year,
@@ -926,19 +1066,38 @@ def upsert_event_node(graph, event: dict) -> int:
         print(f"    ⚠️  Event 노드 생성 실패 ({game}/{date}/{title}): {e}")
         return -1
 
-    # ── 2. :Game 노드 MERGE + HAD_EVENT 엣지 ───────────────────────────────
-    try:
-        graph.query(
-            "MERGE (g:Game {name: $name}) ON CREATE SET g.source_url = $url RETURN id(g)",
-            {"name": game, "url": source_url},
-        )
-        graph.query(
-            "MATCH (g:Game {name: $game}), (e:Event {event_id: $eid}) "
-            "MERGE (g)-[:HAD_EVENT {date: $date}]->(e)",
-            {"game": game, "eid": event_id, "date": date},
-        )
-    except Exception:
-        pass
+    # ── 2. 주체 노드 연결 (HAD_EVENT) ──────────────────────────────────────
+    # 게임이면 :Game, 조직이면 :Team 에 연결합니다.
+    # 이전에는 game 값이 "기타"여도 :Game 노드를 만들어, 게임이 아닌 것이
+    # 게임 목록에 섞여 들어갔습니다.
+    if scope_type == SCOPE_GAME and game:
+        try:
+            graph.query(
+                "MERGE (g:Game {name: $name}) ON CREATE SET g.source_url = $url RETURN id(g)",
+                {"name": game, "url": source_url},
+            )
+            graph.query(
+                "MATCH (g:Game {name: $game}) MATCH (e:Event {event_id: $eid}) "
+                "MERGE (g)-[:HAD_EVENT {date: $date}]->(e)",
+                {"game": game, "eid": event_id, "date": date},
+            )
+        except Exception:
+            pass
+    elif scope_type == SCOPE_ORG and scope:
+        try:
+            # 조직 노드는 트리플 추출이 이미 만들었을 가능성이 높으므로 MERGE 로
+            # 기존 노드를 재사용합니다.
+            graph.query(
+                "MERGE (t:Team {name: $name}) ON CREATE SET t.source_url = $url RETURN id(t)",
+                {"name": scope, "url": source_url},
+            )
+            graph.query(
+                "MATCH (t:Team {name: $name}) MATCH (e:Event {event_id: $eid}) "
+                "MERGE (t)-[:HAD_EVENT {date: $date}]->(e)",
+                {"name": scope, "eid": event_id, "date": date},
+            )
+        except Exception:
+            pass
 
     # ── 3. 담당자/팀 MANAGED_BY 엣지 ───────────────────────────────────────
     if manager:
@@ -956,41 +1115,45 @@ def upsert_event_node(graph, event: dict) -> int:
         except Exception:
             pass
 
-    # ── 4. FOLLOWED_BY 자동 연결 (같은 게임, 날짜 순서) ─────────────────────
-    try:
-        # 직전 이벤트
-        prev_r = graph.query(
-            "MATCH (e:Event) WHERE e.game = $game AND e.date_ts < $ts "
-            "RETURN e.event_id, e.date_ts ORDER BY e.date_ts DESC LIMIT 1",
-            {"game": game, "ts": date_ts},
-        )
-        if prev_r.result_set:
-            prev_eid = prev_r.result_set[0][0]
-            prev_ts_v = prev_r.result_set[0][1]
-            days_diff = round((date_ts - prev_ts_v) / 86400)
-            graph.query(
-                "MATCH (p:Event {event_id: $p}), (c:Event {event_id: $c}) "
-                "MERGE (p)-[:FOLLOWED_BY {days_diff: $dd}]->(c)",
-                {"p": prev_eid, "c": event_id, "dd": days_diff},
+    # ── 4. FOLLOWED_BY 자동 연결 (같은 주체, 날짜 순서) ─────────────────────
+    # scope 기준으로 연결합니다. game 기준이던 이전 방식은 주체가 없는
+    # 이벤트를 모두 "기타"로 묶어, 재무실 일정과 인사팀 일정이 하나의
+    # 체인으로 잘못 이어졌습니다. scope 가 비면 체인을 만들지 않습니다.
+    if scope:
+        try:
+            # 직전 이벤트
+            prev_r = graph.query(
+                "MATCH (e:Event) WHERE e.scope = $scope AND e.date_ts < $ts "
+                "RETURN e.event_id, e.date_ts ORDER BY e.date_ts DESC LIMIT 1",
+                {"scope": scope, "ts": date_ts},
             )
+            if prev_r.result_set:
+                prev_eid = prev_r.result_set[0][0]
+                prev_ts_v = prev_r.result_set[0][1]
+                days_diff = round((date_ts - prev_ts_v) / 86400)
+                graph.query(
+                    "MATCH (p:Event {event_id: $p}) MATCH (c:Event {event_id: $c}) "
+                    "MERGE (p)-[:FOLLOWED_BY {days_diff: $dd}]->(c)",
+                    {"p": prev_eid, "c": event_id, "dd": days_diff},
+                )
 
-        # 직후 이벤트
-        next_r = graph.query(
-            "MATCH (e:Event) WHERE e.game = $game AND e.date_ts > $ts "
-            "RETURN e.event_id, e.date_ts ORDER BY e.date_ts ASC LIMIT 1",
-            {"game": game, "ts": date_ts},
-        )
-        if next_r.result_set:
-            next_eid = next_r.result_set[0][0]
-            next_ts_v = next_r.result_set[0][1]
-            days_diff = round((next_ts_v - date_ts) / 86400)
-            graph.query(
-                "MATCH (c:Event {event_id: $c}), (n:Event {event_id: $n}) "
-                "MERGE (c)-[:FOLLOWED_BY {days_diff: $dd}]->(n)",
-                {"c": event_id, "n": next_eid, "dd": days_diff},
+            # 직후 이벤트
+            next_r = graph.query(
+                "MATCH (e:Event) WHERE e.scope = $scope AND e.date_ts > $ts "
+                "RETURN e.event_id, e.date_ts ORDER BY e.date_ts ASC LIMIT 1",
+                {"scope": scope, "ts": date_ts},
             )
-    except Exception:
-        pass  # FOLLOWED_BY 실패는 치명적이지 않음
+            if next_r.result_set:
+                next_eid = next_r.result_set[0][0]
+                next_ts_v = next_r.result_set[0][1]
+                days_diff = round((next_ts_v - date_ts) / 86400)
+                graph.query(
+                    "MATCH (c:Event {event_id: $c}) MATCH (n:Event {event_id: $n}) "
+                    "MERGE (c)-[:FOLLOWED_BY {days_diff: $dd}]->(n)",
+                    {"c": event_id, "n": next_eid, "dd": days_diff},
+                )
+        except Exception:
+            pass  # FOLLOWED_BY 실패는 치명적이지 않음
 
     return event_node_id
 
@@ -1086,7 +1249,9 @@ def get_event_chain(
                     {"name": game},
                 )
                 actual_game = ev_r.result_set[0][0] if ev_r.result_set else game
-            where_parts.append("e.game = $game")
+            # scope 로도 매칭 — 조직 주체이거나 game 필드가 비워진 이벤트 대응.
+            # 재인제스트 전 데이터는 scope 가 없으므로 game 조건이 함께 필요합니다.
+            where_parts.append("(e.game = $game OR e.scope = $game)")
             params["game"] = actual_game
 
         # 이벤트 유형 필터 (FalkorDB IS NULL 파라미터 미지원 → 조건 분기로 처리)
@@ -1099,7 +1264,8 @@ def get_event_chain(
         if kws:
             where_parts.append(
                 "ANY(k IN $kws WHERE e.title CONTAINS k OR e.description CONTAINS k "
-                "OR e.game CONTAINS k OR e.category CONTAINS k OR e.manager CONTAINS k)"
+                "OR e.game CONTAINS k OR e.category CONTAINS k OR e.manager CONTAINS k "
+                "OR e.scope CONTAINS k)"
             )
             params["kws"] = kws
 
@@ -1113,8 +1279,10 @@ def get_event_chain(
             "       prev.title AS prev_title, prev.date AS prev_date, "
             "       nxt.title AS next_title, nxt.date AS next_date, "
             # category: Notion "변경카테고리" 원문 (예: "소재변경", "캠페인조정")
-            # manager:  담당자 — 기존 인덱스를 깨지 않도록 뒤에 추가합니다.
-            "       e.category AS category, e.manager AS manager "
+            # manager:  담당자 / scope: 주체(게임 또는 조직), scope_type: game|org|unknown
+            # 기존 인덱스를 깨지 않도록 모두 뒤에 추가합니다.
+            "       e.category AS category, e.manager AS manager, "
+            "       e.scope AS scope, e.scope_type AS scope_type "
             f"ORDER BY e.date_ts ASC LIMIT {int(limit)}"
         )
         r = graph.query(cypher, params)
@@ -1137,9 +1305,12 @@ def get_event_chain(
                 "source_url": row[7] or "",
                 "prev_event": {"title": row[8], "date": row[9]} if row[8] else None,
                 "next_event": {"title": row[10], "date": row[11]} if row[10] else None,
-                # 구버전 데이터는 category/manager 가 없을 수 있음 → 길이 확인 후 접근
+                # 구버전 데이터는 아래 필드가 없을 수 있음 → 길이 확인 후 접근
                 "category": (row[12] or "") if len(row) > 12 else "",
                 "manager": (row[13] or "") if len(row) > 13 else "",
+                # scope 미설정(재인제스트 전) 데이터는 game 으로 폴백
+                "scope": (row[14] or row[1] or "") if len(row) > 14 else (row[1] or ""),
+                "scope_type": (row[15] or "") if len(row) > 15 else "",
             }
             for row in r.result_set
         ]
@@ -1153,7 +1324,8 @@ def get_event_chain(
             ]
         else:
             timeline_summary = [
-                f"{e['date']}: ({e['game']}) [{e['category'] or e['event_type']}] {e['title']}"
+                f"{e['date']}: ({e['scope'] or e['game'] or '미분류'}) "
+                f"[{e['category'] or e['event_type']}] {e['title']}"
                 for e in events
             ]
 

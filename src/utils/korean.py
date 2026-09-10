@@ -68,6 +68,43 @@ _PARTICLES: tuple[str, ...] = (
 # 조사를 떼고 남는 최소 길이 — 1글자 후보는 오탐이 너무 많습니다.
 _MIN_STEM = 2
 
+def contains_as_token(text: str, name: str) -> bool:
+    """text 안에 name 이 '독립된 토큰'으로 등장하는지 확인합니다.
+
+    영문·숫자 코드는 앞뒤가 영숫자면 우연한 부분 문자열이므로 제외합니다.
+    게임 코드에 ONE·GOD·DS 처럼 짧은 것이 있어 단순 CONTAINS 는 오탐이 납니다.
+
+    한글은 조사가 바로 뒤에 붙어 경계 판정이 불가능하므로 그대로 통과시킵니다
+    (조사 처리는 strip_particle / 역방향 매칭이 담당).
+
+    >>> contains_as_token("MILESTONE 달성", "ONE")
+    False
+    >>> contains_as_token("ONE 업데이트", "ONE")
+    True
+    >>> contains_as_token("POTC-2026 패치", "POTC")
+    True
+    >>> contains_as_token("데사실은 어느 부서와", "데사실")
+    True
+    """
+    if not name or not text:
+        return False
+    # 순수 ASCII 영숫자(하이픈 허용) 코드만 경계 검사 — 그 외(한글 등)는 통과
+    probe = name.replace("-", "").replace("_", "")
+    if not (probe.isascii() and probe.isalnum()):
+        return name in text
+
+    start = 0
+    while True:
+        idx = text.find(name, start)
+        if idx < 0:
+            return False
+        before = text[idx - 1] if idx > 0 else " "
+        after = text[idx + len(name)] if idx + len(name) < len(text) else " "
+        if not (before.isalnum() or after.isalnum()):
+            return True
+        start = idx + 1
+
+
 def node_in_text_query(limit: int = 30) -> str:
     """질문 문장에 이름이 등장하는 노드를 찾는 역방향 매칭 Cypher.
 
@@ -98,6 +135,8 @@ def match_nodes_in_text(graph, text: str, limit: int = 5) -> list[tuple[str, str
         (str(r[0]), str(r[1]) if len(r) > 1 and r[1] else "")
         for r in res.result_set
         if r and r[0] and len(str(r[0])) >= _MIN_STEM
+        # 영문 코드가 다른 단어에 우연히 포함된 경우 제외 (ONE ⊄ MILESTONE)
+        and contains_as_token(text, str(r[0]))
     ]
     rows.sort(key=lambda x: len(x[0]), reverse=True)
     return rows[:limit]

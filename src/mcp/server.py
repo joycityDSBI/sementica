@@ -384,6 +384,8 @@ def _detect_games(graph, text: str, limit: int = 3) -> list[str]:
     (게임 노드 없이 이벤트만 적재된 구버전 데이터 대응).
     긴 이름을 우선합니다 — 조사·부분 문자열로 인한 오탐을 줄입니다.
     """
+    from utils.korean import contains_as_token
+
     names: list[str] = []
     for cypher in (
         "MATCH (g:Game) WHERE g.name IS NOT NULL AND $text CONTAINS g.name "
@@ -395,7 +397,13 @@ def _detect_games(graph, text: str, limit: int = 3) -> list[str]:
             res = graph.query(cypher, {"text": text})
         except Exception:
             continue
-        names = [str(r[0]) for r in res.result_set if r and r[0] and len(str(r[0])) >= 2]
+        names = [
+            str(r[0])
+            for r in res.result_set
+            if r and r[0] and len(str(r[0])) >= 2
+            # 게임 코드에 ONE·GOD·DS 등 짧은 영문이 있어 부분 문자열 오탐 제거
+            and contains_as_token(text, str(r[0]))
+        ]
         if names:
             break
     names.sort(key=len, reverse=True)
