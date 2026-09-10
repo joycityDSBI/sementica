@@ -669,6 +669,12 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
         prop_text = "\n".join(f"{k}: {v}" for k, v in db_props_meta.items())
         body = (prop_text + ("\n\n" + body if body.strip() else "")).strip()
         word_count = len(body.split())
+        # page 에도 반영해야 합니다. store_vector 는 page["body"] 를 읽으므로,
+        # 여기서 로컬 변수만 바꾸면 벡터는 원본(거의 빈 본문)으로 저장되고
+        # 해시·청킹·트리플만 합성본으로 계산됩니다. 그러면 sync.py 가 계산한
+        # 해시와 영원히 달라져 DB 행이 매번 LLM 재처리되고, evidence_chunk_id
+        # 가 Qdrant 에 없는 청크를 가리킵니다.
+        page["body"] = body
         if word_count > 0:
             print(f"     🔧 DB 속성에서 텍스트 합성 ({word_count} 단어)")
 

@@ -662,9 +662,12 @@ EVENT_TYPES: frozenset = frozenset(
 # ─── DB 속성 키 별칭 ─────────────────────────────────────────────────────────
 # Notion DB 컬럼명은 자유롭게 설정되므로, 소문자 비교(case-insensitive)로 처리한다.
 # ingest.py / sync.py 에서 공통으로 사용하는 단일 정의.
-DB_TITLE_KEYS = {
+# ※ 전부 **튜플**입니다 — set 을 쓰면 안 됩니다.
+#   한 DB 에 후보 컬럼이 둘 이상 있을 때(예: 담당자와 생성자, 변경일과 적용일)
+#   set 순회 순서는 PYTHONHASHSEED 에 따라 프로세스마다 달라져, 같은 페이지가
+#   실행할 때마다 다른 담당자·다른 날짜로 저장됩니다. 앞에 있을수록 우선.
+DB_TITLE_KEYS = (
     # Notion DB에서 실질적인 제목/메모를 담는 텍스트 컬럼 후보
-    # 우선순위: 앞에 있을수록 먼저 시도 (frozenset이므로 _first()가 순서 비결정적 — 리스트 사용)
     "메모",
     "memo",
     "제목",
@@ -675,22 +678,9 @@ DB_TITLE_KEYS = {
     "설명",
     "name",
     "이름",
-}
-# 우선순위가 있는 리스트 — _first()는 set 순서 비결정적이므로 별도 정의
-_DB_TITLE_KEYS_ORDERED = [
-    "메모",
-    "memo",
-    "제목",
-    "이벤트명",
-    "이벤트제목",
-    "내용",
-    "description",
-    "설명",
-    "name",
-    "이름",
-]
+)
 
-DB_DATE_KEYS = {
+DB_DATE_KEYS = (
     "이벤트날짜",
     "날짜",
     "일자",
@@ -700,8 +690,8 @@ DB_DATE_KEYS = {
     "시작날짜",
     "변경일",
     "적용일",
-}
-DB_GAME_KEYS = {
+)
+DB_GAME_KEYS = (
     "게임명",
     "게임",
     "game",
@@ -709,8 +699,8 @@ DB_GAME_KEYS = {
     "서비스명",
     "서비스",
     "project",  # RESU UA 히스토리 등 영문 PROJECT 컬럼 지원
-}
-DB_TYPE_KEYS = {
+)
+DB_TYPE_KEYS = (
     "이벤트유형",
     "유형",
     "event_type",
@@ -721,8 +711,8 @@ DB_TYPE_KEYS = {
     "category",
     "change_type",
     "변경유형",
-}
-DB_MANAGER_KEYS = {
+)
+DB_MANAGER_KEYS = (
     "담당자",
     "담당팀",
     "manager",
@@ -731,7 +721,7 @@ DB_MANAGER_KEYS = {
     "생성자",
     "작성자",
     "creator",  # Notion DB 생성자·작성자 컬럼 지원
-}
+)
 
 # 변경카테고리 원문 → EVENT_TYPES 정규값 매핑
 # 매핑에 없는 값은 그대로 event_type 으로 사용 (EVENT_TYPES 에 없으면 ua_campaign 으로 폴백)
@@ -940,8 +930,12 @@ def event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | N
     # 소문자 키 매핑으로 case-insensitive 비교
     lower = {k.lower(): v for k, v in db_props.items()}
 
-    def _first_with_key(keys: set) -> tuple[str | None, str]:
-        """(값, 매칭된 컬럼명) — 값의 출처를 알아야 주체 종류를 추론할 수 있습니다."""
+    def _first_with_key(keys: tuple) -> tuple[str | None, str]:
+        """(값, 매칭된 컬럼명) — 값의 출처를 알아야 주체 종류를 추론할 수 있습니다.
+
+        keys 는 우선순위 튜플입니다. set 을 넘기면 순회 순서가 프로세스마다
+        달라져 같은 페이지가 실행할 때마다 다른 값으로 저장됩니다.
+        """
         for k in keys:
             v = lower.get(k.lower())
             if v is not None:
@@ -949,7 +943,7 @@ def event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | N
                 return val, k
         return None, ""
 
-    def _first(keys: set) -> str | None:
+    def _first(keys: tuple) -> str | None:
         return _first_with_key(keys)[0]
 
     date = _first(DB_DATE_KEYS)
@@ -969,7 +963,7 @@ def event_from_db_props(db_props: dict, source_url: str, title: str) -> dict | N
     # DB 속성에서 실질적 제목 추출 (메모/내용 등 우선, 없으면 페이지 meta title 폴백)
     # meta title은 Notion 파일명(page_id)일 수 있으므로 DB 컬럼을 먼저 확인한다.
     db_title = ""
-    for tk in _DB_TITLE_KEYS_ORDERED:
+    for tk in DB_TITLE_KEYS:
         v = lower.get(tk.lower())
         if v is not None:
             db_title = ", ".join(str(x) for x in v) if isinstance(v, list) else str(v)
@@ -1204,10 +1198,14 @@ def upsert_event_node(graph, event: dict) -> int:
                 {"name": manager},
             )
             if mgr_r.result_set:
+                # 찾은 그 노드에만 연결합니다. 이름만으로 다시 MATCH 하면
+                # 같은 이름이 :Team 과 :Role 로 각각 존재할 때(LLM 이 문서마다
+                # 다른 타입을 붙이는 일이 흔합니다) 양쪽에 엣지가 생깁니다.
                 graph.query(
-                    "MATCH (m {name: $mgr}), (e:Event {event_id: $eid}) "
+                    "MATCH (m) WHERE id(m) = $mid "
+                    "MATCH (e:Event {event_id: $eid}) "
                     "MERGE (e)-[:MANAGED_BY]->(m)",
-                    {"mgr": manager, "eid": event_id},
+                    {"mid": mgr_r.result_set[0][0], "eid": event_id},
                 )
         except Exception:
             pass
@@ -1224,15 +1222,7 @@ def upsert_event_node(graph, event: dict) -> int:
                 "RETURN e.event_id, e.date_ts ORDER BY e.date_ts DESC LIMIT 1",
                 {"scope": scope, "ts": date_ts},
             )
-            if prev_r.result_set:
-                prev_eid = prev_r.result_set[0][0]
-                prev_ts_v = prev_r.result_set[0][1]
-                days_diff = round((date_ts - prev_ts_v) / 86400)
-                graph.query(
-                    "MATCH (p:Event {event_id: $p}) MATCH (c:Event {event_id: $c}) "
-                    "MERGE (p)-[:FOLLOWED_BY {days_diff: $dd}]->(c)",
-                    {"p": prev_eid, "c": event_id, "dd": days_diff},
-                )
+            prev_eid = prev_r.result_set[0][0] if prev_r.result_set else None
 
             # 직후 이벤트
             next_r = graph.query(
@@ -1240,14 +1230,34 @@ def upsert_event_node(graph, event: dict) -> int:
                 "RETURN e.event_id, e.date_ts ORDER BY e.date_ts ASC LIMIT 1",
                 {"scope": scope, "ts": date_ts},
             )
-            if next_r.result_set:
-                next_eid = next_r.result_set[0][0]
+            next_eid = next_r.result_set[0][0] if next_r.result_set else None
+
+            # 이 이벤트가 기존 prev→next 구간을 가릅니다. 낡은 건너뛰기 엣지를
+            # 먼저 지우지 않으면 A→C 가 남은 채 A→B, B→C 가 추가되어, A 의
+            # "직후 이벤트"가 B 인지 C 인지 비결정적이 되고 존재하지 않는
+            # 간격(A→C 의 days_diff)이 그대로 보고됩니다. 인제스트가 병렬이라
+            # 날짜 역순 도착은 예외가 아니라 일상입니다.
+            if prev_eid and next_eid:
+                graph.query(
+                    "MATCH (p:Event {event_id: $p})-[r:FOLLOWED_BY]->(n:Event {event_id: $n}) "
+                    "DELETE r",
+                    {"p": prev_eid, "n": next_eid},
+                )
+
+            if prev_eid:
+                prev_ts_v = prev_r.result_set[0][1]
+                graph.query(
+                    "MATCH (p:Event {event_id: $p}) MATCH (c:Event {event_id: $c}) "
+                    "MERGE (p)-[r:FOLLOWED_BY]->(c) SET r.days_diff = $dd",
+                    {"p": prev_eid, "c": event_id, "dd": round((date_ts - prev_ts_v) / 86400)},
+                )
+
+            if next_eid:
                 next_ts_v = next_r.result_set[0][1]
-                days_diff = round((next_ts_v - date_ts) / 86400)
                 graph.query(
                     "MATCH (c:Event {event_id: $c}) MATCH (n:Event {event_id: $n}) "
-                    "MERGE (c)-[:FOLLOWED_BY {days_diff: $dd}]->(n)",
-                    {"c": event_id, "n": next_eid, "dd": days_diff},
+                    "MERGE (c)-[r:FOLLOWED_BY]->(n) SET r.days_diff = $dd",
+                    {"c": event_id, "n": next_eid, "dd": round((next_ts_v - date_ts) / 86400)},
                 )
         except Exception:
             pass  # FOLLOWED_BY 실패는 치명적이지 않음
@@ -1367,8 +1377,14 @@ def get_event_chain(
             params["kws"] = kws
 
         # OPTIONAL MATCH 으로 prev/next 를 단일 쿼리에서 조회 (이벤트당 2회 N+1 제거)
+        #
+        # LIMIT 은 **OPTIONAL MATCH 앞**에 둡니다. 뒤에 두면 한 이벤트에 선행·
+        # 후행이 여러 개일 때 행이 곱해져서, LIMIT 20 이 이벤트 20건이 아니라
+        # 행 20개를 뜻하게 됩니다 (같은 이벤트가 네 번 나오고 total 도 부풀려짐).
+        # 남는 행 중복은 아래에서 event_id 로 제거합니다.
         cypher = (
             "MATCH (e:Event) WHERE " + " AND ".join(where_parts) + " "
+            f"WITH e ORDER BY e.date_ts ASC LIMIT {int(limit)} "
             "OPTIONAL MATCH (prev:Event)-[:FOLLOWED_BY]->(e) "
             "OPTIONAL MATCH (e)-[:FOLLOWED_BY]->(nxt:Event) "
             "RETURN e.event_id, e.game, e.event_type, e.date, "
@@ -1380,12 +1396,21 @@ def get_event_chain(
             # 기존 인덱스를 깨지 않도록 모두 뒤에 추가합니다.
             "       e.category AS category, e.manager AS manager, "
             "       e.scope AS scope, e.scope_type AS scope_type "
-            f"ORDER BY e.date_ts ASC LIMIT {int(limit)}"
+            "ORDER BY e.date_ts ASC"
         )
         r = graph.query(cypher, params)
 
         if not r.result_set:
             return _empty(actual_game)
+
+        # prev/next 가 여러 개면 같은 이벤트가 여러 행으로 나옵니다. 첫 행만 씁니다.
+        _seen_eids: set = set()
+        rows = []
+        for row in r.result_set:
+            if row[0] in _seen_eids:
+                continue
+            _seen_eids.add(row[0])
+            rows.append(row)
 
         # row: [event_id, game, event_type, date, title, description,
         #       target, source_url, prev_title, prev_date, next_title, next_date,
@@ -1409,7 +1434,7 @@ def get_event_chain(
                 "scope": (row[14] or row[1] or "") if len(row) > 14 else (row[1] or ""),
                 "scope_type": (row[15] or "") if len(row) > 15 else "",
             }
-            for row in r.result_set
+            for row in rows
         ]
 
         # 요약 줄에 category 를 함께 노출 — "어떤 변경 카테고리인가?" 류 질문에

@@ -78,6 +78,50 @@ from utils.retrieval import (
     vector_search_pages as _vector_search_pages,
 )
 
+# 도구 응답 문자 예산. 분해된 질문은 (서브쿼리 수 * limit 페이지 * PAGE_MAX_CHARS)
+# 라 손쉽게 수십만 자가 됩니다. 평가는 60000자로 자르는데 서비스는 자르지 않아,
+# 골든셋이 재는 컨텍스트와 실제로 클라이언트에 넘기는 양이 달랐습니다.
+RESPONSE_MAX_CHARS = int(os.environ.get("RESPONSE_MAX_CHARS", "60000"))
+# 그래프 엣지에서 끌어오는 보조 문서 수 상한. 허브 노드(예: "운영팀")를 물면
+# 엣지 source_url 이 수백 개가 되고, 그 전부의 청크를 스크롤하게 됩니다.
+MAX_LINKED_PAGES = int(os.environ.get("MAX_LINKED_PAGES", "10"))
+
+
+def _fit_response_budget(semantic: list, linked: list) -> tuple[list, list, bool]:
+    """문자 예산에 맞게 앞에서부터 담습니다 (evaluate.py 의 예산 채우기와 동일 규칙).
+
+    첫 문서는 예산을 넘더라도 넣습니다 — 빈 응답보다 낫습니다.
+    """
+    out_sem: list = []
+    out_link: list = []
+    total = 0
+    for d in semantic:
+        block = len(d.get("content", "")) + len(d.get("title", "")) + 20
+        if out_sem and total + block > RESPONSE_MAX_CHARS:
+            break
+        total += block
+        out_sem.append(d)
+    for d in linked[:MAX_LINKED_PAGES]:
+        block = len(d.get("content", "")) + len(d.get("title", "")) + 20
+        if total + block > RESPONSE_MAX_CHARS:
+            break
+        total += block
+        out_link.append(d)
+    truncated = len(out_sem) < len(semantic) or len(out_link) < len(linked)
+    return out_sem, out_link, truncated
+
+
+def tool_fn(tool):
+    """@mcp.tool() 데코레이트된 객체에서 실제 함수를 꺼냅니다.
+
+    FastMCP 버전에 따라 @mcp.tool() 이 원본 함수를 그대로 돌려주기도 하고
+    호출 불가능한 FunctionTool 을 돌려주기도 합니다. 후자에서 도구를 내부
+    호출하면 TypeError 가 나는데, hybrid_search 의 _do_graph 는 예외를
+    삼키므로 그래프 결과만 조용히 비게 됩니다. requirements 가
+    fastmcp>=2.0.0 로 열려 있어 재설치 시점에 따라 갈립니다.
+    """
+    return getattr(tool, "fn", tool)
+
 
 def _complete_for_decompose(prompt: str) -> str:
     """쿼리 분해용 LLM 호출 — 분해 로직 자체는 utils.retrieval 이 담당합니다.
@@ -185,8 +229,11 @@ def _search_event_timeline(query: str, limit: int = 20) -> dict:
         return {}
 
 
-def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
+def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list, list]:
     """서브쿼리 단위 벡터+그래프 검색 — ThreadPoolExecutor로 두 검색을 병렬 실행.
+
+    Returns:
+        (벡터 결과, 그래프 결과, 오류 메시지 목록)
 
     순차 실행 대비 레이턴시: (vec_ms + gph_ms) → max(vec_ms, gph_ms)
     일반적으로 300~500ms → 200~300ms 수준으로 단축.
@@ -201,10 +248,15 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
       1~2건만 남아 다른 문서를 아예 보지 못합니다.
     """
 
+    errors: list[str] = []
+
     def _do_vector() -> list:
         try:
             return _vector_search_pages(_get_qdrant(), COLLECTION_NAME, _embed(sub_query), limit)
-        except Exception:
+        except Exception as e:
+            # 삼키기만 하면 Qdrant 가 죽어도 "문서 없음"과 똑같이 보입니다.
+            # 빈 결과는 유지하되(부분 응답이 낫습니다) 사유는 위로 올립니다.
+            errors.append(f"벡터 검색 실패: {type(e).__name__}: {e}")
             return []
 
     def _do_graph() -> list:
@@ -213,17 +265,18 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
             # 엔티티 탐색은 utils.retrieval 이 담당 (역방향 매칭 → 조사 제거 폴백).
             # 평가 파이프라인도 같은 함수를 씁니다.
             seen: set = set()
+            _graph_search = tool_fn(graph_search)
             for entity_name in _find_entities(_get_falkordb(), sub_query, limit=5):
                 if entity_name in seen:
                     continue
                 seen.add(entity_name)
-                g = graph_search(entity_name, depth=1)
+                g = _graph_search(entity_name, depth=1)
                 if g.get("found"):
                     gph.append(g)
                 if len(gph) >= 3:
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            errors.append(f"그래프 검색 실패: {type(e).__name__}: {e}")
         return gph
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -232,7 +285,7 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
         sem = f_vec.result()
         gph = f_gph.result()
 
-    return sem, gph
+    return sem, gph, errors
 
 
 # ─── DB 로거 ──────────────────────────────────────────────────────────────────
@@ -335,7 +388,8 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
         list of {
             title:       Notion 페이지 제목,
             source_url:  Notion 원본 URL (반드시 인용),
-            content:     페이지 전체 본문 (최대 4000자, chunk_index 순 조합),
+            content:     페이지 전체 본문 (chunk_index 순 조합, PAGE_MAX_CHARS 한도.
+                         초과하면 매칭 청크 중심으로 잘라내고 생략 표시를 넣습니다),
             chunk_count: 이 페이지의 총 청크 수,
             score:       유사도 점수 (0~1, 높을수록 관련성 높음)
         }
@@ -664,6 +718,7 @@ def hybrid_search(query: str, limit: int = _DEFAULT_PAGE_LIMIT) -> dict[str, Any
         # 레이턴시: O(max(sub_queries)) 아닌 O(max(single_sub_query))
         sem_per_q: list[list] = []
         all_graph_hits: list = []
+        search_errors: list[str] = []
 
         # +1 워커: 이벤트 타임라인 조회를 서브쿼리 검색과 병렬로 실행하므로
         # 레이턴시가 추가되지 않습니다.
@@ -674,9 +729,10 @@ def hybrid_search(query: str, limit: int = _DEFAULT_PAGE_LIMIT) -> dict[str, Any
             tl_future = sq_pool.submit(_search_event_timeline, query)
             sq_futures = [sq_pool.submit(_run_sub_search, sq, limit) for sq in sub_queries]
             for fut in as_completed(sq_futures):
-                sem, gph = fut.result()
+                sem, gph, errs = fut.result()
                 sem_per_q.append(sem)
                 all_graph_hits.extend(gph)
+                search_errors.extend(errs)
             timeline = tl_future.result()
 
         # ── 3. 벡터 결과 병합 (coverage 재랭킹) ────────────────────────────
@@ -715,10 +771,16 @@ def hybrid_search(query: str, limit: int = _DEFAULT_PAGE_LIMIT) -> dict[str, Any
         if edge_urls:
             try:
                 qc = _get_qdrant()
-                lp_map = _fetch_pages_by_source_urls(qc, COLLECTION_NAME, edge_urls, max_chars=1500)
+                # 페이지마다 청크를 스크롤하므로 가져올 개수를 먼저 자릅니다.
+                lp_map = _fetch_pages_by_source_urls(
+                    qc, COLLECTION_NAME, edge_urls[:MAX_LINKED_PAGES], max_chars=1500
+                )
                 linked_pages = list(lp_map.values())
-            except Exception:
-                pass
+            except Exception as e:
+                search_errors.append(f"연결 문서 조회 실패: {type(e).__name__}: {e}")
+
+        # ── 6-b. 응답 크기 제한 ─────────────────────────────────────────────
+        semantic, linked_pages, _truncated = _fit_response_budget(semantic, linked_pages)
 
         _result = {
             "semantic_results": semantic,
@@ -728,6 +790,12 @@ def hybrid_search(query: str, limit: int = _DEFAULT_PAGE_LIMIT) -> dict[str, Any
             "decomposed": decomposed,
             "sub_queries": sub_queries if decomposed else [],
         }
+        if _truncated:
+            _result["truncated"] = f"응답이 {RESPONSE_MAX_CHARS}자 예산에 맞춰 잘렸습니다."
+        if search_errors:
+            # 결과가 비었을 때 "자료가 없다"와 "검색이 실패했다"를 호출한
+            # 모델이 구분할 수 있어야 합니다.
+            _result["errors"] = search_errors
 
         # ── 7. 이벤트 타임라인 (날짜 기반 질문일 때만 존재) ─────────────────
         # 조건 미충족 시 키를 넣지 않습니다 — 호출자가 무관한 빈 필드를
@@ -746,13 +814,16 @@ def hybrid_search(query: str, limit: int = _DEFAULT_PAGE_LIMIT) -> dict[str, Any
         _err = str(e)
         raise
     finally:
+        # 부분 실패도 로그에 남깁니다. 예전에는 Qdrant 가 죽어 빈 결과가
+        # 나가도 error=None 으로 기록돼, 대시보드에서 100% 성공으로 보였습니다.
+        _partial = "; ".join(_result.get("errors", [])) if _result else ""
         log_mcp_request(
             dept=DEPT_NAME,
             tool="hybrid_search",
             query=query,
             result_count=len(_result.get("semantic_results", [])) if _result else 0,
             duration_ms=int((time.time() - _t0) * 1000),
-            error=_err,
+            error=_err or _partial or None,
         )
 
 

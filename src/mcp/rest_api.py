@@ -122,7 +122,7 @@ async def rest_search(request: Request):
         limit = _clamp(body.get("limit"), 5, MAX_LIMIT)
         if not query:
             return JSONResponse({"error": "query 파라미터가 필요합니다"}, status_code=400)
-        results = _srv.semantic_search(query=query, limit=limit)
+        results = _srv.tool_fn(_srv.semantic_search)(query=query, limit=limit)
         return JSONResponse({"results": results, "count": len(results)})
     except Exception as e:
         return JSONResponse({"error": str(e), "results": [], "count": 0}, status_code=500)
@@ -142,7 +142,7 @@ async def rest_graph(request: Request):
         depth = _clamp(body.get("depth"), 1, MAX_DEPTH)
         if not entity:
             return JSONResponse({"error": "entity 파라미터가 필요합니다"}, status_code=400)
-        result = _srv.graph_search(entity=entity, depth=depth)
+        result = _srv.tool_fn(_srv.graph_search)(entity=entity, depth=depth)
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e), "found": False}, status_code=500)
@@ -166,7 +166,7 @@ async def rest_events(request: Request):
         limit = _clamp(body.get("limit"), 20, MAX_LIMIT)
         if not game:
             return JSONResponse({"error": "game 파라미터가 필요합니다"}, status_code=400)
-        result = _srv.timeline_search(
+        result = _srv.tool_fn(_srv.timeline_search)(
             game=game,
             event_type=event_type,
             from_date=from_date,
@@ -192,7 +192,7 @@ async def rest_hybrid(request: Request):
         limit = _clamp(body.get("limit"), 8, MAX_LIMIT)
         if not query:
             return JSONResponse({"error": "query 파라미터가 필요합니다"}, status_code=400)
-        result = _srv.hybrid_search(query=query, limit=limit)
+        result = _srv.tool_fn(_srv.hybrid_search)(query=query, limit=limit)
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -225,7 +225,7 @@ async def sf_search(request: Request):
             query = str(row[1]).strip() if len(row) > 1 else ""
             limit = _clamp(row[2], 5, MAX_LIMIT) if len(row) > 2 else 5
             try:
-                results = _srv.semantic_search(query=query, limit=limit)
+                results = _srv.tool_fn(_srv.semantic_search)(query=query, limit=limit)
                 out.append([idx, {"results": results, "count": len(results)}])
             except Exception as e:
                 out.append([idx, {"error": str(e), "results": [], "count": 0}])
@@ -260,7 +260,7 @@ async def sf_events(request: Request):
             to_date = str(row[4]).strip() if len(row) > 4 else ""
             limit = _clamp(row[5], 20, MAX_LIMIT) if len(row) > 5 else 20
             try:
-                result = _srv.timeline_search(
+                result = _srv.tool_fn(_srv.timeline_search)(
                     game=game,
                     event_type=event_type,
                     from_date=from_date,
@@ -297,7 +297,7 @@ async def sf_hybrid(request: Request):
             query = str(row[1]).strip() if len(row) > 1 else ""
             limit = _clamp(row[2], 8, MAX_LIMIT) if len(row) > 2 else 8
             try:
-                result = _srv.hybrid_search(query=query, limit=limit)
+                result = _srv.tool_fn(_srv.hybrid_search)(query=query, limit=limit)
                 out.append([idx, result])
             except Exception as e:
                 out.append([idx, {"error": str(e)}])

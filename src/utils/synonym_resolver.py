@@ -46,6 +46,7 @@ API 구조 (catalog.joycityplay.com):
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -83,8 +84,13 @@ _FAIL_RETRY: float = 120.0
 # 연속 실패가 이 횟수에 도달하면 해당 프로세스에서는 더 시도하지 않습니다.
 # (용어집 서버에 접근할 수 없는 환경에서 인제스트 전체가 지연되는 것을 방지)
 _MAX_FAILS: int = 3
+# _MAX_FAILS 도달 후의 재시도 간격. 영구 포기 대신 아주 드물게만 시도합니다 —
+# 장기 실행 프로세스가 부팅 직후의 일시적 장애 때문에 계속 꺼져 있지 않도록.
+_GIVEUP_RETRY: float = 1800.0
 _fail_count: int = 0
 _last_attempt: float = -1e9
+# 여러 스레드가 동시에 같은 로드를 수행하지 않도록 보호합니다.
+_load_lock = threading.Lock()
 
 # {alias/term → canonical_term}
 _alias_map: dict[str, str] = {}
@@ -147,12 +153,13 @@ def _load_from_snapshot() -> bool:
     if not alias:
         return False
 
-    _alias_map = alias
+    # _alias_map 은 "로드됨" 판정 기준이므로 맨 마지막에 대입합니다 (_load 와 동일).
     _expand_map = expand_m
     _category_of = cat_of
     _by_category = by_cat
     # TTL 을 적용해 이후 API 재시도 기회를 남깁니다.
     _loaded_at = time.monotonic()
+    _alias_map = alias
     logger.info(
         "용어집 스냅샷 로드: %d개 term, 카테고리 %s (생성 %s)",
         len(expand_m),
@@ -195,12 +202,16 @@ def _load() -> None:
                 except Exception as cat_exc:
                     logger.warning("용어집 카테고리 조회 실패 (%s): %s", cat, cat_exc)
 
-        _alias_map = alias
+        # _alias_map 을 **마지막에** 바꿉니다. _ensure() 가 "_alias_map 이
+        # 차 있으면 로드됨"으로 판단하므로, 이걸 먼저 대입하면 다른 스레드가
+        # 새 alias 와 아직 갱신되지 않은 category 인덱스를 함께 보게 되어
+        # category_of()/resolve_in() 이 빈 값을 돌려줍니다.
         _expand_map = expand_m
         _category_of = cat_of
         _by_category = by_cat
         _loaded_at = time.monotonic()
         _fail_count = 0
+        _alias_map = alias
         logger.info(
             "용어집 로드 완료: %d개 term, %d개 alias, 카테고리 %s (URL: %s)",
             len(expand_m),
@@ -243,18 +254,32 @@ def _ensure() -> None:
     ※ 재시도 폭주 방지: resolve()/resolve_in() 은 인제스트 중 이벤트마다
       호출되므로, 캐시가 비어 있다고 매번 네트워크를 때리면 타임아웃마다
       파이프라인이 멈춥니다. 실패 시에는 _FAIL_RETRY 간격을 두고,
-      연속 _MAX_FAILS 회 실패하면 해당 프로세스에서 완전히 포기합니다.
+      연속 _MAX_FAILS 회 실패한 뒤에는 _GIVEUP_RETRY 로 간격을 크게 늘립니다.
+
+    ※ 완전히 포기하지는 않습니다. MCP 서버는 Restart=always 로 며칠씩 떠
+      있는데, 부팅 직후 몇 분간 용어집 서버가 닫혀 있었다는 이유로 프로세스
+      수명 내내 동의어 해결이 꺼져 있으면 안 됩니다.
+
+    ※ 여러 스레드가 동시에 들어와도 로드는 한 번만 수행합니다.
     """
     if _alias_map:
         if time.monotonic() - _loaded_at > _TTL:
-            _load()
+            with _load_lock:
+                if time.monotonic() - _loaded_at > _TTL:
+                    _load()
         return
 
     # 아직 한 번도 로드하지 못한 상태
-    if _fail_count >= _MAX_FAILS:
-        return  # 접근 불가 환경 — 더 시도하지 않음
-    if time.monotonic() - _last_attempt > _FAIL_RETRY:
-        _load()
+    wait = _GIVEUP_RETRY if _fail_count >= _MAX_FAILS else _FAIL_RETRY
+    if time.monotonic() - _last_attempt <= wait:
+        return
+    with _load_lock:
+        # 락을 기다리는 동안 다른 스레드가 이미 로드했을 수 있습니다.
+        if _alias_map:
+            return
+        wait = _GIVEUP_RETRY if _fail_count >= _MAX_FAILS else _FAIL_RETRY
+        if time.monotonic() - _last_attempt > wait:
+            _load()
 
 
 # ── 공개 API ──────────────────────────────────────────────────────────────────
@@ -339,7 +364,12 @@ def categories() -> dict[str, int]:
 
 
 def is_available() -> bool:
-    """용어집이 로드되어 사용 가능한 상태인지 — 진단용."""
+    """용어집이 로드되어 사용 가능한 상태인지 — 진단용.
+
+    로드를 먼저 시도합니다. 그냥 캐시만 보면, 아직 아무도 조회하지 않은
+    시점에 호출했을 때 (스냅샷으로 정상 동작할 상황에서도) False 가 나옵니다.
+    """
+    _ensure()
     return bool(_alias_map)
 
 
