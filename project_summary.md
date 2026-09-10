@@ -1,7 +1,7 @@
 # Semantica — 프로젝트 전체 요약
 
 > JoyCity 전략사업본부 Notion 기반 온톨로지 검색 솔루션  
-> 최종 업데이트: 2026-09-10 (이벤트 주체 분류, 타임라인 통합, 한국어 조사 매칭, `sys.path` 버그 수정)
+> 최종 업데이트: 2026-09-10 (페이지 절단 정책 수정 — 골든셋 **0.950**, 이벤트 주체 분류, 타임라인 통합)
 
 ---
 
@@ -467,18 +467,27 @@ n.name CONTAINS "데사실은"     → 매칭 실패
 timeline_search(keyword="재무실", from_date="2026-06-01", to_date="2026-06-30")
 ```
 
-**Parent Document Retrieval (2026-09-03 적용)**
+**Parent Document Retrieval (2026-09-03 적용, 2026-09-10 절단 정책 수정)**
 ```
-벡터 유사도 → 상위 k 청크 → page_id 수집
+벡터 유사도 → 상위 k 청크 → page_id 수집 + 최고점 청크를 앵커로 기록
                                 ↓
           Qdrant scroll (page_id MatchAny 필터)
                                 ↓
      같은 page_id의 모든 청크 → chunk_index 정렬 → 전체 본문 조합
                                 ↓
-     반환: {title, source_url, content(최대 4000자), chunk_count, score}
+     PAGE_MAX_CHARS(16000) 이하 → 전문 그대로
+     초과 → 앵커 청크 중심 윈도우 (앞 1/3은 선행 문맥, 생략 표기 삽입)
+                                ↓
+     반환: {title, source_url, content, chunk_count, score, total_chars, truncated}
 ```
 - 기존: `text_preview` (300자 미리보기) → 청크 단위 단편적 문맥
-- 개선: `content` (전체 페이지, 최대 4000자) → 완전한 문맥 해석
+- 개선: `content` (페이지 전문) → 완전한 문맥 해석
+
+> ⚠️ **절단은 앞에서 하면 안 됩니다.** 2026-09-10 이전에는 `full_text[:4000]` 으로
+> 페이지 앞부분만 남겼습니다. 벡터 검색이 찾아낸 청크가 문서 뒤쪽에 있으면
+> **근거를 검색해놓고 전달 직전에 버리는** 결과가 됩니다. 골든셋 Q07·Q18·Q20 이
+> 정확히 이 경우였고(근거 청크 26·27 / 페이지 25226자), 수정 후 세 문항이 동시에
+> 0.0 → 1.0 이 되었습니다. `PAGE_MAX_CHARS` 환경변수로 조정할 수 있습니다.
 
 **그래프→벡터 크로스링킹 (2026-09-07 추가)**
 
@@ -652,8 +661,27 @@ Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 �
 | `tools/backfill_html_flag.py` | `has_html_attachment` DB 백필 |
 | `tools/debug_html_blocks.py` | Notion 페이지 HTML 블록 구조 진단 |
 | `tools/fetch_glossary_snapshot.py` | 용어집 오프라인 스냅샷 생성 (VM 네트워크 차단 대응) |
+| `tools/diag_golden_miss.py` | 실패 문항 진단 — 근거·검색·전달 3단계 중 어디서 잃었는지 |
+| `tools/diag_generation.py` | 생성 단계 진단 — 컨텍스트 길이 vs 프롬프트 A/B/C 비교 |
 | `src/eval/gen_golden_set.py` | 현재 데이터에서 골든셋 자동 생성 |
 | `src/eval/evaluate.py` | 골든셋 기반 검색 품질 평가 |
+
+**실패 문항 진단 흐름**:
+```bash
+# ① 근거·검색·전달 중 어디서 잃었는지
+python tools/diag_golden_miss.py --dept strategic \
+    --golden data/eval/golden_set_YYYYMMDD.json \
+    --result data/eval/eval_result_YYYYMMDD_HHMMSS.json
+
+# ② "전달됨"으로 분류된 문항 → 생성 단계 원인 분리
+python tools/diag_generation.py --dept strategic \
+    --golden data/eval/golden_set_YYYYMMDD.json --ids Q07,Q18,Q20
+```
+> ①의 근거 판정은 **의미 기반**입니다. 골든셋 정답은 `verify_grounded` 가 재서술을
+> 허용해 채택한 문장이라 원문에 같은 문자열이 없습니다 — 문자열 매칭으로 검사하면
+> 모든 문항이 "데이터 없음"으로 오판됩니다.
+> ③ 전달 검사는 `server.py` 의 `_window_around_anchor` 를 소스에서 추출해 그대로
+> 적용하므로, 진단기와 운영 코드가 어긋나지 않습니다.
 
 **`tools/backfill_html_flag.py` 사용법**:
 ```bash
@@ -802,9 +830,31 @@ python src/eval/evaluate.py --dept strategic --golden data/eval/golden_set_YYYYM
 |------|------|--------|----------|------|---------|------|------|
 | 2026-09-09 ① | 0.775 | 1.00 | 1.00 | 0.70 | 0.67 | 0.33 | 조사 수정 전 |
 | 2026-09-09 ② | 0.825 | 1.00 | 1.00 | **0.90** | 0.67 | 0.33 | 조사 매칭 수정 후 |
+| 2026-09-10 ③ | 0.850 | 1.00 | 0.75 | 1.00 | 1.00 | 0.33 | 재인제스트 + 새 골든셋(20문항 교체) |
+| 2026-09-10 ④ | 0.825 | 1.00 | 0.75 | 0.90 | 1.00 | 0.33 | 청크 오버샘플 — 효과 없음, Q13 악화 |
+| 2026-09-10 ⑤ | **0.950** | 1.00 | 0.88 | 0.90 | 1.00 | **1.00** | **페이지 절단 제거 + 앵커 윈도우** |
 
-② 이후 컨텍스트 예산 정렬·이벤트 통합·동의어 정규화가 추가되어 **측정 조건이 바뀌었으므로
-이전 점수와 직접 비교할 수 없습니다.** 총점보다 카테고리별 변화와 개별 문항의 성패를 봐야 합니다.
+③에서 골든셋을 현재 데이터로 재생성해 문항이 전부 바뀌었으므로 ②까지와는 비교할 수 없습니다.
+난이도별로는 ⑤에서 easy 1.00 / medium 0.89 / **hard 1.00** 입니다.
+
+**⑤의 결정적 수정**: 페이지 본문을 앞 4000자로 자르던 것이 복합·정책 카테고리 실패의 유일한 원인이었습니다.
+Q07(근거가 청크 26·27, 페이지 25226자)·Q18·Q20 모두 **검색은 1~2위로 성공했지만 전달 단계에서
+근거가 잘려나가고** 있었습니다. 한도를 16000자로 올리고 초과 시 매칭 청크 중심으로 윈도우를 잡자
+세 문항이 동시에 0.0 → 1.0 이 되었습니다.
+
+> 그 전에 시도한 청크 오버샘플(④)은 검색량만 4배 늘렸을 뿐 전달 범위를 바꾸지 않아 효과가 없었고,
+> Q13은 오히려 악화시켰습니다. **"검색됐는가"와 "전달됐는가"를 구분해 진단해야 합니다** —
+> `tools/diag_golden_miss.py` 가 그 세 단계(근거·검색·전달)를 분리해 보여줍니다.
+
+**남은 0.5 문항 (골든셋 품질 이슈)**
+
+| 문항 | 내용 | 판단 |
+|------|------|------|
+| Q08 | "쿼리에서 GROUP BY 절 항목은?" | 문서에 쿼리가 여러 개인데 **어느 쿼리인지 특정하지 않음**. 검색이 풍부해질수록 불리 |
+| Q13 | "키링 프리셋 저장은 어떤 문제와 관련?" | 정답이 그래프 관계인데 그래프 1건 대 벡터 22건 — 문서 부가 정보가 답변을 지배 |
+
+> 이 둘을 1.0 으로 만들려 시스템을 조정하면 골든셋 오버피팅입니다. 문항 교체나
+> 관계 질문의 그래프 가중치 조정을 별도 과제로 다루는 편이 낫습니다.
 
 > ⚠️ **평가와 서비스가 다른 코드를 탄다**는 점이 반복해서 문제를 일으켰습니다.
 > 컨텍스트 예산 불일치, `utils` 임포트 실패(평가만 통과) 모두 같은 원인입니다.
@@ -850,8 +900,12 @@ python src/eval/evaluate.py --dept strategic --golden data/eval/golden_set_YYYYM
 | 32 | 미등록 게임·미분류 리포트 | ✅ | 인제스트 요약에 노출 → 용어집 갱신 순환, 2026-09-10 |
 | 33 | `sys.path` 버그 수정 | ✅ | `eval/` 외 전 진입점에서 `utils` 임포트 실패 → Entity Linking 미작동, 2026-09-10 |
 | 34 | 용어집 오프라인 스냅샷 | ✅ | VM 네트워크 차단 대응 + 재시도 폭주 방지, 2026-09-10 |
-| 35 | VM 용어집 네트워크 복구 | 🔜 | `catalog.joycityplay.com` 접근 차단 (curl → 000). 스냅샷으로 우회 중 |
-| 36 | 평가·서비스 검색 경로 통합 | 🔜 | 타임라인만 공통화됨. 벡터·그래프는 여전히 이중 구현 |
+| 35 | 페이지 절단 정책 수정 | ✅ | 앞 4000자 → 16000자 + 앵커 윈도우. 복합 0.33 → 1.00, 2026-09-10 |
+| 36 | 검색 실패 원인 진단 도구 | ✅ | `diag_golden_miss.py`(근거·검색·전달), `diag_generation.py`(길이·프롬프트), 2026-09-10 |
+| 37 | 골든셋 문항 품질 개선 | 🔜 | Q08(질문 모호), Q13(그래프 관계인데 벡터가 지배) — 남은 0.5 두 문항 |
+| 38 | 청크 오버샘플 재검토 | 🔜 | 효과 미확인. `CHUNK_OVERSAMPLE` A/B 필요 (Q13 악화 의심) |
+| 39 | VM 용어집 네트워크 복구 | 🔜 | `catalog.joycityplay.com` 접근 차단 (curl → 000). 스냅샷으로 우회 중 |
+| 40 | 평가·서비스 검색 경로 통합 | 🔜 | 타임라인만 공통화됨. 벡터·그래프는 여전히 이중 구현 |
 | 37 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
 | 38 | LLM 결과 캐싱 | 🔜 | content_hash 기반 triplets 캐시 → --reset 속도 대폭 단축 |
 | 39 | 동의어 사전 "데사실" 등록 | 🔜 | Business Glossary API에 데사실 → 데이터사이언스실 추가 필요 |
@@ -886,6 +940,15 @@ POSTGRES_URL=postgresql://user:pass@host:5432/dbname
 # REST API 보안
 SNOWFLAKE_REST_TOKEN=                # 미설정 시 인증 없음
 SNOWFLAKE_REST_PORT=8766
+
+# 검색 튜닝 (선택 — 미설정 시 코드 기본값)
+PAGE_MAX_CHARS=16000                 # 페이지 본문 전달 한도. 초과 시 앵커 윈도우
+CONTEXT_MAX_CHARS=60000              # 평가 컨텍스트 총량 상한
+
+# 용어집 (선택)
+GLOSSARY_API_URL=https://catalog.joycityplay.com/api/glossary/all
+GLOSSARY_TIMEOUT=5                   # 초. 실패 시 스냅샷 폴백
+GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 ```
 
 ---
@@ -939,6 +1002,10 @@ SNOWFLAKE_REST_PORT=8766
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-10 | **페이지 절단 정책 수정** — 앞 4000자 → 16000자 + 앵커 청크 중심 윈도우. 검색된 근거를 전달 직전에 버리던 문제. 골든셋 **0.825 → 0.950**, 복합 0.33 → 1.00 |
+| 2026-09-10 | 진단 도구 2종 추가 — `diag_golden_miss.py`(근거·검색·전달 3단계), `diag_generation.py`(컨텍스트 길이 vs 프롬프트) |
+| 2026-09-10 | 청크 오버샘플 도입 — 페이지 단위 집계로 인한 다양성 손실 보정. 단독 효과는 확인되지 않음 |
+| 2026-09-10 | 평가·서비스 타임라인 판정 공통화 — `resolve_timeline_query()`, 중복 구현 제거 |
 | 2026-09-10 | **`sys.path` 버그 수정** — `eval/` 외 모든 진입점에서 `utils` 임포트 실패. 전부 `try/except` 폴백이라 조용히 넘어갔고, **Entity Linking이 인제스트에서 한 번도 작동한 적 없었음** |
 | 2026-09-10 | 용어집 오프라인 스냅샷 (`config/glossary_snapshot.json`, `tools/fetch_glossary_snapshot.py`) — VM에서 API 차단(curl → 000) 대응 |
 | 2026-09-10 | 용어집 재시도 폭주 방지 — 실패 시 백오프(120초)·3회 후 포기. 이벤트마다 재시도해 인제스트가 멈추던 문제 |
