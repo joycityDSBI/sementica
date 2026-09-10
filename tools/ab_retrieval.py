@@ -17,6 +17,13 @@
 
 따라서 같은 입력에 대해 결과가 항상 같고, 설정 간 차이만 드러납니다.
 
+⚠️ **관계 카테고리는 이 지표로 판단하지 마세요.**
+   관계 문항의 근거는 그래프 트리플이고 source_url 은 벡터 문서를 가리킵니다.
+   실제로 관계 10문항 중 8건이 벡터 recall 실패로 잡히지만 평가에서는 모두
+   1.0 입니다 — 그래프가 답을 내기 때문입니다. 그래서 카테고리별로 나눠
+   출력하며, 비교는 벡터 의존 카테고리(담당자·정책/규정·문서위치·복합)로
+   판단하세요.
+
 실행:
     python tools/ab_retrieval.py --dept strategic \\
         --golden data/eval/golden_set_20260910.json
@@ -120,20 +127,25 @@ def main() -> int:
     print(" " * 40, end="\r")
 
     # ── 2. 설정별 recall 측정 ──────────────────────────────────────────────
-    print("\n  설정별 근거 포함률 (recall)\n")
-    print(f"  {'설정':<26} {'recall':>8} {'평균순위':>8} {'평균투입':>8} {'평균문서':>8}")
-    print("  " + "-" * 62)
+    # 관계 카테고리는 그래프가 답하므로 벡터 recall 로 판단할 수 없습니다.
+    VECTOR_CATS = ("담당자", "정책/규정", "문서위치", "복합")
+    n_vec = sum(1 for it in cache if it["q"].get("category") in VECTOR_CATS)
+    n_rel = len(cache) - n_vec
+    print(f"\n  설정별 근거 포함률 — 벡터 의존 {n_vec}문항 / 관계 {n_rel}문항\n")
+    print(f"  {'설정':<26} {'벡터recall':>10} {'전체':>7} {'평균순위':>8} {'평균투입':>8}")
+    print("  " + "-" * 64)
 
     results: list = []
     for label, over, boost, dedup in CONFIGS:
         hits = 0
+        vec_hits = 0
         ranks: list = []
         used_counts: list = []
-        doc_counts: list = []
         misses: list = []
 
         for item in cache:
             gold = item["q"]["source_url"]
+            is_vec = item["q"].get("category") in VECTOR_CATS
             # oversample 축소 재현: 상위 (limit*over/max_over) 페이지만 사용
             keep = max(1, round(args.limit * over / max_over))
             per_sub = [s[:keep] for s in item["per_sub"]]
@@ -141,7 +153,6 @@ def main() -> int:
             merged = merge_semantic_results(per_sub, boost=boost)
             if dedup < 1.0:
                 merged = dedupe_documents(merged, threshold=dedup)
-            doc_counts.append(len(merged))
 
             # 예산 채우기 (evaluate.py 와 동일 규칙)
             total, used = 0, 0
@@ -161,15 +172,18 @@ def main() -> int:
                 ranks.append(rank)
             if found:
                 hits += 1
-            else:
+                if is_vec:
+                    vec_hits += 1
+            elif is_vec:
+                # 관계 문항의 벡터 누락은 정상이므로 손실 목록에서 제외
                 misses.append((item["q"]["id"], rank))
 
         recall = hits / len(cache) if cache else 0.0
+        vec_recall = vec_hits / n_vec if n_vec else 0.0
         avg_rank = sum(ranks) / len(ranks) if ranks else 0
         avg_used = sum(used_counts) / len(used_counts) if used_counts else 0
-        avg_docs = sum(doc_counts) / len(doc_counts) if doc_counts else 0
-        results.append((label, recall, misses))
-        print(f"  {label:<26} {recall:>7.1%} {avg_rank:>8.1f} {avg_used:>8.1f} {avg_docs:>8.1f}")
+        results.append((label, vec_recall, misses))
+        print(f"  {label:<26} {vec_recall:>9.1%} {recall:>7.1%} {avg_rank:>8.1f} {avg_used:>8.1f}")
 
     # ── 3. 기준 대비 차이 ─────────────────────────────────────────────────
     base_label, base_recall, base_misses = results[0]
@@ -189,9 +203,15 @@ def main() -> int:
         print(f"  {label:<26} {sign}{delta:>6.1%}  {' / '.join(note) or '동일'}")
 
     if base_misses:
-        print(f"\n  기준 설정에서 누락된 문항: {[m[0] for m in base_misses]}")
+        print(f"\n  기준 설정에서 벡터 근거가 누락된 문항 ({len(base_misses)}건)")
         for qid, rank in base_misses:
-            print(f"    {qid}: 순위 {rank if rank else '검색 실패'}")
+            print(f"    {qid}: 순위 {rank if rank else '검색 실패 — 임베딩·청킹 문제'}")
+    else:
+        print("\n  기준 설정에서 벡터 의존 문항은 모두 근거 포함")
+    print(
+        f"\n  ※ 관계 {n_rel}문항은 그래프가 답하므로 이 지표에서 제외했습니다."
+        "\n    (source_url 은 벡터 문서를 가리켜 그래프 근거를 측정하지 못함)"
+    )
     return 0
 
 
