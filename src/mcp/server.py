@@ -32,9 +32,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # ─── 동의어 해결기 (비즈니스 용어집 API) ────────────────────────────────────────
 try:
-    from utils.synonym_resolver import expand as _syn_expand
-    from utils.synonym_resolver import preload as _syn_preload
-    from utils.synonym_resolver import resolve as _syn_resolve
+    from utils.synonym_resolver import (
+        expand as _syn_expand,
+        preload as _syn_preload,
+        resolve as _syn_resolve,
+    )
 except ImportError:
 
     def _syn_expand(name: str) -> list[str]:  # type: ignore[misc]
@@ -64,17 +66,38 @@ QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 
-# 청크 오버샘플 배수 — Parent Document Retrieval 이 청크를 page_id 로 묶으면서
-# 결과 수가 줄어드는 것을 보정합니다. limit 개 페이지를 얻으려면 그보다 많은
-# 청크를 조회해야 합니다 (한 페이지가 상위 청크를 독점하는 경우 대비).
-CHUNK_OVERSAMPLE = 4
+# 검색 파라미터·공통 로직은 utils.retrieval 이 정본입니다.
+# 평가 파이프라인(evaluate.py)도 같은 모듈을 쓰므로 한쪽만 튜닝되어
+# 서로 다른 검색을 하던 문제가 재발하지 않습니다.
+from utils.retrieval import (
+    decompose_query as _decompose_with,
+    fetch_pages_by_source_urls as _fetch_pages_by_source_urls,
+    find_entities_in_query as _find_entities,
+    is_complex_query as _is_complex_query,
+    merge_semantic_results as _merge_semantic_results,
+    vector_search_pages as _vector_search_pages,
+)
 
-# 페이지 본문 전달 한도.
-# 이전 값 4000자는 과도하게 보수적이었습니다 — 대부분의 문서는 이보다 짧아
-# 영향이 없지만, 긴 기술 문서는 앞부분만 남고 뒤쪽 근거가 잘려나갔습니다.
-# 하필 그런 문서가 어려운 질문의 근거인 경우가 많습니다.
-# 한도를 넘는 경우에도 매칭 청크 중심으로 윈도우를 잡아 근거를 보존합니다.
-PAGE_MAX_CHARS = int(os.environ.get("PAGE_MAX_CHARS", "16000"))
+
+def _decompose_query(query: str) -> list:
+    """복합 쿼리 분해 — 분해 로직은 utils.retrieval, LLM 호출만 여기서 주입.
+
+    MCP 서버는 API 키 방식(anthropic.Anthropic)을 쓰고 평가는 Vertex 를 쓰므로
+    클라이언트 생성만 각자 담당합니다.
+    """
+
+    def _complete(prompt: str) -> str:
+        import anthropic
+
+        msg = anthropic.Anthropic().messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text
+
+    return _decompose_with(query, _complete)
+
 
 # 기본값 (--dept 없을 때 / legacy)
 COLLECTION_NAME = "joycity_pages"
@@ -140,321 +163,6 @@ def _embed(text: str) -> list[float]:
     return result.embeddings[0].values
 
 
-# ─── 복합 쿼리 분해 헬퍼 ─────────────────────────────────────────────────────
-
-_COMPLEX_PATTERNS = frozenset(
-    [
-        "이고",
-        "이며",
-        "하는",
-        "이면서",
-        "이자",
-        "담당하는",
-        "작성한",
-        "소속된",
-        "승인한",
-        "결정한",
-        "관련된",
-        "연관된",
-        "포함된",
-        "연결된",
-        # 추가: 복합 조건을 표현하는 추가 한국어 패턴
-        "중에서",
-        "기준으로",
-        "에서의",
-        "으로의",
-        "누가",
-        "어느",
-        "어떤 팀",
-        "어떤 사람",
-        "기반으로",
-        "따라서",
-        "통해서",
-    ]
-)
-
-
-def _is_complex_query(query: str) -> bool:
-    """복합 쿼리 여부 휴리스틱 탐지 (12자+ AND 복합 패턴 OR 5단어+)
-    임계값 완화: 15→12자, 6→5단어 (복합 카테고리 감지율 향상)
-    """
-    if len(query) >= 12 and any(p in query for p in _COMPLEX_PATTERNS):
-        return True
-    return len(query.split()) >= 5
-
-
-def _decompose_query(query: str) -> list[str]:
-    """Claude Haiku로 복합 쿼리를 독립적 서브쿼리 2~3개로 분해.
-
-    개선 사항:
-    - 사내 업무 문서 컨텍스트 명시 (담당자·팀·프로세스·정책·시스템)
-    - 구체적인 예시 few-shot 추가 → 분해 품질 향상
-    - max_tokens 300→400 (긴 서브쿼리 잘림 방지)
-    """
-    try:
-        import re as _re
-
-        import anthropic
-
-        client = anthropic.Anthropic()
-        msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=400,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "사내 업무 문서 검색 시스템입니다. "
-                        "문서에는 담당자·팀·프로세스·정책·시스템·게임 서비스 정보가 담겨 있습니다.\n\n"
-                        "다음 복합 질문을 독립적으로 검색 가능한 서브쿼리 2~3개로 분해하세요.\n\n"
-                        "규칙:\n"
-                        "- 각 서브쿼리는 단독으로 검색해도 유의미한 10~25자 한국어 표현\n"
-                        "- 원본 질문의 핵심 엔티티(사람·팀·프로세스·정책·게임)를 모두 포함\n"
-                        "- 서로 다른 관점(담당자 관점, 문서 관점, 관계 관점)으로 분해\n"
-                        "- JSON 배열만 반환 (설명·마크다운 없이)\n\n"
-                        "예시 1:\n"
-                        "Q: 운영팀에서 POTC 점검을 담당하는 사람이 작성한 배포 가이드는?\n"
-                        'A: ["운영팀 POTC 점검 담당자", "POTC 배포 가이드 문서", "운영팀 작성 점검 절차"]\n\n'
-                        "예시 2:\n"
-                        "Q: 전략사업본부 글로벌 게임 출시 승인 절차와 관련 팀은?\n"
-                        'A: ["글로벌 게임 출시 승인 절차", "전략사업본부 출시 담당팀", "게임 출시 관련 정책"]\n\n'
-                        f"질문: {query}"
-                    ),
-                }
-            ],
-        )
-        text = msg.content[0].text.strip()
-        m = _re.search(r"\[.*?\]", text, _re.DOTALL)
-        if m:
-            import json as _json
-
-            parts = _json.loads(m.group())
-            parts = [p.strip() for p in parts if isinstance(p, str) and p.strip()]
-            if 2 <= len(parts) <= 4:
-                return parts
-    except Exception:
-        pass
-    return [query]  # 분해 실패 시 원본 유지
-
-
-def _window_around_anchor(
-    full_text: str,
-    sorted_chunks: list,
-    max_chars: int,
-    anchor_index: "int | None",
-) -> str:
-    """문서가 max_chars 를 넘을 때 잘라낼 구간을 정합니다.
-
-    anchor_index(벡터 검색에 걸린 chunk_index)가 주어지면 그 청크가 반드시
-    포함되도록 앞뒤로 윈도우를 잡습니다. 앞부분만 남기는 방식은 문서 뒤쪽에서
-    찾아낸 근거를 그대로 버리게 됩니다.
-    """
-    if len(full_text) <= max_chars:
-        return full_text
-
-    if anchor_index is None:
-        return full_text[:max_chars]
-
-    # 앵커 청크의 시작 오프셋 계산 (조립 시 "\n\n" 로 이었으므로 그만큼 가산)
-    offset = 0
-    for c in sorted_chunks:
-        if c["index"] == anchor_index:
-            break
-        offset += len(c["text"]) + 2
-    else:
-        return full_text[:max_chars]
-
-    # 앵커 앞쪽에 1/3 을 배정해 선행 문맥을 남깁니다.
-    start = max(0, offset - max_chars // 3)
-    end = min(len(full_text), start + max_chars)
-    start = max(0, end - max_chars)  # 끝에 닿았으면 앞으로 당겨 예산을 모두 사용
-
-    piece = full_text[start:end]
-    if start > 0:
-        piece = "…(앞부분 생략)…\n\n" + piece
-    if end < len(full_text):
-        piece = piece + "\n\n…(뒷부분 생략)…"
-    return piece
-
-
-def _fetch_full_pages(
-    qc,
-    collection_name: str,
-    page_ids: list,
-    max_chars: int = PAGE_MAX_CHARS,
-    anchors: "dict | None" = None,
-) -> dict:
-    """
-    주어진 page_id 목록의 모든 청크를 Qdrant scroll로 조회해
-    청크 순서대로 조합한 전체 본문을 반환합니다.
-
-    Parent Document Retrieval 패턴:
-      벡터 유사도로 청크를 찾은 뒤, 같은 page_id를 가진 모든 청크를
-      chunk_index 순으로 이어붙여 문맥 손실 없이 전체 페이지를 반환합니다.
-
-    잘라내기 정책:
-      대부분의 문서는 max_chars 안에 들어가 전문이 그대로 전달됩니다.
-      초과하는 경우, 예전처럼 앞부분만 남기면 **검색으로 찾아낸 청크가
-      뒤쪽에 있을 때 그 대목을 버리게 됩니다** — 정답을 찾아놓고 전달
-      단계에서 잃는 셈입니다. anchors 가 주어지면 매칭된 청크를 중심으로
-      윈도우를 잡아 근거가 반드시 포함되도록 합니다.
-
-    Args:
-        anchors: {page_id: chunk_index} — 벡터 검색에 걸린 청크.
-                 없으면 문서 앞부분을 사용합니다.
-
-    Returns:
-        {page_id: {"title", "source_url", "page_id", "content", "chunk_count",
-                   "truncated", "total_chars"}}
-    """
-    if not page_ids:
-        return {}
-
-    from qdrant_client.models import FieldCondition, Filter, MatchAny
-
-    pages: dict = {}
-    offset = None
-
-    while True:
-        scroll_result, next_offset = qc.scroll(
-            collection_name=collection_name,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="page_id",
-                        match=MatchAny(any=page_ids),
-                    )
-                ]
-            ),
-            limit=500,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
-        )
-
-        for point in scroll_result:
-            p = point.payload or {}
-            pid = p.get("page_id", "")
-            if not pid:
-                continue
-            if pid not in pages:
-                pages[pid] = {
-                    "title": p.get("title", ""),
-                    "source_url": p.get("source_url", ""),
-                    "page_id": pid,
-                    "chunks": [],
-                }
-            pages[pid]["chunks"].append(
-                {
-                    "index": p.get("chunk_index", 9999),
-                    "text": p.get("text", ""),
-                }
-            )
-
-        offset = next_offset
-        if offset is None:
-            break
-
-    assembled: dict = {}
-    for pid, page in pages.items():
-        sorted_chunks = sorted(page["chunks"], key=lambda c: c["index"])
-        full_text = "\n\n".join(c["text"] for c in sorted_chunks)
-        content = _window_around_anchor(
-            full_text,
-            sorted_chunks,
-            max_chars,
-            (anchors or {}).get(pid),
-        )
-        assembled[pid] = {
-            "title": page["title"],
-            "source_url": page["source_url"],
-            "page_id": pid,
-            "content": content,
-            "chunk_count": len(sorted_chunks),
-            "total_chars": len(full_text),
-            "truncated": len(full_text) > max_chars,
-        }
-
-    return assembled
-
-
-def _fetch_pages_by_source_urls(
-    qc,
-    collection_name: str,
-    source_urls: list,
-    max_chars: int = 2000,
-) -> dict:
-    """
-    source_url 목록으로 Qdrant 청크를 직접 필터링해 전문을 반환합니다.
-
-    graph_search / timeline_search가 찾은 :Event / :REL 노드의 source_url을 키로
-    벡터 DB의 연관 문서를 조회하는 명시적 연결 (Explicit Parent Document Retrieval).
-
-    _fetch_full_pages()가 page_id 기준인 것과 달리, 이 함수는 source_url 기준으로
-    조회하므로 그래프에서 얻은 출처 URL로 바로 원문을 꺼낼 수 있습니다.
-
-    Returns:
-        {source_url: {title, source_url, page_id, content, chunk_count}}
-    """
-    if not source_urls:
-        return {}
-
-    from qdrant_client.models import FieldCondition, Filter, MatchAny
-
-    pages: dict = {}
-    offset = None
-    url_set = set(source_urls)
-
-    while True:
-        scroll_result, next_offset = qc.scroll(
-            collection_name=collection_name,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="source_url", match=MatchAny(any=list(url_set)))]
-            ),
-            limit=500,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
-        )
-
-        for point in scroll_result:
-            p = point.payload or {}
-            url = p.get("source_url", "")
-            if not url or url not in url_set:
-                continue
-            if url not in pages:
-                pages[url] = {
-                    "title": p.get("title", ""),
-                    "source_url": url,
-                    "page_id": p.get("page_id", ""),
-                    "chunks": [],
-                }
-            pages[url]["chunks"].append(
-                {
-                    "index": p.get("chunk_index", 9999),
-                    "text": p.get("text", ""),
-                }
-            )
-
-        offset = next_offset
-        if offset is None:
-            break
-
-    assembled: dict = {}
-    for url, page in pages.items():
-        sorted_chunks = sorted(page["chunks"], key=lambda c: c["index"])
-        full_text = "\n\n".join(c["text"] for c in sorted_chunks)
-        assembled[url] = {
-            "title": page["title"],
-            "source_url": url,
-            "page_id": page["page_id"],
-            "content": full_text[:max_chars],
-            "chunk_count": len(sorted_chunks),
-        }
-
-    return assembled
-
-
 def _search_event_timeline(query: str, limit: int = 20) -> dict:
     """질문에 시계열 의도가 있으면 :Event 이력을 조회하고 원문을 첨부합니다.
 
@@ -510,69 +218,17 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
 
     def _do_vector() -> list:
         try:
-            vec = _embed(sub_query)
-            qc = _get_qdrant()
-            hit = qc.query_points(
-                collection_name=COLLECTION_NAME,
-                query=vec,
-                limit=max(limit * CHUNK_OVERSAMPLE, limit),
-                with_payload=True,
-            )
-            page_scores: dict = {}
-            anchors: dict = {}  # {page_id: 최고 점수 청크의 index} — 잘라낼 때 기준점
-            for h in hit.points:
-                p = h.payload or {}
-                pid = p.get("page_id", "")
-                score = round(h.score, 4)
-                if pid and (pid not in page_scores or score > page_scores[pid]):
-                    page_scores[pid] = score
-                    anchors[pid] = p.get("chunk_index", 0)
-            # 점수 상위 limit 개 페이지만 전문 조립 (오버샘플한 만큼 잘라냄)
-            top_pids = sorted(page_scores, key=lambda k: page_scores[k], reverse=True)[:limit]
-            full_pages = _fetch_full_pages(qc, COLLECTION_NAME, top_pids, anchors=anchors)
-            result = [
-                {
-                    "title": page["title"],
-                    "source_url": page["source_url"],
-                    "content": page["content"],
-                    "chunk_count": page["chunk_count"],
-                    "score": page_scores.get(pid, 0.0),
-                }
-                for pid, page in full_pages.items()
-            ]
-            result.sort(key=lambda x: x["score"], reverse=True)
-            return result
+            return _vector_search_pages(_get_qdrant(), COLLECTION_NAME, _embed(sub_query), limit)
         except Exception:
             return []
 
     def _do_graph() -> list:
         gph: list = []
         try:
-            from utils.korean import entity_candidates, match_nodes_in_text
-
-            graph = _get_falkordb()
+            # 엔티티 탐색은 utils.retrieval 이 담당 (역방향 매칭 → 조사 제거 폴백).
+            # 평가 파이프라인도 같은 함수를 씁니다.
             seen: set = set()
-            matched: list[str] = []
-
-            # ① 역방향 매칭 — 질문 문장에 이름이 등장하는 노드를 찾습니다.
-            #    한국어 조사와 무관하게 동작합니다:
-            #    "데사실은 어느 부서와…" CONTAINS "데사실" → 매칭 성공
-            #    (기존 방식은 n.name CONTAINS "데사실은" 이라 항상 실패했습니다)
-            matched.extend(name for name, _ in match_nodes_in_text(graph, sub_query, limit=5))
-
-            # ② 보완 — 역방향이 비었으면 조사를 제거한 토큰으로 부분 일치 검색
-            if not matched:
-                for word in entity_candidates(sub_query, limit=6):
-                    try:
-                        nodes = graph.query(
-                            "MATCH (n) WHERE n.name CONTAINS $name RETURN n.name LIMIT 2",
-                            {"name": word},
-                        )
-                        matched.extend(str(row[0]) for row in nodes.result_set if row and row[0])
-                    except Exception:
-                        continue
-
-            for entity_name in matched:
+            for entity_name in _find_entities(_get_falkordb(), sub_query, limit=5):
                 if entity_name in seen:
                     continue
                 seen.add(entity_name)
@@ -594,40 +250,6 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list]:
     return sem, gph
 
 
-def _merge_semantic_results(results_per_query: list) -> list:
-    """서브쿼리별 벡터 결과 URL 중복 제거 + coverage 가중 재랭킹
-
-    여러 서브쿼리에서 공통으로 등장하는 문서일수록 높은 점수를 부여합니다.
-    부스트 공식: score * (1 + 0.20 * (coverage - 1))
-    0.15 → 0.20: 복합 카테고리에서 교차 문서 부스트 강화
-    """
-    url_counts: dict = {}
-    url_best: dict = {}
-
-    for results in results_per_query:
-        for r in results:
-            url = r.get("source_url", "")
-            if url not in url_counts:
-                url_counts[url] = 0
-                url_best[url] = r.copy()
-            url_counts[url] += 1
-            if r["score"] > url_best[url]["score"]:
-                url_best[url] = r.copy()
-
-    merged = []
-    for url, item in url_best.items():
-        coverage = url_counts[url]
-        merged.append(
-            {
-                **item,
-                "coverage": coverage,
-                "score": round(item["score"] * (1 + 0.20 * (coverage - 1)), 4),
-            }
-        )
-
-    return sorted(merged, key=lambda x: x["score"], reverse=True)
-
-
 # ─── DB 로거 ──────────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 try:
@@ -641,11 +263,13 @@ except Exception:
 # ─── Semantica 헬퍼 (경로 탐색) ───────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent / "pipeline"))
 try:
-    from semantica_helper import find_shortest_path as _find_path
-    from semantica_helper import get_event_chain as _get_event_chain
-    from semantica_helper import resolve_timeline_query as _resolve_timeline
-    from semantica_helper import trace_decision_chain as _trace_decision
-    from semantica_helper import upsert_event_node as _upsert_event_node
+    from semantica_helper import (
+        find_shortest_path as _find_path,
+        get_event_chain as _get_event_chain,
+        resolve_timeline_query as _resolve_timeline,
+        trace_decision_chain as _trace_decision,
+        upsert_event_node as _upsert_event_node,
+    )
 except Exception:
     _find_path = None
     _trace_decision = None
@@ -654,7 +278,7 @@ except Exception:
     _resolve_timeline = None
 
 # ─── FastMCP 서버 ─────────────────────────────────────────────────────────────
-from fastmcp import FastMCP  # noqa: E402
+from fastmcp import FastMCP
 
 mcp = FastMCP(
     name="JoyCity Ontology",
@@ -742,39 +366,9 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     _err = None
     results = []  # finally 블록에서 참조 가능하도록 try 외부에서 초기화
     try:
-        vec = _embed(query)
-        qc = _get_qdrant()
-        hit = qc.query_points(
-            collection_name=COLLECTION_NAME,
-            query=vec,
-            limit=limit,
-            with_payload=True,
-        )
-
-        # 매칭된 청크에서 page_id별 최고 유사도 점수 수집
-        page_scores: dict = {}
-        for h in hit.points:
-            p = h.payload or {}
-            pid = p.get("page_id", "")
-            score = round(h.score, 4)
-            if pid and (pid not in page_scores or score > page_scores[pid]):
-                page_scores[pid] = score
-
-        # Parent Document Retrieval: page_id의 전체 청크 조합
-        full_pages = _fetch_full_pages(qc, COLLECTION_NAME, list(page_scores.keys()))
-        for pid, page in full_pages.items():
-            results.append(
-                {
-                    "title": page["title"],
-                    "source_url": page["source_url"],
-                    "content": page["content"],
-                    "chunk_count": page["chunk_count"],
-                    "score": page_scores.get(pid, 0.0),
-                }
-            )
-
-        # 유사도 점수 기준 내림차순 정렬
-        results.sort(key=lambda x: x["score"], reverse=True)
+        # 청크 오버샘플 + 앵커 윈도우를 포함한 공통 경로 사용
+        # (hybrid_search 와 동일한 로직 — 이전에는 이 도구만 오버샘플이 빠져 있었음)
+        results = _vector_search_pages(_get_qdrant(), COLLECTION_NAME, _embed(query), limit)
         return results
     except Exception as e:
         _err = str(e)

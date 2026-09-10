@@ -38,7 +38,7 @@ if _env.exists():
             os.environ.setdefault(k.strip(), v.strip())
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────
-import argparse as _argparse  # noqa: E402
+import argparse as _argparse
 
 GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")  # 임베딩 리전
@@ -51,10 +51,17 @@ EMBED_MODEL = "text-multilingual-embedding-002"
 # 실제 서비스(server.py)와 조건을 일치시킵니다. 이전에는 페이지당 2000자,
 # 전체 5000자로 잘라 벡터를 8건 검색해도 LLM은 2건만 보았고, 검색이 성공한
 # 문항도 전달 단계에서 실패했습니다(평가가 시스템을 과소평가).
-# 페이지 본문 한도 — server.py PAGE_MAX_CHARS 와 동일.
-# 4000자는 과도하게 보수적이어서 긴 문서의 뒤쪽 근거가 잘려나갔습니다.
-# 한도를 넘으면 매칭 청크 중심으로 윈도우를 잡습니다.
-PAGE_MAX_CHARS = int(os.environ.get("PAGE_MAX_CHARS", "16000"))
+# 검색 로직·파라미터는 utils.retrieval 이 정본입니다.
+# 서비스(server.py)와 같은 모듈을 쓰므로, 한쪽만 튜닝되어 평가가 다른 검색을
+# 측정하던 문제(coverage 부스트 0.15 vs 0.20, 복합 판정 임계값 등)가 사라집니다.
+from utils.retrieval import (
+    decompose_query as _decompose_with,
+    find_entities_in_query as _find_entities,
+    is_complex_query as _is_complex_query,
+    merge_semantic_results as _merge_semantic_results,
+    vector_search_pages as _vector_search_pages,
+)
+
 TOP_PAGES = 6  # 컨텍스트에 넣을 페이지 수
 TOP_RELATIONS = 15  # 컨텍스트에 넣을 그래프 관계 수
 # 전체 컨텍스트 상한 — Sonnet 200K 토큰(한국어 약 13만 자) 대비 여유 있는 값.
@@ -284,97 +291,6 @@ def embed(client, text: str) -> list:
 
 
 # ─── 검색 함수 ────────────────────────────────────────────────────────────────
-def _window_around_anchor(full_text: str, ordered: list, max_chars: int, anchor) -> str:
-    """max_chars 초과 시 잘라낼 구간 결정 — server.py 와 동일한 정책.
-
-    매칭된 청크(anchor)를 반드시 포함하도록 윈도우를 잡습니다.
-    앞부분만 남기면 문서 뒤쪽에서 찾은 근거를 버리게 됩니다.
-    """
-    if len(full_text) <= max_chars:
-        return full_text
-    if anchor is None:
-        return full_text[:max_chars]
-
-    offset = 0
-    for c in ordered:
-        if c["index"] == anchor:
-            break
-        offset += len(c["text"]) + 2
-    else:
-        return full_text[:max_chars]
-
-    start = max(0, offset - max_chars // 3)
-    end = min(len(full_text), start + max_chars)
-    start = max(0, end - max_chars)
-    piece = full_text[start:end]
-    if start > 0:
-        piece = "…(앞부분 생략)…\n\n" + piece
-    if end < len(full_text):
-        piece = piece + "\n\n…(뒷부분 생략)…"
-    return piece
-
-
-def _fetch_full_pages(
-    qdrant, page_ids: list, max_chars: int = PAGE_MAX_CHARS, anchors: dict | None = None
-) -> dict:
-    """page_id 목록의 모든 청크를 chunk_index 순으로 이어붙여 전체 본문을 반환합니다.
-
-    Parent Document Retrieval — server.py `_fetch_full_pages()`와 동일한 방식입니다.
-    평가가 실제 서비스와 다른 정보량으로 측정되지 않도록 조건을 일치시킵니다.
-
-    anchors: {page_id: chunk_index} — 잘라야 할 때 이 청크가 포함되도록 합니다.
-    """
-    if not page_ids:
-        return {}
-
-    from qdrant_client.models import FieldCondition, Filter, MatchAny
-
-    pages: dict = {}
-    offset = None
-    while True:
-        rows, next_offset = qdrant.scroll(
-            collection_name=COLLECTION_NAME,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="page_id", match=MatchAny(any=page_ids))]
-            ),
-            limit=500,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
-        )
-        for point in rows:
-            p = point.payload or {}
-            pid = p.get("page_id", "")
-            if not pid:
-                continue
-            if pid not in pages:
-                pages[pid] = {
-                    "title": p.get("title", ""),
-                    "url": p.get("source_url", ""),
-                    "chunks": [],
-                }
-            pages[pid]["chunks"].append(
-                {"index": p.get("chunk_index", 9999), "text": p.get("text", "")}
-            )
-        offset = next_offset
-        if offset is None:
-            break
-
-    out: dict = {}
-    for pid, page in pages.items():
-        ordered = sorted(page["chunks"], key=lambda c: c["index"])
-        full = "\n\n".join(c["text"] for c in ordered)
-        out[pid] = {
-            "title": page["title"],
-            "url": page["url"],
-            "text": _window_around_anchor(full, ordered, max_chars, (anchors or {}).get(pid)),
-            "chunk_count": len(ordered),
-            "total_chars": len(full),
-            "truncated": len(full) > max_chars,
-        }
-    return out
-
-
 def timeline_lookup(graph, query: str, limit: int = 20) -> dict:
     """이벤트 타임라인을 조회합니다 — 서비스와 동일한 판정 로직 사용.
 
@@ -391,77 +307,38 @@ def timeline_lookup(graph, query: str, limit: int = 20) -> dict:
         return {}
 
 
-def semantic_search(embed_client, qdrant, query: str, limit: int = CHUNK_SEARCH_LIMIT) -> list:
-    """청크로 검색한 뒤 해당 페이지 전문을 조립해 반환 (Parent Document Retrieval).
+def semantic_search(embed_client, qdrant, query: str, limit: int = TOP_PAGES) -> list:
+    """벡터 검색 — 서비스(server.py)와 동일한 utils.retrieval 경로를 사용합니다.
 
-    limit 은 **청크** 개수입니다. page_id 로 묶는 과정에서 결과 수가 줄어들므로
-    (같은 페이지의 청크가 여러 개 걸리면 1건으로 합쳐짐) 페이지 다양성을
-    확보하려면 넉넉히 가져와야 합니다.
+    limit 은 **페이지** 수입니다. 청크 오버샘플·앵커 윈도우는 공통 모듈이 처리합니다.
+
+    반환 항목의 키는 서비스와 동일하게 `source_url` / `content` 입니다.
     """
-    vec = embed(embed_client, query)
-    result = qdrant.query_points(
-        collection_name=COLLECTION_NAME,
-        query=vec,
-        limit=limit,
-        with_payload=True,
-    )
-
-    # 청크 → page_id 단위로 최고 점수 집계 (+ 잘라낼 때 기준이 될 청크 기록)
-    page_scores: dict = {}
-    anchors: dict = {}
-    fallback: dict = {}
-    for h in result.points:
-        p = h.payload or {}
-        pid = p.get("page_id", "")
-        score = round(h.score, 4)
-        if not pid:
-            continue
-        if pid not in page_scores or score > page_scores[pid]:
-            page_scores[pid] = score
-            anchors[pid] = p.get("chunk_index", 0)
-            fallback[pid] = {
-                "title": p.get("title", ""),
-                "text": p.get("text", ""),
-                "url": p.get("source_url", ""),
-            }
-
-    full_pages = _fetch_full_pages(qdrant, list(page_scores.keys()), anchors=anchors)
-
-    out = []
-    for pid, score in page_scores.items():
-        # 전문 조립 실패 시 청크 본문으로 폴백
-        page = full_pages.get(pid) or fallback.get(pid, {})
-        out.append(
-            {
-                "title": page.get("title", ""),
-                "text": page.get("text", ""),
-                "score": score,
-                "url": page.get("url", ""),
-                "chunk_count": page.get("chunk_count", 1),
-            }
-        )
-    out.sort(key=lambda x: x["score"], reverse=True)
-    return out
+    return _vector_search_pages(qdrant, COLLECTION_NAME, embed(embed_client, query), limit)
 
 
 def graph_search(graph, entity: str) -> list:
     """엔티티(또는 질문 문장)와 연결된 관계 탐색.
 
-    ※ 한국어 조사 처리: 질문을 .split() 한 토큰에는 조사가 붙어 있어
-      (예: "데사실은") n.name CONTAINS 매칭이 항상 실패합니다.
-      먼저 역방향 매칭(질문 문장에 노드 이름이 등장하는지)으로 엔티티를
-      확정하고, 실패 시 조사 제거 토큰으로 부분 일치를 시도합니다.
-    """
-    from utils.korean import entity_candidates, match_nodes_in_text
+    엔티티 탐색은 utils.retrieval.find_entities_in_query() 가 담당합니다
+    (역방향 매칭 → 조사 제거 폴백). server.py 의 hybrid_search 도 같은 함수를
+    쓰므로 평가와 서비스가 같은 엔티티를 찾습니다.
 
+    다만 관계 조회 형태는 다릅니다 — 서비스는 MCP graph_search 도구의
+    outgoing/incoming 구조를, 평가는 컨텍스트 합성용 트리플 목록을 씁니다.
+    """
     relations: list = []
     seen: set = set()
 
-    def _collect(cypher: str, params: dict) -> None:
+    for name in _find_entities(graph, entity, limit=5):
         try:
-            res = graph.query(cypher, params)
+            res = graph.query(
+                "MATCH (n)-[r:REL]->(m) WHERE n.name = $n OR m.name = $n "
+                "RETURN n.name, r.rel_name, m.name, r.condition LIMIT 15",
+                {"n": name},
+            )
         except Exception:
-            return
+            continue
         for row in res.result_set:
             key = (row[0], row[1], row[2])
             if key in seen:
@@ -476,137 +353,49 @@ def graph_search(graph, entity: str) -> list:
                 }
             )
 
-    # ① 역방향 매칭으로 엔티티 확정 → 정확한 이름으로 관계 조회
-    for name, _type in match_nodes_in_text(graph, entity, limit=5):
-        _collect(
-            "MATCH (n)-[r:REL]->(m) WHERE n.name = $n OR m.name = $n "
-            "RETURN n.name, r.rel_name, m.name, r.condition LIMIT 15",
-            {"n": name},
-        )
-
-    # ② 보완 — 매칭 실패 시 조사 제거 토큰으로 부분 일치
-    if not relations:
-        for word in entity_candidates(entity, limit=6):
-            _collect(
-                "MATCH (n)-[r:REL]->(m) WHERE n.name CONTAINS $w OR m.name CONTAINS $w "
-                "RETURN n.name, r.rel_name, m.name, r.condition LIMIT 10",
-                {"w": word},
-            )
-
     return relations
 
 
-_COMPLEX_PATTERNS = frozenset(
-    [
-        "이고",
-        "이며",
-        "하는",
-        "이면서",
-        "이자",
-        "담당하는",
-        "작성한",
-        "소속된",
-        "승인한",
-        "결정한",
-        "관련된",
-        "연관된",
-        "포함된",
-        "연결된",
-    ]
-)
-
-
-def _is_complex_query(query: str) -> bool:
-    """복합 쿼리 여부 휴리스틱 탐지 (15자+ AND 복합 패턴 OR 6단어+)"""
-    if len(query) >= 15 and any(p in query for p in _COMPLEX_PATTERNS):
-        return True
-    return len(query.split()) >= 6
-
-
-def _decompose_query(query: str, claude) -> list:
-    """Claude로 복합 쿼리를 서브쿼리 2~3개로 분해"""
-    import re as _re
-
-    try:
-        msg = claude.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=300,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "다음 복합 질문을 독립적으로 검색 가능한 서브쿼리 2~3개로 분해하세요.\n"
-                        'JSON 배열만 반환하세요. 예: ["서브쿼리1", "서브쿼리2"]\n\n'
-                        f"질문: {query}"
-                    ),
-                }
-            ],
-        )
-        text = msg.content[0].text.strip()
-        m = _re.search(r"\[.*?\]", text, _re.DOTALL)
-        if m:
-            parts = json.loads(m.group())
-            parts = [p.strip() for p in parts if isinstance(p, str) and p.strip()]
-            if 2 <= len(parts) <= 4:
-                return parts
-    except Exception:
-        pass
-    return [query]  # 분해 실패 시 원본 반환
-
-
 def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
-    """벡터 + 그래프 혼합 검색.
+    """벡터 + 그래프 혼합 검색 — 서비스(server.py hybrid_search)와 동일 로직.
 
-    복합 쿼리일 경우 Claude로 서브쿼리 분해 후 각각 검색하고,
-    URL 중복 제거 + coverage 가중 재랭킹으로 병합합니다.
+    쿼리 분해·벡터 검색·coverage 재랭킹 모두 utils.retrieval 을 사용하므로
+    평가와 서비스가 같은 검색을 수행합니다.
     """
     # ── 1. 복합 쿼리 감지 및 분해 ──────────────────────────────────────────
     sub_queries = [query]
     decomposed = False
     if claude and _is_complex_query(query):
-        sub_queries = _decompose_query(query, claude)
+
+        def _complete(prompt: str) -> str:
+            msg = claude.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=400,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return msg.content[0].text
+
+        sub_queries = _decompose_with(query, _complete)
         decomposed = len(sub_queries) > 1
 
     # ── 2. 이벤트 타임라인 (원본 질문 기준 1회) ────────────────────────────
     timeline = timeline_lookup(graph, query)
 
     # ── 3. 서브쿼리별 검색 및 결과 수집 ────────────────────────────────────
-    url_counts: dict = {}
-    url_best: dict = {}
+    sem_per_query: list = []
     all_graph: list = []
     graph_seen: set = set()
 
     for sq in sub_queries:
-        sem = semantic_search(embed_client, qdrant, sq, limit=CHUNK_SEARCH_LIMIT)
-        grp = graph_search(graph, sq)
-
-        for s in sem:
-            url = s.get("url", "")
-            if url not in url_counts:
-                url_counts[url] = 0
-                url_best[url] = s.copy()
-            url_counts[url] += 1
-            if s["score"] > url_best[url]["score"]:
-                url_best[url] = s.copy()
-
-        for r in grp:
+        sem_per_query.append(semantic_search(embed_client, qdrant, sq, limit=TOP_PAGES))
+        for r in graph_search(graph, sq):
             key = (r["subject"], r["predicate"], r["object"])
             if key not in graph_seen:
                 graph_seen.add(key)
                 all_graph.append(r)
 
-    # ── 4. coverage 가중 재랭킹 ────────────────────────────────────────────
-    sem_final = []
-    for url, item in url_best.items():
-        coverage = url_counts[url]
-        sem_final.append(
-            {
-                **item,
-                "score": round(item["score"] * (1 + 0.15 * (coverage - 1)), 4),
-                "coverage": coverage,
-            }
-        )
-    sem_final.sort(key=lambda x: x["score"], reverse=True)
+    # ── 4. coverage 가중 재랭킹 (서비스와 동일한 부스트 계수) ──────────────
+    sem_final = _merge_semantic_results(sem_per_query)
 
     # ── 5. 컨텍스트 합성 ───────────────────────────────────────────────────
     graph_text = ""
@@ -639,7 +428,7 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
     doc_budget = CONTEXT_MAX_CHARS - len(graph_text) - len(timeline_text) - 200
     vector_text = ""
     for i, s in enumerate(sem_final[:TOP_PAGES]):
-        block = f"[{s['title']}]\n{s['text']}\n\n"
+        block = f"[{s['title']}]\n{s['content']}\n\n"
         if i and len(vector_text) + len(block) > doc_budget:
             break  # 최소 1건은 넣되, 이후로는 예산을 지킵니다
         vector_text += block

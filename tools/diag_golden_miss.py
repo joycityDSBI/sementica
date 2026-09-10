@@ -64,25 +64,21 @@ JSON 배열로만 응답: [12, 13]"""
 
 
 def load_window_fn():
-    """server.py 의 _window_around_anchor 를 소스에서 추출해 사용합니다.
+    """운영 코드가 실제로 쓰는 윈도우 함수를 그대로 사용합니다.
 
-    server.py 는 fastmcp 등 무거운 의존성을 모듈 로드 시점에 요구하므로
-    함수 정의만 떼어내 실행합니다 — 복사본이 아닌 운영 코드를 검사하기 위함.
+    검색 로직이 utils.retrieval 로 통합되어 서버·평가·진단기가 같은 구현을
+    참조합니다 (이전에는 server.py 소스에서 함수 정의를 추출해야 했습니다).
     """
-    src = (ROOT / "src" / "mcp" / "server.py").read_text(encoding="utf-8")
-    m = re.search(r"\ndef _window_around_anchor\(.*?\n(?=\ndef |\n@|\nclass )", src, re.DOTALL)
-    if not m:
-        return None
-    ns: dict = {}
-    exec(m.group(), ns)
-    return ns.get("_window_around_anchor")
+    from utils.retrieval import window_around_anchor
+
+    return window_around_anchor
 
 
 def page_max_chars() -> int:
-    """server.py 의 PAGE_MAX_CHARS 기본값을 읽어옵니다."""
-    src = (ROOT / "src" / "mcp" / "server.py").read_text(encoding="utf-8")
-    m = re.search(r'PAGE_MAX_CHARS\s*=\s*int\(os\.environ\.get\("PAGE_MAX_CHARS",\s*"(\d+)"\)', src)
-    return int(os.environ.get("PAGE_MAX_CHARS", m.group(1) if m else "16000"))
+    """운영 코드의 페이지 전달 한도."""
+    from utils.retrieval import PAGE_MAX_CHARS
+
+    return PAGE_MAX_CHARS
 
 
 def fetch_page_chunks(qc, collection: str, source_url: str) -> list:

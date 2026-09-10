@@ -138,8 +138,13 @@ def main() -> int:
         else list(questions)
     )
 
-    print(f"  대상 {len(targets)}문항 | PAGE_MAX_CHARS={ev.PAGE_MAX_CHARS} ")
-    print(f"  CONTEXT_MAX_CHARS={ev.CONTEXT_MAX_CHARS} TOP_PAGES={ev.TOP_PAGES}\n")
+    from utils.retrieval import COVERAGE_BOOST, PAGE_MAX_CHARS
+
+    print(f"  대상 {len(targets)}문항 | PAGE_MAX_CHARS={PAGE_MAX_CHARS} ")
+    print(
+        f"  CONTEXT_MAX_CHARS={ev.CONTEXT_MAX_CHARS} TOP_PAGES={ev.TOP_PAGES} "
+        f"COVERAGE_BOOST={COVERAGE_BOOST}\n"
+    )
 
     summary: list = []
     for qid in targets:
