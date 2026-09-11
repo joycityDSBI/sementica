@@ -63,19 +63,62 @@ def main() -> int:
             winner = label
 
     print()
-    if winner:
-        print(f"  → '{winner}' 로 temperature 가 전달됩니다. 재현성 확보 상태입니다.")
-    else:
+    if not winner:
         print("  → 어떤 통로도 통하지 않습니다. temperature 없이(기본 1.0) 동작하며,")
         print("     같은 문서에서도 추출 결과가 회차마다 달라집니다.")
         print("     인제스트는 가능하지만 그래프 재현성은 포기해야 합니다.")
+        return 0
 
-    # 래퍼가 같은 판단을 하는지 확인
+    print(f"  → '{winner}' 통로가 오류 없이 통과했습니다.\n")
+
+    # ── 값이 실제로 반영되는지 확인 ──────────────────────────────────────
+    # 통로가 열렸다는 것과 값이 적용된다는 것은 다릅니다. 인자를 조용히
+    # 무시하는 통로를 "성공"으로 받아들이면, 온도 0 인 줄 알면서 1.0 으로
+    # 도는 최악이 됩니다 — 실측으로 추출 재현성이 45.9% 였습니다.
+    # 엔트로피가 높은 프롬프트를 같은 조건으로 두 번 호출해 비교합니다.
+    print("  값이 실제로 반영되는지 확인 중 (같은 프롬프트 2회씩)...")
+    entropy = {
+        "model": MODEL,
+        "max_tokens": 60,
+        "messages": [
+            {"role": "user", "content": "무작위 한국어 단어 10개를 쉼표로 나열하세요. 설명 없이."}
+        ],
+    }
+    _, extra = next(c for c in CANDIDATES if c[0] == winner)
+
+    def _twice(kw: dict) -> tuple[str, str]:
+        out = []
+        for _ in range(2):
+            r = client.messages.create(**entropy, **kw)
+            out.append(r.content[0].text.strip())
+        return out[0], out[1]
+
+    a0, b0 = _twice(extra)
+    a1, b1 = _twice({} if winner == "temperature=" else {"extra_body": {"temperature": 1.0}})
+
+    same0 = a0 == b0
+    same1 = a1 == b1
+    print(f"    온도 0   2회 동일: {'예' if same0 else '아니오'}")
+    print(f"    온도 1.0 2회 동일: {'예' if same1 else '아니오'}")
+    print()
+
+    if same0 and not same1:
+        print("  ✅ temperature 가 실제로 적용됩니다 (0 에서 고정, 1.0 에서 변동).")
+    elif same0 and same1:
+        print("  ⚠️  두 온도 모두 동일 — 프롬프트가 너무 쉬워 판별되지 않았을 수 있습니다.")
+        print("     추출 재현성은 tools/check_extraction_stability.py 로 확인하세요.")
+    else:
+        print("  ❌ 온도 0 인데도 결과가 달라집니다 — 값이 전달되지 않거나 무시됩니다.")
+        print(f"     1회차: {a0[:60]}")
+        print(f"     2회차: {b0[:60]}")
+        print("     그래프 재현성을 확보할 수 없습니다. 추출 안정화는 온도가 아닌")
+        print("     다른 수단(프롬프트 제약·엔티티 명명 규칙)으로 접근해야 합니다.")
+
     from utils.llm import create_message, strategy
 
     try:
         create_message(client, temperature=0, **base)
-        print(f"  → utils.llm 선택: {strategy()}")
+        print(f"\n  → utils.llm 선택: {strategy()}")
     except Exception as e:
         print(f"  ⚠️  래퍼 호출 실패: {type(e).__name__}: {e}")
         return 1
