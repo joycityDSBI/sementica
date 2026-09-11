@@ -82,6 +82,48 @@ def _check_semantica_once():
         print(f"  [Semantica] 초기화 실패: {e}")
 
 
+# ─── 0-b. 임베딩 배치 분할 ───────────────────────────────────────────────────
+# Vertex 임베딩은 **요청당 총 토큰**이 제한됩니다(현재 20,000). 개수만 보고
+# 묶으면 한도를 넘습니다 — 실측: 800자 청크 50개가 24,608토큰으로 400 을 받아,
+# 34,263자짜리 문서 하나가 세 번의 --reset 내내 벡터 없이 남았습니다.
+# (트리플은 만들어졌으므로 관계 질문에는 답하는데 문서 검색에는 안 잡히는
+#  상태였고, 요약 로그에는 아무 이상이 없었습니다.)
+#
+# 토큰을 정확히 세려면 API 호출이 필요하므로 문자 수로 근사합니다.
+# 실측 비율은 한국어에서 24,608토큰 / 40,750자 ≈ 0.60 토큰/자 이므로,
+# 20,000자 배치는 약 12,000토큰 — 한도 대비 40% 여유입니다.
+EMBED_BATCH_MAX_CHARS: int = int(os.environ.get("EMBED_BATCH_MAX_CHARS", "20000"))
+
+
+def batch_texts(texts: list, max_chars: int = EMBED_BATCH_MAX_CHARS, max_items: int = 50) -> list:
+    """문자 수와 개수를 **모두** 지키도록 배치를 나눕니다.
+
+    한 항목이 혼자 max_chars 를 넘으면 그것만 단독 배치로 보냅니다 (쪼개지
+    않습니다 — 청크는 이미 상위에서 나뉘어 있고, 여기서 또 자르면 벡터와
+    저장된 원문이 어긋납니다).
+
+    >>> [len(b) for b in batch_texts(["a" * 100] * 5, max_chars=250, max_items=50)]
+    [2, 2, 1]
+    >>> [len(b) for b in batch_texts(["a"] * 7, max_chars=1000, max_items=3)]
+    [3, 3, 1]
+    >>> batch_texts([])
+    []
+    """
+    out: list = []
+    cur: list = []
+    cur_chars = 0
+    for s in texts:
+        n = len(s)
+        if cur and (cur_chars + n > max_chars or len(cur) >= max_items):
+            out.append(cur)
+            cur, cur_chars = [], 0
+        cur.append(s)
+        cur_chars += n
+    if cur:
+        out.append(cur)
+    return out
+
+
 # ─── 0-a. 추출 입력 분할 ─────────────────────────────────────────────────────
 # LLM 추출은 오랫동안 본문 앞 3000자만 보고 있었습니다. 실측: 299페이지
 # 344,338자 중 **45%(155,294자)가 추출 대상에서 잘려나갔고**, 가장 긴 문서는

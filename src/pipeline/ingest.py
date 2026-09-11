@@ -50,6 +50,7 @@ except Exception:
 
 from semantica_helper import (
     _warn_if_output_truncated,
+    batch_texts,
     classify_page,
     content_hash,
     detect_realization_status,
@@ -546,12 +547,14 @@ def _make_chunks(text: str) -> list[str]:
 
 # ─── 임베딩 배치 헬퍼 ────────────────────────────────────────────────────────
 def _embed_batch(chunks: list[str]) -> list[list[float]]:
-    """청크 목록을 EMBED_BATCH_SIZE 단위 배치로 임베딩.
-    기존 1개씩 순차 호출 대비 API 호출 횟수를 1/50로 줄입니다.
+    """청크 목록을 배치로 임베딩합니다.
+
+    배치는 **문자 수와 개수를 모두** 지켜 나눕니다. 개수만 보고 50개씩 묶던
+    시절에는 긴 문서에서 요청당 토큰 한도(20,000)를 넘겨 400 을 받았고,
+    그 페이지는 벡터 없이 남았습니다 (semantica_helper.batch_texts 참고).
     """
     all_vecs = []
-    for i in range(0, len(chunks), EMBED_BATCH_SIZE):
-        batch = chunks[i : i + EMBED_BATCH_SIZE]
+    for batch in batch_texts(chunks, max_items=EMBED_BATCH_SIZE):
         result = _embed_model.models.embed_content(
             model=EMBED_MODEL_NAME,
             contents=batch,
@@ -1055,7 +1058,7 @@ def main():
     # ── 인제스천 실행 (병렬) ─────────────────────────────────────────────────
     workers = args.workers
     print(f"\n[3/4] 페이지 인제스천 시작 (워커: {workers}개 병렬)")
-    print(f"       임베딩: 배치 {EMBED_BATCH_SIZE}개씩 / 트리플: Haiku / DB 쓰기: 락 보호")
+    print("       임베딩: 토큰 한도에 맞춘 배치 / 트리플: Haiku / DB 쓰기: 락 보호")
     results = []
     _t_start = time.time()
 

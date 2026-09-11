@@ -60,6 +60,7 @@ from notion_fetch import (  # noqa: E402
 )
 from semantica_helper import (  # noqa: E402
     _warn_if_output_truncated,
+    batch_texts,
     classify_page,
     content_hash,
     detect_realization_status,
@@ -724,8 +725,9 @@ def sync_page(
     if chunks:
         try:
             all_vecs = []
-            for bi in range(0, len(chunks), EMBED_BATCH_SIZE):
-                batch = chunks[bi : bi + EMBED_BATCH_SIZE]
+            # 배치는 문자 수와 개수를 모두 지켜 나눕니다 — 개수만 보면
+            # 긴 문서에서 요청당 토큰 한도를 넘겨 400 을 받습니다.
+            for batch in batch_texts(chunks, max_items=EMBED_BATCH_SIZE):
                 # 임베딩에는 제목을 앞에 붙입니다 (payload 의 text 는 원문 그대로).
                 # 짧은 DB 행 청크가 검색에 안 잡히던 문제 — ingest.py 참고.
                 res = embed_client.models.embed_content(
