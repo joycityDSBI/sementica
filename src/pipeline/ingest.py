@@ -555,6 +555,12 @@ def _embed_batch(chunks: list[str]) -> list[list[float]]:
 
 
 # ─── 벡터 저장 (배치 임베딩 + 단일 Qdrant 삽입) ─────────────────────────────
+def _with_title(chunk: str, title: str) -> str:
+    """임베딩용 텍스트 — 청크 앞에 문서 제목을 붙입니다 (저장되는 원문은 그대로)."""
+    title = (title or "").strip()
+    return f"{title}\n\n{chunk}" if title else chunk
+
+
 def store_vector(page: dict) -> int:
     """페이지를 청크로 분할 → 배치 임베딩 → Qdrant 일괄 저장
     개선: 청크당 1회 API 호출 → 페이지당 1회 배치 호출 (최대 50배 빠름)
@@ -575,8 +581,18 @@ def store_vector(page: dict) -> int:
         return 0
 
     # 1. 전체 청크 배치 임베딩 (API 호출 최소화)
+    #
+    # 임베딩에는 **제목을 앞에 붙입니다**. payload 의 text 는 청크 원문 그대로
+    # 두므로 근거 대조·전문 조립·인용문 매칭은 영향을 받지 않고, 벡터만 문서
+    # 맥락을 얻습니다.
+    #
+    # 왜: Notion DB 행은 속성 나열 한 줄이라 청크가 100자 안팎입니다. 그 짧은
+    # 텍스트만 임베딩하면 긴 질문과 유사도가 낮아 검색에 안 잡힙니다. 실측으로
+    # "구글 탑티어2 캠페인 소재 최적화 + TCPA 캡 해제"(102자, 청크 1개)는 두
+    # 번의 골든셋에서 연속으로 검색 실패했는데, 정작 질문이 묻는 문구가 제목에
+    # 그대로 있었습니다.
     try:
-        vecs = _embed_batch(chunks)
+        vecs = _embed_batch([_with_title(c, meta.get("title", "")) for c in chunks])
     except Exception as e:
         print(f"     ⚠️  임베딩 배치 실패: {e}")
         raise

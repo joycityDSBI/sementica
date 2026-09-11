@@ -588,6 +588,12 @@ def extract_triplets(llm_client, text: str) -> list:
     return out
 
 
+def _with_title(chunk: str, title: str) -> str:
+    """임베딩용 텍스트 — 청크 앞에 문서 제목을 붙입니다 (저장되는 원문은 그대로)."""
+    title = (title or "").strip()
+    return f"{title}\n\n{chunk}" if title else chunk
+
+
 # ─── 페이지 동기화 (핵심 함수) ───────────────────────────────────────────────
 def sync_page(
     notion_client,
@@ -720,7 +726,12 @@ def sync_page(
             all_vecs = []
             for bi in range(0, len(chunks), EMBED_BATCH_SIZE):
                 batch = chunks[bi : bi + EMBED_BATCH_SIZE]
-                res = embed_client.models.embed_content(model=EMBED_MODEL_NAME, contents=batch)
+                # 임베딩에는 제목을 앞에 붙입니다 (payload 의 text 는 원문 그대로).
+                # 짧은 DB 행 청크가 검색에 안 잡히던 문제 — ingest.py 참고.
+                res = embed_client.models.embed_content(
+                    model=EMBED_MODEL_NAME,
+                    contents=[_with_title(c, title) for c in batch],
+                )
                 all_vecs.extend([list(e.values) for e in res.embeddings])
 
             for i, (chunk, vec) in enumerate(zip(chunks, all_vecs, strict=True)):
