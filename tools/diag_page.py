@@ -153,6 +153,7 @@ def main() -> int:
 
     # ── ⑥ Qdrant ────────────────────────────────────────────────────────
     print("\n■ ⑥ Qdrant")
+    pts: list = []  # ⑦ 에서 참조하므로 조회가 실패해도 정의되어 있어야 합니다
     try:
         from qdrant_client import QdrantClient
         from qdrant_client.models import FieldCondition, Filter, MatchValue
