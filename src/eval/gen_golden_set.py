@@ -234,23 +234,36 @@ print(f"  수집: {len(pages)}개 페이지\n")
 print(f"🔗 FalkorDB 관계 샘플링 (최대 {SAMPLE_RELS}개)...")
 
 try:
+    # evidence_quote 를 반드시 함께 가져옵니다. 이것이 트리플의 **원문 근거**이고,
+    # 관계 문항의 정답을 검증하는 유일한 수단입니다. 아래 4번 단계 참고.
     rel_result = graph.query(
         "MATCH (n)-[r:REL]->(m) "
-        "RETURN n.name, r.rel_name, m.name, r.condition, r.source_url "
+        "RETURN n.name, r.rel_name, m.name, r.condition, r.source_url, r.evidence_quote "
         f"LIMIT {SAMPLE_RELS}"
     )
-    relations = [
+    _all_rels = [
         {
             "subject": row[0] or "",
             "predicate": row[1] or "",
             "object": row[2] or "",
             "condition": row[3] or "",
             "url": row[4] or "",
+            "quote": (row[5] or "").strip(),
         }
         for row in rel_result.result_set
     ]
+    # 근거 인용문이 없는 엣지는 제외합니다. 정답을 원문과 대조할 수 없으면
+    # 그 문항은 "LLM 이 그때 뽑은 트리플"을 다시 묻는 것에 불과합니다.
+    relations = [r for r in _all_rels if r["quote"]]
+    dropped = len(_all_rels) - len(relations)
     random.shuffle(relations)
-    print(f"  수집: {len(relations)}개 관계\n")
+    print(
+        f"  수집: {len(relations)}개 관계"
+        + (f" (근거 인용문 없음 {dropped}개 제외)" if dropped else "")
+    )
+    if not relations and _all_rels:
+        print("  ⚠️  근거 인용문을 가진 엣지가 없습니다 — 관계 문항을 만들 수 없습니다.")
+    print()
 except Exception as e:
     relations = []
     print(f"  ⚠️  FalkorDB 조회 실패: {e}\n")
@@ -312,6 +325,11 @@ PAGE_QA_PROMPT = """다음 Notion 문서를 읽고 평가용 Q&A를 생성하세
    "해당 쿼리", "이 단계", "위 문서" 처럼 문맥에 기대는 표현을 쓰지 마세요."""
 
 REL_QA_PROMPT = """다음 지식 그래프 관계들을 보고 평가용 Q&A를 생성하세요.
+
+각 관계에는 그 관계가 추출된 **원문 인용문**이 함께 있습니다.
+정답은 반드시 이 인용문으로 확인되는 내용이어야 합니다 — 트리플 표기
+(→[관계명]→)를 그대로 옮겨 적지 마세요. 관계명은 추출 과정에서 붙인
+요약어일 뿐이고, 사실의 근거는 인용문입니다.
 
 관계 목록:
 {relations}
@@ -654,11 +672,18 @@ if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
         rel_text = "\n".join(
             f"- {r['subject']} →[{r['predicate']}]→ {r['object']}"
             + (f" (조건: {r['condition']})" if r.get("condition") else "")
+            + f'\n    원문: "{r["quote"]}"'
             for r in chunk
         )
+        # 검증은 **원문 인용문만** 보고 합니다. 예전에는 트리플 목록 자체를
+        # 근거로 넘겨서, "이 트리플로 답할 수 있는가"를 묻는 셈이었습니다 —
+        # 항상 참이라 관문이 사실상 꺼져 있었고, 정답이 그때그때의 추출
+        # 결과를 그대로 복사했습니다. 재인제스트로 관계명이 바뀌면
+        # (예: 검토 → 작성) 골든셋만 낡아 시스템 회귀처럼 보입니다.
+        verify_text = "\n".join(f'- "{r["quote"]}"' for r in chunk)
         try:
             accepted, rejected = _generate_and_verify(
-                rel_text, REL_QA_PROMPT.format(relations=rel_text)
+                verify_text, REL_QA_PROMPT.format(relations=rel_text)
             )
             for item in accepted:
                 item["source_url"] = chunk[0].get("url", "")
