@@ -523,67 +523,91 @@ def rank_entity_matches(rows: list, forms: list) -> list:
 
     keys = [k for k in (norm_key(f) for f in forms) if k]
 
-    def _tier(name: str) -> int:
-        nk = norm_key(name)
-        if any(nk == k for k in keys):
-            return 0
-        if any(nk.startswith(k) for k in keys):
-            return 1
-        return 2
-
     return sorted(
         rows,
-        key=lambda r: (_tier(r[0]), -(r[2] or 0), len(r[0]), r[0], r[1] or ""),
+        key=lambda r: (_tier_of(r[0], keys, norm_key), -(r[2] or 0), len(r[0]), r[0], r[1] or ""),
     )
 
 
+# 후보 노드 수 상한. 짧은 검색어("DB" 등)가 수백 개에 걸릴 때 뒤따르는
+# 엣지 집계 쿼리가 커지는 것을 막습니다. 넘치면 가까운 것부터 남깁니다.
+ENTITY_CANDIDATE_CAP: int = int(os.environ.get("ENTITY_CANDIDATE_CAP", "200"))
+
+
 def _entity_candidates(graph, forms: list) -> list:
-    """검색어가 이름에 포함된 노드를 [(name, label, degree), ...] 로 가져옵니다.
+    """검색어가 이름에 들어 있는 노드를 [(name, label, degree), ...] 로 가져옵니다.
 
-    **대소문자를 구분하지 않습니다.** Cypher 의 CONTAINS 는 구분하기 때문에
-    "In-Joy" 로 찾으면 "IN-JOY" 노드는 결과에 들어오지도 않습니다 — 표기가
-    갈린 노드를 합치려 해도 한쪽이 보이지 않으면 합칠 수가 없습니다.
+    매칭은 **표기를 지운 기준**입니다(norm_key — 공백·대소문자·부호 무시).
+    Cypher 의 CONTAINS 로는 이게 안 됩니다:
 
-    toLower() 를 먼저 시도하고, FalkorDB 가 거부하면 이름을 전부 받아 파이썬에서
-    거릅니다. 어차피 CONTAINS 도 전체를 훑으므로 서버 쪽 일의 양은 비슷하고,
-    노드 수가 적어(실측 768개) 전송량도 문제가 되지 않습니다.
+        "In-Joy"          로 찾을 때  "IN-JOY"        → CONTAINS 는 대소문자 구분
+        "마케팅 사이언스팀" 로 찾을 때  "마케팅사이언스팀" → 띄어쓰기가 다르면 부분
+                                                        문자열이 아예 아님
+
+    실측으로 둘 다 그래프에 따로 존재하고(엣지 2/1, 4/1), 한쪽만 잡으면 나머지
+    엣지를 통째로 놓칩니다. toLower() 를 써도 두 번째는 해결되지 않습니다 —
+    그래서 서버 쪽 필터를 포기하고 이름을 받아 파이썬에서 거릅니다.
+
+    비용: 이름·라벨만 먼저 받고(집계 없음), 걸러낸 것들에 대해서만 엣지를
+    셉니다. 예전 방식은 CONTAINS 로 거르기 전에 전체 노드의 엣지를 집계했으므로
+    서버 쪽 일은 오히려 줄었습니다.
     """
-    lowered = [f.lower() for f in forms if f]
-    if not lowered:
+    from utils.synonym_resolver import norm_key
+
+    keys = [k for k in (norm_key(f) for f in forms) if k]
+    if not keys:
         return []
 
     try:
         rows = (
             graph.query(
-                "MATCH (n) WHERE n.name IS NOT NULL "
-                "OPTIONAL MATCH (n)-[r:REL]-() "
-                "WITH n.name AS name, labels(n)[0] AS lbl, count(r) AS deg "
-                "WHERE ANY(f IN $forms WHERE toLower(name) CONTAINS f) "
-                "RETURN name, lbl, deg",
-                {"forms": lowered},
-            ).result_set
-            or []
-        )
-        return [(r[0], r[1] or "", r[2] or 0) for r in rows]
-    except Exception:
-        pass
-
-    try:
-        rows = (
-            graph.query(
-                "MATCH (n) WHERE n.name IS NOT NULL "
-                "OPTIONAL MATCH (n)-[r:REL]-() "
-                "RETURN n.name, labels(n)[0], count(r)"
+                "MATCH (n) WHERE n.name IS NOT NULL AND n.name <> '' RETURN n.name, labels(n)[0]"
             ).result_set
             or []
         )
     except Exception:
         return []
-    return [
-        (r[0], r[1] or "", r[2] or 0)
-        for r in rows
-        if r[0] and any(f in str(r[0]).lower() for f in lowered)
-    ]
+
+    hits = [(str(r[0]), r[1] or "") for r in rows if r[0] and _match_key(str(r[0]), keys, norm_key)]
+    if not hits:
+        return []
+
+    if len(hits) > ENTITY_CANDIDATE_CAP:
+        # 엣지 수를 아직 모르므로 "얼마나 가까운가"로만 줄입니다. 완전일치와
+        # 접두를 먼저 남기므로 정작 찾던 노드가 잘릴 일은 없습니다.
+        hits.sort(key=lambda h: (_tier_of(h[0], keys, norm_key), len(h[0]), h[0]))
+        hits = hits[:ENTITY_CANDIDATE_CAP]
+
+    names = sorted({n for n, _l in hits})
+    try:
+        deg_rows = (
+            graph.query(
+                "MATCH (n) WHERE n.name IN $names "
+                "OPTIONAL MATCH (n)-[r:REL]-() "
+                "RETURN n.name, labels(n)[0], count(r)",
+                {"names": names},
+            ).result_set
+            or []
+        )
+    except Exception:
+        # 엣지를 못 세도 후보 자체는 쓸 수 있습니다 (순위만 거칠어집니다).
+        return [(n, lbl, 0) for n, lbl in hits]
+
+    return [(str(r[0]), r[1] or "", r[2] or 0) for r in deg_rows]
+
+
+def _match_key(name: str, keys: list, norm_key) -> bool:
+    nk = norm_key(name)
+    return bool(nk) and any(k in nk for k in keys)
+
+
+def _tier_of(name: str, keys: list, norm_key) -> int:
+    nk = norm_key(name)
+    if any(nk == k for k in keys):
+        return 0
+    if any(nk.startswith(k) for k in keys):
+        return 1
+    return 2
 
 
 def lookup_entity(graph, forms: list) -> tuple:
