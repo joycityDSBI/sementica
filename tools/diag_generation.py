@@ -30,6 +30,9 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "pipeline"))
+
+from utils.llm import create_message  # noqa: E402
+
 sys.path.insert(0, str(ROOT / "src" / "eval"))
 
 _env = ROOT / ".env"
@@ -86,8 +89,11 @@ def judge(claude, question: str, answer: str, response: str) -> tuple[float, str
 
 JSON으로만: {{"score": 0.0, "reason": "한 줄"}}"""
     try:
-        msg = claude.messages.create(
-            model=CLAUDE_MODEL, max_tokens=200, messages=[{"role": "user", "content": prompt}]
+        msg = create_message(
+            claude,
+            model=CLAUDE_MODEL,
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
         )
         text = msg.content[0].text.strip()
         m = re.search(r"\{.*\}", text, re.DOTALL)
@@ -101,7 +107,8 @@ JSON으로만: {{"score": 0.0, "reason": "한 줄"}}"""
 
 def generate(claude, prompt_tpl: str, context: str, question: str) -> str:
     try:
-        msg = claude.messages.create(
+        msg = create_message(
+            claude,
             model=CLAUDE_MODEL,
             max_tokens=800,
             messages=[

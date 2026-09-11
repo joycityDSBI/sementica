@@ -77,35 +77,19 @@ def main() -> int:
     random.seed(args.seed)
     random.shuffle(files)
 
-    client = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
+    # 파이프라인 함수를 그대로 호출합니다 — 창 분할·중복 제거·인용문 필터까지
+    # 운영과 동일한 경로여야 측정값에 의미가 있습니다. 예전에는 여기서
+    # text[:3000] 으로 직접 호출해, 창 분할 도입 후 운영과 달라졌습니다.
+    ing._llm_client = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
+    ing.EXTRACT_TEMPERATURE = temp
 
     def extract(text: str) -> list:
-        resp = client.messages.create(
-            model=ing.HAIKU_MODEL,
-            max_tokens=2048,
-            temperature=temp,
-            messages=[{"role": "user", "content": ing.EXTRACT_PROMPT.format(text=text[:3000])}],
-        )
-        import json
-
-        raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = (parts[1] if len(parts) > 1 else raw).removeprefix("json")
-        # evidence_quote 없는 트리플은 파이프라인에서도 버리므로 동일하게 제외
-        return [
-            {
-                "subject": ing._norm_node(t.get("subject", "")),
-                "predicate": ing._norm_pred(t.get("predicate", "")),
-                "object": ing._norm_node(t.get("object", "")),
-            }
-            for t in json.loads(raw.strip())
-            if isinstance(t, dict) and (t.get("evidence_quote") or "").strip()
-        ]
+        return ing.extract_triplets(text)
 
     print(f"  온도 {temp} | 페이지 {args.pages}개를 각각 2회 추출\n")
     tot_same = tot_union = tot_renamed = 0
     checked = 0
+    fails = 0
 
     for path in files:
         if checked >= args.pages:
@@ -117,7 +101,13 @@ def main() -> int:
         try:
             a, b = _triple_set(extract(body)), _triple_set(extract(body))
         except Exception as e:
+            fails += 1
             print(f"  ⚠️  {path.name[:40]}: {type(e).__name__}: {e}")
+            if fails >= 3:
+                # 같은 오류가 반복되면 환경 문제입니다. 파일 300개를 훑으며
+                # 같은 줄을 300번 찍는 대신 여기서 멈춥니다.
+                print("\n  ❌ 연속 실패 — 환경 문제로 보입니다. 위 오류를 먼저 해결하세요.")
+                return 1
             continue
 
         checked += 1

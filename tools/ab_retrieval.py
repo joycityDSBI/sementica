@@ -113,6 +113,7 @@ def main() -> int:
     from google import genai
     from qdrant_client import QdrantClient
 
+    from utils.llm import create_message
     from utils.retrieval import (
         DECOMPOSE_MODEL_VERTEX,
         DEFAULT_PAGE_LIMIT,
@@ -132,7 +133,8 @@ def main() -> int:
     budget = args.budget or 60000
 
     def _complete(prompt: str) -> str:
-        msg = claude.messages.create(
+        msg = create_message(
+            claude,
             model=DECOMPOSE_MODEL_VERTEX,
             max_tokens=400,
             messages=[{"role": "user", "content": prompt}],

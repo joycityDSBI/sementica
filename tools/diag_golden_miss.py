@@ -33,6 +33,8 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "pipeline"))
 
+from utils.llm import create_message  # noqa: E402
+
 _env = ROOT / ".env"
 if _env.exists():
     for raw in _env.read_text(encoding="utf-8").splitlines():
@@ -118,7 +120,8 @@ def find_grounding_chunks(claude, question: str, answer: str, chunks: list) -> l
     """정답을 뒷받침하는 청크 index 를 LLM 으로 판정 (의미 기반)."""
     listing = "\n\n".join(f"[청크 {c['index']}]\n{c['text'][:1500]}" for c in chunks)
     try:
-        msg = claude.messages.create(
+        msg = create_message(
+            claude,
             model=CLAUDE_MODEL,
             max_tokens=200,
             messages=[
