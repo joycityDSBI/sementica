@@ -34,6 +34,13 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "pipeline"))
 
 from utils.llm import create_message  # noqa: E402
+from utils.retrieval import (  # noqa: E402
+    DECOMPOSE_MODEL_VERTEX,
+    DEFAULT_PAGE_LIMIT as RETRIEVE_LIMIT,
+    merge_semantic_results,
+    search_queries,
+    vector_search_pages,
+)
 
 _env = ROOT / ".env"
 if _env.exists():
@@ -147,7 +154,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="골든셋 실패 문항 진단 (의미 기반)")
     ap.add_argument("--dept", default="strategic")
     ap.add_argument("--golden", required=True)
-    ap.add_argument("--result", default="", help="평가 결과 JSON (없으면 전 문항)")
+    ap.add_argument("--result", default="", help="평가 결과 JSON (0.7 미만 문항 자동 선택)")
+    ap.add_argument("--ids", default="", help="진단할 문항 ID 쉼표 구분 (예: Q08,Q29)")
     ap.add_argument("--top", type=int, default=24, help="벡터 검색 청크 수")
     args = ap.parse_args()
 
@@ -163,6 +171,22 @@ def main() -> int:
     claude = AnthropicVertex(project_id=GCP_PROJECT, region=ANTHROPIC_REGION)
     qc = QdrantClient(url=QDRANT_URL)
 
+    # ② 검색 단계가 운영 경로(분해 → 서브쿼리 검색 → 병합)를 그대로 쓰도록
+    # 필요한 두 함수를 준비합니다. 분해 모델도 운영과 같은 값입니다.
+    def _embed_query(text: str) -> list:
+        r = embed.models.embed_content(model=EMBED_MODEL, contents=[text[:2000]])
+        return list(r.embeddings[0].values)
+
+    def complete_fn(prompt: str) -> str:
+        msg = create_message(
+            claude,
+            model=DECOMPOSE_MODEL_VERTEX,
+            max_tokens=400,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text
+
     window_fn = load_window_fn()
     max_chars = page_max_chars()
     if window_fn is None:
@@ -171,7 +195,12 @@ def main() -> int:
     golden = json.loads(Path(args.golden).read_text(encoding="utf-8"))
     questions = {q["id"]: q for q in golden.get("questions", golden)}
 
-    if args.result:
+    if args.ids:
+        want = [i.strip() for i in args.ids.split(",") if i.strip()]
+        targets = [i for i in want if i in questions]
+        if unknown := [i for i in want if i not in questions]:
+            print(f"  ⚠️  골든셋에 없는 ID: {', '.join(unknown)}")
+    elif args.result:
         res = json.loads(Path(args.result).read_text(encoding="utf-8"))
         rows = res.get("results", res if isinstance(res, list) else [])
         targets = [r.get("id") for r in rows if float(r.get("score", 0)) < 0.7]
@@ -216,37 +245,28 @@ def main() -> int:
             continue
         print(f"  ① 근거: ✅ 청크 {ground} 에 정답 근거 있음")
 
-        # ── ② 검색 ──────────────────────────────────────────────────────────
-        vec = embed.models.embed_content(model=EMBED_MODEL, contents=[question[:2000]])
-        hits = qc.query_points(
-            collection_name=collection,
-            query=list(vec.embeddings[0].values),
-            limit=args.top,
-            with_payload=True,
-        )
-        page_id = chunks[0]["page_id"]
-        chunk_rank = None
-        anchor = None
-        page_order: list = []
-        for rank, h in enumerate(hits.points, 1):
-            pl = h.payload or {}
-            pid = pl.get("page_id", "")
-            if pid not in page_order:
-                page_order.append(pid)
-            if pid == page_id and chunk_rank is None:
-                chunk_rank = rank
-                anchor = pl.get("chunk_index", 0)
+        # ── ② 검색 (운영과 동일 경로) ──────────────────────────────────────
+        # 예전에는 원본 질문 1개로 query_points(limit=24) 를 직접 돌렸습니다.
+        # 운영은 쿼리 분해 → 서브쿼리별 검색 → 병합·재랭킹을 거치므로, 그 방식은
+        # 운영이 찾아내는 문서를 "검색 실패"로 잘못 판정할 수 있었습니다.
+        subs, _dec = search_queries(question, complete_fn)
+        per_sub = [
+            vector_search_pages(qc, collection, _embed_query(sq), RETRIEVE_LIMIT) for sq in subs
+        ]
+        merged = merge_semantic_results(per_sub)
 
-        if chunk_rank is None:
-            print(f"  ② 검색: ❌ 상위 {args.top}청크 안에 출처 페이지 없음")
+        prank = next((i + 1 for i, d in enumerate(merged) if d.get("source_url") == url), None)
+        if prank is None:
+            print(f"  ② 검색: ❌ 서브쿼리 {len(subs)}개로 검색해도 출처 페이지가 안 나옴")
             print("     → 임베딩 미스. 쿼리 확장·청크 크기 조정이 필요합니다\n")
             verdicts[qid] = "retrieval_miss"
             continue
-        prank = page_order.index(page_id) + 1
+        anchor = merged[prank - 1].get("anchor_index", chunks[0]["index"])
         hit_ground = anchor in ground
         print(
-            f"  ② 검색: ✅ 청크 {chunk_rank}위 / 페이지 {prank}위 "
-            f"(앵커 청크 #{anchor}{'  ← 근거 청크' if hit_ground else '  ← 근거 아님'})"
+            f"  ② 검색: ✅ 페이지 {prank}위 / 후보 {len(merged)}건 "
+            f"(서브쿼리 {len(subs)}개, 앵커 #{anchor}"
+            f"{' ← 근거 청크' if hit_ground else ' ← 근거 아님'})"
         )
 
         # ── ③ 전달 ──────────────────────────────────────────────────────────
