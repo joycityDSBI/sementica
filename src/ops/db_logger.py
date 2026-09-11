@@ -57,8 +57,18 @@ def log_mcp_request(
     result_count: int = 0,
     duration_ms: int = 0,
     error: str | None = None,
+    vector_count: int | None = None,
+    graph_count: int | None = None,
+    timeline_count: int | None = None,
+    sub_queries: int | None = None,
+    truncated: bool = False,
 ) -> None:
-    """MCP 도구 호출 1건을 mcp_request_log에 기록."""
+    """MCP 도구 호출 1건을 mcp_request_log에 기록.
+
+    경로별 건수를 함께 남깁니다. result_count 만으로는 벡터가 답했는지
+    그래프가 답했는지 타임라인이 답했는지 알 수 없는데, 실측으로 같은 종류의
+    질문이 타임라인이 붙으면 1.0 안 붙으면 0.0 인 사례가 있었습니다.
+    """
     conn = _get_conn()
     if conn is None:
         return
@@ -67,10 +77,23 @@ def log_mcp_request(
             cur.execute(
                 """
                     INSERT INTO mcp_request_log
-                        (dept, tool, query, result_count, duration_ms, error)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (dept, tool, query, result_count, duration_ms, error,
+                         vector_count, graph_count, timeline_count, sub_queries, truncated)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
-                (dept, tool, query[:2000], result_count, duration_ms, error),
+                (
+                    dept,
+                    tool,
+                    query[:2000],
+                    result_count,
+                    duration_ms,
+                    error,
+                    vector_count,
+                    graph_count,
+                    timeline_count,
+                    sub_queries,
+                    truncated,
+                ),
             )
     except Exception as e:
         print(f"  [DB] mcp_request_log 기록 실패: {e}")
@@ -187,6 +210,174 @@ def log_sync_result(
         print(f"  [DB] sync_log 기록 완료 (status={status})")
     except Exception as e:
         print(f"  [DB] sync_log 기록 실패: {e}")
+    finally:
+        conn.close()
+
+
+# ─── 인제스트 실행 로그 ───────────────────────────────────────────────────────
+
+
+def log_ingest_result(
+    dept: str,
+    mode: str,
+    files_found: int = 0,
+    pages_stored: int = 0,
+    pages_skipped: int = 0,
+    pages_error: int = 0,
+    chunks: int = 0,
+    triplets: int = 0,
+    nodes: int = 0,
+    edges: int = 0,
+    events: int = 0,
+    workers: int = 0,
+    duration_sec: int = 0,
+    llm_temperature: float | None = None,
+    llm_temp_channel: str | None = None,
+    status: str = "success",
+    error_detail: str | None = None,
+) -> None:
+    """인제스트 1회 결과를 ingest_log 에 기록합니다.
+
+    files_found 와 pages_stored 를 함께 남기는 것이 핵심입니다 — 중복 파일이
+    쌓여 있으면 둘이 4배까지 벌어지는데, 기록이 없어 그 사실을 발견하는 데
+    하루가 걸렸습니다.
+    """
+    conn = _get_conn()
+    if conn is None:
+        return
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                    INSERT INTO ingest_log
+                        (dept, mode, files_found, pages_stored, pages_skipped, pages_error,
+                         chunks, triplets, nodes, edges, events, workers, duration_sec,
+                         llm_temperature, llm_temp_channel, status, error_detail)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                (
+                    dept,
+                    (mode or "")[:20],
+                    files_found,
+                    pages_stored,
+                    pages_skipped,
+                    pages_error,
+                    chunks,
+                    triplets,
+                    nodes,
+                    edges,
+                    events,
+                    workers,
+                    duration_sec,
+                    llm_temperature,
+                    (llm_temp_channel or "")[:16] or None,
+                    (status or "success")[:20],
+                    error_detail,
+                ),
+            )
+        print(f"  [DB] ingest_log 기록 완료 (status={status})")
+    except Exception as e:
+        print(f"  [DB] ingest_log 기록 실패: {e}")
+    finally:
+        conn.close()
+
+
+# ─── 저장소 실측 스냅샷 ───────────────────────────────────────────────────────
+
+_SNAPSHOT_COLS = (
+    "qdrant_chunks",
+    "qdrant_pages",
+    "qdrant_no_page_id",
+    "graph_nodes",
+    "graph_edges",
+    "graph_events",
+    "events_no_manager",
+    "events_no_scope",
+    "followed_by",
+    "followed_by_skips",
+    "registry_rows",
+    "registry_error",
+    "note",
+)
+
+
+def log_store_snapshot(dept: str, **counts) -> None:
+    """저장소 실측치를 store_snapshot 에 기록합니다 (tools/stats.py --save).
+
+    실행 로그가 "무엇을 하려 했는가"라면 이것은 "지금 무엇이 들어 있는가"입니다.
+    둘이 어긋나는 것을 사람이 눈으로 발견하는 데 하루가 걸렸습니다.
+    """
+    conn = _get_conn()
+    if conn is None:
+        return
+    try:
+        placeholders = ", ".join(["%s"] * len(_SNAPSHOT_COLS))
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO store_snapshot (dept, {', '.join(_SNAPSHOT_COLS)}) "
+                f"VALUES (%s, {placeholders})",
+                (dept, *[counts.get(c) for c in _SNAPSHOT_COLS]),
+            )
+        print("  [DB] store_snapshot 기록 완료")
+    except Exception as e:
+        print(f"  [DB] store_snapshot 기록 실패: {e}")
+    finally:
+        conn.close()
+
+
+# ─── 골든셋 평가 실행 이력 ────────────────────────────────────────────────────
+
+
+def log_eval_run(
+    dept: str,
+    golden_set: str,
+    collection: str = "",
+    total: int = 0,
+    scored: int = 0,
+    harness_failed: int = 0,
+    passed: int = 0,
+    avg_score: float | None = None,
+    category_scores: dict | None = None,
+    difficulty_scores: dict | None = None,
+    detail: list | None = None,
+) -> None:
+    """evaluate.py 결과 1회를 eval_run_log 에 기록합니다.
+
+    golden_set 을 함께 남기는 것이 중요합니다 — 골든셋이 바뀌면 회차 간 총점
+    비교가 무의미해지는데, 파일에만 있으면 나중에 무엇과 무엇을 비교하는지
+    알 수 없습니다.
+    """
+    import json as _json
+
+    conn = _get_conn()
+    if conn is None:
+        return
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                    INSERT INTO eval_run_log
+                        (dept, golden_set, collection, total, scored, harness_failed,
+                         passed, avg_score, category_scores, difficulty_scores, detail)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                (
+                    dept,
+                    golden_set,
+                    (collection or "")[:100],
+                    total,
+                    scored,
+                    harness_failed,
+                    passed,
+                    avg_score,
+                    _json.dumps(category_scores or {}, ensure_ascii=False),
+                    _json.dumps(difficulty_scores or {}, ensure_ascii=False),
+                    _json.dumps(detail or [], ensure_ascii=False),
+                ),
+            )
+        print("  [DB] eval_run_log 기록 완료")
+    except Exception as e:
+        print(f"  [DB] eval_run_log 기록 실패: {e}")
     finally:
         conn.close()
 

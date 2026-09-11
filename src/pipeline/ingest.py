@@ -35,11 +35,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
 # 누락 시 동의어 정규화와 이벤트 주체 판정이 조용히 비활성화됩니다.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
-    from db_logger import upsert_notion_page as _upsert_notion_page
+    from db_logger import (
+        log_ingest_result as _log_ingest_result,
+        upsert_notion_page as _upsert_notion_page,
+    )
 except Exception:
 
     def _upsert_notion_page(*a, **kw):
         pass  # PostgreSQL 없으면 no-op
+
+    def _log_ingest_result(*a, **kw):
+        pass
 
 
 from semantica_helper import (
@@ -1110,6 +1116,37 @@ def main():
     }
     log_path = LOGS_DIR / "ingest_results.json"
     log_path.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # PostgreSQL 에도 남깁니다. ingest_results.json 은 매 실행마다 덮어써져서
+    # 이력이 없고, 그래서 "그래프가 비었는데 완료로 찍힌" 사고를 사후에 추적할
+    # 수 없었습니다. files_found 와 pages_stored 를 함께 남기는 것이 핵심입니다 —
+    # 중복 파일이 쌓이면 둘이 4배까지 벌어집니다.
+    _errors = [r for r in results if r.get("error")]
+    try:
+        from utils.llm import strategy as _llm_strategy
+
+        _channel = _llm_strategy()
+    except Exception:
+        _channel = None
+    _log_ingest_result(
+        dept=args.dept or "legacy",
+        mode="reset" if args.reset else ("dry_run" if args.dry_run else "full"),
+        files_found=len(md_files),
+        pages_stored=len(stored),
+        pages_skipped=len(skipped),
+        pages_error=len(_errors),
+        chunks=total_chunks,
+        triplets=total_tri,
+        nodes=total_nod,
+        edges=total_edg,
+        events=total_ev,
+        workers=args.workers,
+        duration_sec=elapsed,
+        llm_temperature=EXTRACT_TEMPERATURE,
+        llm_temp_channel=_channel,
+        status=("dry_run" if args.dry_run else ("partial" if _errors else "success")),
+        error_detail=(_errors[0].get("error") if _errors else None),
+    )
     print(f"\n  결과 저장: {log_path}")
     print(f"\n  {'✅ 인제스천 완료' if stored else '❌ 저장된 페이지 없음'}")
 

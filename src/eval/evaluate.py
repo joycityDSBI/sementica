@@ -686,10 +686,12 @@ def run_evaluation():
     print()
 
     # 난이도별
+    diff_scores: dict = {}
     for diff in ["easy", "medium", "hard"]:
         d_scores = [r["score"] for r in scored_rows if r["difficulty"] == diff]
         if d_scores:
             avg = sum(d_scores) / len(d_scores)
+            diff_scores[diff] = round(avg, 4)
             print(f"  {diff:<8}: {avg:.2f} ({len(d_scores)}문항)")
 
     # ─── 결과 저장 ────────────────────────────────────────────────────────────
@@ -718,6 +720,39 @@ def run_evaluation():
         ),
         encoding="utf-8",
     )
+
+    # PostgreSQL 기록 — 회차 비교를 손으로 하지 않도록.
+    # golden_set 을 함께 남기는 것이 핵심입니다. 골든셋이 바뀌면 총점 비교가
+    # 무의미해지는데, 파일에만 있으면 나중에 무엇과 무엇을 비교하는지 알 수 없습니다.
+    try:
+        sys.path.insert(0, str(ROOT / "src" / "ops"))
+        from db_logger import log_eval_run
+
+        log_eval_run(
+            dept=_known.dept or "legacy",
+            golden_set=_GOLDEN_PATH or "(내장 기본 골든셋)",
+            collection=COLLECTION_NAME,
+            total=len(results),
+            scored=len(scored_rows),
+            harness_failed=len(failed_rows),
+            passed=passed,
+            avg_score=round(total_score, 4),
+            category_scores={c: round(sum(s) / len(s), 4) for c, s in category_scores.items()},
+            difficulty_scores=diff_scores,
+            detail=[
+                {
+                    "id": r.get("id"),
+                    "category": r.get("category"),
+                    "difficulty": r.get("difficulty"),
+                    "score": r.get("score"),
+                    "reason": (r.get("reason") or "")[:200],
+                    "harness_error": r.get("harness_error"),
+                }
+                for r in results
+            ],
+        )
+    except Exception as e:
+        print(f"  ⚠️  eval_run_log 기록 실패: {type(e).__name__}: {e}")
 
     # Markdown 리포트
     md_lines = [

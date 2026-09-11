@@ -820,6 +820,7 @@ def hybrid_search(query: str, limit: int = _DEFAULT_PAGE_LIMIT) -> dict[str, Any
         # 부분 실패도 로그에 남깁니다. 예전에는 Qdrant 가 죽어 빈 결과가
         # 나가도 error=None 으로 기록돼, 대시보드에서 100% 성공으로 보였습니다.
         _partial = "; ".join(_result.get("errors", [])) if _result else ""
+        _tl = (_result.get("timeline_results") or {}).get("events", []) if _result else []
         log_mcp_request(
             dept=DEPT_NAME,
             tool="hybrid_search",
@@ -827,6 +828,14 @@ def hybrid_search(query: str, limit: int = _DEFAULT_PAGE_LIMIT) -> dict[str, Any
             result_count=len(_result.get("semantic_results", [])) if _result else 0,
             duration_ms=int((time.time() - _t0) * 1000),
             error=_err or _partial or None,
+            # 어느 경로가 답했는지 — result_count 만으로는 구분되지 않습니다.
+            # 같은 종류의 질문이 타임라인이 붙으면 1.0, 안 붙으면 0.0 인 사례가
+            # 있었는데 로그로는 보이지 않았습니다.
+            vector_count=len(_result.get("semantic_results", [])) if _result else 0,
+            graph_count=len(_result.get("graph_results", [])) if _result else 0,
+            timeline_count=len(_tl),
+            sub_queries=len(_result.get("sub_queries") or []) or 1 if _result else None,
+            truncated=bool(_result.get("truncated")) if _result else False,
         )
 
 
