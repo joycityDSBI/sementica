@@ -222,8 +222,12 @@ ALTER TABLE mcp_request_log ADD COLUMN IF NOT EXISTS truncated      BOOLEAN DEFA
 -- =============================================================
 -- 유용한 뷰
 -- =============================================================
+-- CREATE OR REPLACE VIEW 는 컬럼 삭제·순서 변경을 허용하지 않아, 배포된
+-- 정의가 파일과 다르면 "cannot drop columns from view" 로 실패합니다.
+-- 뷰에는 데이터가 없으므로 DROP 후 재생성합니다.
 -- 인제스트 실행별 "시도 vs 실제" 대조 — 4배 어긋난 것을 하루 만에 발견한 그 문제
-CREATE OR REPLACE VIEW v_ingest_vs_store AS
+DROP VIEW IF EXISTS v_ingest_vs_store;
+CREATE VIEW v_ingest_vs_store AS
 SELECT
     i.ts, i.dept, i.mode,
     i.files_found, i.pages_stored, i.edges AS edges_reported,
@@ -238,7 +242,8 @@ LEFT JOIN LATERAL (
 ORDER BY i.ts DESC;
 
 -- 유용한 뷰: 본부별 인제스천 현황
-CREATE OR REPLACE VIEW v_ingest_summary AS
+DROP VIEW IF EXISTS v_ingest_summary;
+CREATE VIEW v_ingest_summary AS
 SELECT
     dept,
     COUNT(*)                                    AS total_pages,
