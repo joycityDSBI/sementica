@@ -194,27 +194,49 @@ def window_around_anchor(
 ) -> str:
     """문서가 max_chars 를 넘을 때 남길 구간을 정합니다.
 
-    anchor_index(벡터 검색에 걸린 chunk_index)가 주어지면 그 청크가 반드시
-    포함되도록 윈도우를 잡습니다. 앞부분만 남기면 문서 뒤쪽에서 찾아낸 근거를
-    그대로 버리게 됩니다 — 검색해놓고 전달 직전에 잃는 셈입니다.
+    anchor_index 는 벡터 검색에 걸린 chunk_index 하나 또는 **여러 개**(점수
+    내림차순)입니다. 검색에 걸린 청크가 최대한 많이 들어가는 윈도우를 고릅니다.
+    앞부분만 남기면 문서 뒤쪽에서 찾아낸 근거를 그대로 버리게 됩니다 —
+    검색해놓고 전달 직전에 잃는 셈입니다.
+
+    여러 개를 받는 이유: 예전에는 **최고점 청크 하나**만 기준으로 삼았습니다.
+    앞쪽 청크가 최고점이고 정작 근거가 뒤쪽에 있으면 그대로 잘렸습니다.
+    실측 — 24,774자 문서에서 근거는 청크 20·21 인데 앵커가 청크 0 이라
+    윈도우 밖으로 밀려 0.0 점을 받았습니다.
     """
     if len(full_text) <= max_chars:
         return full_text
     if anchor_index is None:
         return full_text[:max_chars]
 
-    # 앵커 청크의 시작 오프셋 (조립 시 "\n\n" 로 이었으므로 그만큼 가산)
-    offset = 0
-    for c in sorted_chunks:
-        if c["index"] == anchor_index:
-            break
-        offset += len(c["text"]) + 2
-    else:
+    anchors = [anchor_index] if isinstance(anchor_index, int) else list(anchor_index or [])
+    if not anchors:
         return full_text[:max_chars]
 
-    start = max(0, offset - max_chars // 3)  # 앞쪽 1/3 은 선행 문맥
+    # 각 청크의 [시작, 끝) 오프셋 (조립 시 "\n\n" 로 이었으므로 그만큼 가산)
+    spans: dict = {}
+    off = 0
+    for c in sorted_chunks:
+        spans[c["index"]] = (off, off + len(c["text"]))
+        off += len(c["text"]) + 2
+
+    targets = [spans[i] for i in anchors if i in spans]
+    if not targets:
+        return full_text[:max_chars]
+
+    # 매칭 청크를 가장 많이 담는 윈도우를 선택합니다. 동률이면 점수가 높은
+    # 앵커(= anchors 의 앞쪽)를 기준으로 한 것이 먼저 선택됩니다.
+    best_start, best_cover = None, -1
+    for s, _e in targets:
+        start = max(0, s - max_chars // 3)  # 앞쪽 1/3 은 선행 문맥
+        end = min(len(full_text), start + max_chars)
+        start = max(0, end - max_chars)  # 끝에 닿았으면 앞으로 당겨 예산을 모두 사용
+        cover = sum(1 for ts, te in targets if ts >= start and te <= end)
+        if cover > best_cover:
+            best_start, best_cover = start, cover
+
+    start = best_start or 0
     end = min(len(full_text), start + max_chars)
-    start = max(0, end - max_chars)  # 끝에 닿았으면 앞으로 당겨 예산을 모두 사용
 
     piece = full_text[start:end]
     if start > 0:
@@ -238,6 +260,8 @@ def _assemble(pages: dict, max_chars: int, anchors: dict) -> dict:
             "chunk_count": len(ordered),
             "total_chars": len(full),
             "truncated": len(full) > max_chars,
+            # 검색에 걸린 청크 — 진단 도구가 "앵커가 근거 청크인가"를 판정합니다.
+            "anchor_index": anchors.get(key),
         }
     return out
 
@@ -349,14 +373,23 @@ def vector_search_pages(
     )
 
     page_scores: dict = {}
-    anchors: dict = {}
+    page_hits: dict = {}
     for h in hits.points:
         p = h.payload or {}
         pid = p.get("page_id", "")
+        if not pid:
+            continue
         score = round(h.score, 4)
-        if pid and (pid not in page_scores or score > page_scores[pid]):
+        # 페이지당 **걸린 청크를 모두** 모읍니다. 최고점 하나만 앵커로 쓰면
+        # 근거가 뒤쪽 청크에 있을 때 윈도우 밖으로 밀려납니다.
+        page_hits.setdefault(pid, []).append((score, p.get("chunk_index", 0)))
+        if pid not in page_scores or score > page_scores[pid]:
             page_scores[pid] = score
-            anchors[pid] = p.get("chunk_index", 0)
+
+    anchors = {
+        pid: [ci for _s, ci in sorted(hs, key=lambda x: x[0], reverse=True)]
+        for pid, hs in page_hits.items()
+    }
 
     top_pids = sorted(page_scores, key=lambda k: page_scores[k], reverse=True)[:limit]
     full_pages = fetch_full_pages(qc, collection_name, top_pids, max_chars, anchors)
