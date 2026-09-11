@@ -61,6 +61,7 @@ from semantica_helper import (
     format_scope_report,
     is_decision_triplet,
     merge_node,
+    rebuild_followed_by,
     record_decision_node,
     reset_scope_report,
     text_windows,
@@ -1098,6 +1099,13 @@ def main():
     print(f"  트리플:  {total_tri}개 추출")
     print(f"  그래프:  노드 {total_nod}개 / 엣지 {total_edg}개 저장")
     print(f"  이벤트:  {total_ev}개 :Event 노드 저장")
+
+    # ── 이벤트 체인 재구축 ───────────────────────────────────────────────────
+    # 모든 이벤트가 들어온 뒤에 한 번에 만듭니다. 삽입 시점마다 이어붙이면
+    # 순서·동시성에 따라 건너뛰기 엣지가 남습니다.
+    if not args.dry_run and _falkordb is not None:
+        with _falkordb_lock:
+            rebuild_followed_by(_falkordb)
 
     # ── 주체 판정 이슈 리포트 ────────────────────────────────────────────────
     _scope_msg = format_scope_report()

@@ -70,6 +70,7 @@ from semantica_helper import (  # noqa: E402
     format_scope_report,
     is_decision_triplet,
     merge_node,
+    rebuild_followed_by,
     record_decision_node,
     reset_scope_report,
     text_windows,
@@ -1376,6 +1377,11 @@ def main():
     print(f"  신규 이벤트:    {total_ev}개 :Event 노드")
 
     # ── 주체 판정 이슈 리포트 ────────────────────────────────────────────────
+    # 이벤트 체인 재구축 — 변경분만 처리해도 체인은 전체 기준으로
+    # 다시 만들어야 앞뒤가 맞습니다 (수백 건이라 비용은 무시할 수준).
+    if not args.dry_run:
+        rebuild_followed_by(graph)
+
     _scope_msg = format_scope_report()
     if _scope_msg:
         print()

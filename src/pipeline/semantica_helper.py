@@ -31,6 +31,7 @@ Semantica 프레임워크 통합 헬퍼
 
 import contextlib
 import hashlib
+import itertools
 import os
 import re
 import threading
@@ -1371,62 +1372,100 @@ def upsert_event_node(graph, event: dict) -> int:
         except Exception:
             pass
 
-    # ── 4. FOLLOWED_BY 자동 연결 (같은 주체, 날짜 순서) ─────────────────────
-    # scope 기준으로 연결합니다. game 기준이던 이전 방식은 주체가 없는
-    # 이벤트를 모두 "기타"로 묶어, 재무실 일정과 인사팀 일정이 하나의
-    # 체인으로 잘못 이어졌습니다. scope 가 비면 체인을 만들지 않습니다.
-    if scope:
-        try:
-            # 직전 이벤트
-            prev_r = graph.query(
-                "MATCH (e:Event) WHERE e.scope = $scope AND e.date_ts < $ts "
-                "RETURN e.event_id, e.date_ts ORDER BY e.date_ts DESC LIMIT 1",
-                {"scope": scope, "ts": date_ts},
-            )
-            prev_eid = prev_r.result_set[0][0] if prev_r.result_set else None
-
-            # 직후 이벤트
-            next_r = graph.query(
-                "MATCH (e:Event) WHERE e.scope = $scope AND e.date_ts > $ts "
-                "RETURN e.event_id, e.date_ts ORDER BY e.date_ts ASC LIMIT 1",
-                {"scope": scope, "ts": date_ts},
-            )
-            next_eid = next_r.result_set[0][0] if next_r.result_set else None
-
-            # 이 이벤트가 기존 prev→next 구간을 가릅니다. 낡은 건너뛰기 엣지를
-            # 먼저 지우지 않으면 A→C 가 남은 채 A→B, B→C 가 추가되어, A 의
-            # "직후 이벤트"가 B 인지 C 인지 비결정적이 되고 존재하지 않는
-            # 간격(A→C 의 days_diff)이 그대로 보고됩니다. 인제스트가 병렬이라
-            # 날짜 역순 도착은 예외가 아니라 일상입니다.
-            if prev_eid and next_eid:
-                graph.query(
-                    "MATCH (p:Event {event_id: $p})-[r:FOLLOWED_BY]->(n:Event {event_id: $n}) "
-                    "DELETE r",
-                    {"p": prev_eid, "n": next_eid},
-                )
-
-            if prev_eid:
-                prev_ts_v = prev_r.result_set[0][1]
-                graph.query(
-                    "MATCH (p:Event {event_id: $p}) MATCH (c:Event {event_id: $c}) "
-                    "MERGE (p)-[r:FOLLOWED_BY]->(c) SET r.days_diff = $dd",
-                    {"p": prev_eid, "c": event_id, "dd": round((date_ts - prev_ts_v) / 86400)},
-                )
-
-            if next_eid:
-                next_ts_v = next_r.result_set[0][1]
-                graph.query(
-                    "MATCH (c:Event {event_id: $c}) MATCH (n:Event {event_id: $n}) "
-                    "MERGE (c)-[r:FOLLOWED_BY]->(n) SET r.days_diff = $dd",
-                    {"c": event_id, "n": next_eid, "dd": round((next_ts_v - date_ts) / 86400)},
-                )
-        except Exception:
-            pass  # FOLLOWED_BY 실패는 치명적이지 않음
+    # ── 4. FOLLOWED_BY ──────────────────────────────────────────────────────
+    # 여기서 만들지 않습니다. 예전에는 이벤트를 넣을 때마다 앞뒤를 찾아 체인을
+    # 이어붙였는데, 그 방식은 삽입 순서·동시성·같은 날짜 처리에 모두 의존합니다.
+    # 실측으로 건너뛰기 엣지가 213개 중 14개 남았습니다 (사이에 다른 이벤트가
+    # 있는데도 A→C 가 연결된 상태 — "직후 이벤트"가 틀리게 보고됩니다).
+    # 대신 인제스트·동기화가 끝난 뒤 rebuild_followed_by() 로 한 번에 다시
+    # 만듭니다. 전량 재구축은 구성상 항상 옳고, 순서에 영향받지 않습니다.
 
     return event_node_id
 
 
 # ─── 8. 이벤트 체인 조회 (get_event_chain) ──────────────────────────────────
+
+
+def rebuild_followed_by(graph, verbose: bool = True) -> dict:
+    """모든 FOLLOWED_BY 를 지우고 scope 별 날짜순으로 다시 연결합니다.
+
+    이벤트를 넣을 때마다 체인을 이어붙이는 증분 방식은 삽입 순서와 동시성에
+    의존합니다. 워커 여러 개가 같은 구간을 동시에 가르거나, 날짜가 같은
+    이벤트가 서로를 건너뛰면 A→C 가 남은 채 A→B, B→C 가 생겨 "직후 이벤트"가
+    비결정적이 됩니다. 실측: 213개 중 14개가 그런 상태였습니다.
+
+    전량 재구축은 그 문제를 통째로 없앱니다 — 순서와 무관하게 결과가 같고,
+    같은 날짜는 event_id 로 안정적으로 정렬합니다.
+
+    Returns:
+        {scopes, events, edges, deleted}
+    """
+    stats = {"scopes": 0, "events": 0, "edges": 0, "deleted": 0}
+    try:
+        r = graph.query("MATCH ()-[r:FOLLOWED_BY]->() RETURN count(r)")
+        stats["deleted"] = r.result_set[0][0] if r.result_set else 0
+        graph.query("MATCH ()-[r:FOLLOWED_BY]->() DELETE r")
+
+        rows = (
+            graph.query(
+                "MATCH (e:Event) WHERE e.scope IS NOT NULL AND e.scope <> '' "
+                "AND e.date_ts IS NOT NULL AND e.date_ts > 0 "
+                "RETURN e.scope, e.event_id, e.date_ts"
+            ).result_set
+            or []
+        )
+    except Exception as exc:
+        if verbose:
+            print(f"  ⚠️  FOLLOWED_BY 재구축 실패: {type(exc).__name__}: {exc}")
+        return stats
+
+    by_scope: dict = {}
+    for scope, eid, ts in rows:
+        by_scope.setdefault(scope, []).append((ts, eid))
+    stats["events"] = len(rows)
+    stats["scopes"] = len(by_scope)
+
+    pairs: list = []
+    for evs in by_scope.values():
+        # 같은 날짜는 event_id 로 순서를 고정합니다 (실행마다 달라지지 않도록)
+        evs.sort(key=lambda x: (x[0], x[1]))
+        for (ts_a, a), (ts_b, b) in itertools.pairwise(evs):
+            pairs.append({"a": a, "b": b, "d": round((ts_b - ts_a) / 86400)})
+
+    if not pairs:
+        if verbose:
+            print("  🔗 FOLLOWED_BY: 연결할 이벤트 쌍 없음")
+        return stats
+
+    link = (
+        "MATCH (a:Event {event_id: $a}) MATCH (b:Event {event_id: $b}) "
+        "MERGE (a)-[r:FOLLOWED_BY]->(b) SET r.days_diff = $d"
+    )
+    try:
+        # UNWIND 로 한 번에 — FalkorDB 가 거부하면 아래에서 한 쌍씩 처리합니다.
+        graph.query(
+            "UNWIND $pairs AS p "
+            "MATCH (a:Event {event_id: p.a}) MATCH (b:Event {event_id: p.b}) "
+            "MERGE (a)-[r:FOLLOWED_BY]->(b) SET r.days_diff = p.d",
+            {"pairs": pairs},
+        )
+        stats["edges"] = len(pairs)
+    except Exception:
+        ok = 0
+        for pr in pairs:
+            try:
+                graph.query(link, pr)
+                ok += 1
+            except Exception:
+                pass
+        stats["edges"] = ok
+
+    if verbose:
+        print(
+            f"  🔗 FOLLOWED_BY 재구축: 주체 {stats['scopes']}개 / 이벤트 {stats['events']}개 "
+            f"/ 엣지 {stats['deleted']} → {stats['edges']}"
+        )
+    return stats
 
 
 def get_event_chain(
