@@ -1,0 +1,48 @@
+# systemd 서비스 — Snowflake UDF 가 호출하는 REST API
+# 배포 위치: /etc/systemd/system/sementica-rest.service
+#
+#   sudo cp deploy/sementica-rest.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sementica-rest
+#
+# 왜 필요한가:
+#   이 서버는 지금까지 `nohup python src/mcp/rest_api.py &` 로 떠 있었습니다.
+#   그래서 셸이 닫히거나 프로세스가 죽으면 조용히 사라졌고, 재부팅 후에도
+#   올라오지 않았습니다. Snowflake UDF 가 이 API 를 호출하므로, 죽어 있으면
+#   UDF 쪽에서만 에러가 나고 서버에는 아무 흔적이 남지 않습니다.
+#
+# 인터프리터:
+#   .venv 를 씁니다 — MCP 서버(sementica-mcp)와 같은 환경이어야 합니다.
+#   한동안 REST 만 pyenv 3.11.9 로 돌아 두 프로세스가 서로 다른 site-packages
+#   를 봤습니다. anthropic 버전 차이나 mcp 패키지 섀도잉 같은 문제는 인터프리터
+#   별로 다르게 나타나서, 한쪽만 고쳐놓고 다 고쳤다고 믿기 쉬운 구조였습니다.
+#
+#   전환 전에 .venv 에 의존성이 있는지 확인하세요:
+#       .venv/bin/python -c "import starlette, uvicorn, server"
+
+[Unit]
+Description=Semantica REST API (Snowflake UDF 연동)
+After=network.target falkordb.service qdrant.service
+Wants=falkordb.service qdrant.service
+
+[Service]
+Type=simple
+User=seongin
+WorkingDirectory=/home/seongin/sementica
+EnvironmentFile=/home/seongin/sementica/.env
+
+ExecStart=/home/seongin/sementica/.venv/bin/python \
+    src/mcp/rest_api.py \
+    --dept strategic \
+    --port 8766
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sementica-rest
+
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

@@ -39,18 +39,34 @@ echo "  Semantica REST API + ngrok 시작"
 echo "  본부: $DEPT  포트: $REST_PORT"
 echo "================================================"
 
-# ── 기존 프로세스 정리 ─────────────────────────────────────────
+# ── REST API 기동 ──────────────────────────────────────────────
+# systemd(sementica-rest)가 관리 중이면 건드리지 않습니다. 예전처럼 pkill 로
+# 죽이면 systemd 가 Restart=always 로 즉시 되살려서, 이 스크립트가 띄운 것과
+# 경합하며 포트를 서로 뺏습니다. deploy/README.md 참고.
+REST_MANAGED=0
+if systemctl is-active --quiet sementica-rest 2>/dev/null; then
+    REST_MANAGED=1
+fi
+
 echo "[1/3] 기존 프로세스 정리..."
-pkill -f "rest_api.py" 2>/dev/null || true
-pkill -f "ngrok http"  2>/dev/null || true
+pkill -f "ngrok http" 2>/dev/null || true
+if [ "$REST_MANAGED" -eq 1 ]; then
+    echo "  REST API 는 systemd(sementica-rest)가 관리 중 — 그대로 둡니다"
+else
+    pkill -f "rest_api.py" 2>/dev/null || true
+fi
 sleep 1
 
-# ── REST API 백그라운드 시작 ───────────────────────────────────
-echo "[2/3] REST API 서버 시작 (포트 $REST_PORT)..."
-nohup python src/mcp/rest_api.py --dept "$DEPT" --port "$REST_PORT" \
-    > logs/rest_api.log 2>&1 &
-REST_PID=$!
-echo "  PID: $REST_PID"
+if [ "$REST_MANAGED" -eq 1 ]; then
+    echo "[2/3] REST API — systemd 관리 중이므로 기동 생략"
+    REST_PID=""
+else
+    echo "[2/3] REST API 서버 시작 (포트 $REST_PORT)..."
+    nohup python src/mcp/rest_api.py --dept "$DEPT" --port "$REST_PORT" \
+        > logs/rest_api.log 2>&1 &
+    REST_PID=$!
+    echo "  PID: $REST_PID"
+fi
 
 # 헬스 체크 — 최대 30초까지 기다립니다.
 # 예전에는 5초 뒤 한 번만 확인해서, 기동이 조금만 느려져도(임포트 추가·콜드
@@ -58,7 +74,8 @@ echo "  PID: $REST_PID"
 # 프로세스가 이미 죽었으면 기다리지 않고 바로 로그를 보여줍니다.
 HEALTH_OK=0
 for i in $(seq 1 30); do
-    if ! kill -0 "$REST_PID" 2>/dev/null; then
+    # systemd 관리 중이면 PID 를 모르므로 헬스만 봅니다.
+    if [ -n "$REST_PID" ] && ! kill -0 "$REST_PID" 2>/dev/null; then
         echo "  ❌ REST API 프로세스가 종료되었습니다 (${i}초)"
         break
     fi
@@ -87,7 +104,9 @@ if [ -z "${SNOWFLAKE_REST_TOKEN:-}" ] && [ -z "${ALLOW_UNAUTHENTICATED_NGROK:-}"
     echo "     .env 에 SNOWFLAKE_REST_TOKEN 을 설정하고,"
     echo "     snowflake/01_network_access.sql 의 SECRET 에도 같은 값을 넣으세요."
     echo "     (그래도 열려면 ALLOW_UNAUTHENTICATED_NGROK=1)"
-    kill "$REST_PID" 2>/dev/null || true
+    # 이 스크립트가 띄운 것만 정리합니다. systemd 가 관리 중인 서비스는
+    # 터널을 못 여는 것과 무관하게 계속 떠 있어야 합니다.
+    [ -n "$REST_PID" ] && kill "$REST_PID" 2>/dev/null
     exit 1
 fi
 
@@ -122,4 +141,9 @@ else
 fi
 echo "================================================"
 echo ""
-echo "종료하려면: pkill -f rest_api.py && pkill -f ngrok"
+if [ "$REST_MANAGED" -eq 1 ]; then
+    echo "종료하려면: pkill -f ngrok"
+    echo "  (REST API 는 systemd 관리 — 내리려면 sudo systemctl stop sementica-rest)"
+else
+    echo "종료하려면: pkill -f rest_api.py && pkill -f ngrok"
+fi

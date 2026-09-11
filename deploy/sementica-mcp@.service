@@ -1,6 +1,10 @@
 # systemd 템플릿 서비스 — 본부별 MCP 인스턴스
 # 배포 위치: /etc/systemd/system/sementica-mcp@.service
 #
+# ⚠️  현재 운영 서버에는 템플릿이 아니라 `sementica-mcp.service`(고정 이름)가
+#     설치돼 있습니다. 이 파일은 본부를 여럿 띄울 때를 위한 것이고, 지금
+#     돌고 있는 것과는 별개입니다. 실제 배포본은 deploy/README.md 참고.
+#
 # 사용법:
 #   sudo systemctl enable --now sementica-mcp@strategic
 #   sudo systemctl enable --now sementica-mcp@dev
@@ -21,11 +25,11 @@ Wants=falkordb.service qdrant.service
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/sementica
-EnvironmentFile=/home/ubuntu/sementica/.env
+User=seongin
+WorkingDirectory=/home/seongin/sementica
+EnvironmentFile=/home/seongin/sementica/.env
 
-ExecStart=/home/ubuntu/sementica/.venv/bin/python \
+ExecStart=/home/seongin/sementica/.venv/bin/python \
     src/mcp/server.py \
     --dept %i \
     --transport streamable-http
