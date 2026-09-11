@@ -697,8 +697,21 @@ def save_page(client, token, page, idx, output_dir: Path, min_words: int = 30) -
             frontmatter += f"db_properties: {json.dumps(db_props, ensure_ascii=False)}\n"
         frontmatter += "---\n\n"
 
-        fname = f"{idx:03d}_{safe_filename(title)}.md"
+        # 파일명은 page_id 로 시작합니다. 예전에는 수집 **회차의 순번**(idx)을
+        # 앞에 붙였는데, fetch 를 다시 돌리면 같은 페이지에 다른 번호가 붙어
+        # 새 파일로 쌓였습니다. 실측: 파일 1258개 = 실제 페이지 299개(4.2배).
+        # 인제스트가 같은 페이지를 네 번씩 LLM 에 넣고, Qdrant 포인트 ID 가
+        # notion_url 기준이라 서로 덮어써서, 로그의 "1225개 저장"과 저장소의
+        # 268개가 4배 어긋났습니다.
+        fname = f"{page_id}_{safe_filename(title)}.md"
         out_path = output_dir / fname
+
+        # 제목이 바뀌면 이름도 바뀌므로, 같은 page_id 의 옛 파일을 정리합니다.
+        for stale in output_dir.glob(f"{page_id}_*.md"):
+            if stale != out_path:
+                with contextlib.suppress(OSError):
+                    stale.unlink()
+
         out_path.write_text(frontmatter + text, encoding="utf-8")
 
         print(f"        저장: {fname} ({word_count} 단어) ✅")
