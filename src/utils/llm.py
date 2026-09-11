@@ -13,15 +13,20 @@ LLM 호출 래퍼 — SDK 버전에 따라 temperature 전달 방식을 자동 �
     한쪽이 깨지므로, 어느 통로가 열려 있는지 런타임에 고릅니다.
 
 전달 방식 (위에서부터 시도):
-    ① temperature=                      명명 인자 (0.x)
-    ② output_config={"temperature": …}  1.x 에서 샘플링 설정이 모인 자리로 보임
-    ③ extra_body={"temperature": …}     raw body 통로
-    ④ 생략                               전부 막혔을 때 — 크게 경고
+    ① temperature=                   명명 인자 (0.x)
+    ② extra_body={"temperature": …}  1.x 의 공식 경로 (SDK 마이그레이션 문서)
+    ③ 생략                            둘 다 막혔을 때 — 크게 경고
 
     후보는 시그니처로 1차 선별하고, 실제 호출 결과로 확정합니다. 서명에는
     있지만 API 가 거부하는 경우가 있어 첫 호출 결과까지 봐야 합니다.
 
-    ④ 로 떨어지면 한 번 크게 경고합니다. 조용히 빼면 추출이 회차마다 달라지는데도
+    ※ output_config 도 1.2.0 시그니처에 있지만 후보로 쓰지 않습니다. 샘플링
+      설정이 그쪽으로 갔다고 **추측**했었는데, 문서가 지정한 경로는 extra_body
+      입니다. 잘못된 통로가 오류 없이 받아들이기만 하고 값을 적용하지 않으면,
+      래퍼가 그것을 확정해 온도 0 인 줄 알면서 1.0 으로 도는 최악이 됩니다.
+      확인되지 않은 통로는 넣지 않습니다.
+
+    ③ 으로 떨어지면 한 번 크게 경고합니다. 조용히 빼면 추출이 회차마다 달라지는데도
     아무도 모르게 됩니다 — 실제로 그래서 그래프가 흔들렸습니다.
 
     어느 방식이 쓰이는지 미리 보려면:  python tools/probe_llm.py
@@ -31,13 +36,12 @@ import inspect
 import threading
 
 _lock = threading.Lock()
-_strategy: str | None = None  # None=미판별, 이후 named|output_config|extra_body|omit
+_strategy: str | None = None  # None=미판별, 이후 named|extra_body|omit
 _warned = False
 
 # (이름, kwargs 생성기, 시그니처에서 요구하는 파라미터)
 _CANDIDATES = [
     ("named", lambda t: {"temperature": t}, "temperature"),
-    ("output_config", lambda t: {"output_config": {"temperature": t}}, "output_config"),
     ("extra_body", lambda t: {"extra_body": {"temperature": t}}, "extra_body"),
 ]
 

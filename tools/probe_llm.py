@@ -33,9 +33,10 @@ GCP_PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
 ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")
 MODEL = os.environ.get("PROBE_MODEL", "claude-haiku-4-5@20251001")
 
+# extra_body 가 1.x 의 공식 경로입니다 (SDK 마이그레이션 문서).
+# output_config 는 시그니처에 있지만 샘플링 설정 자리가 아니므로 시험하지 않습니다.
 CANDIDATES = [
     ("temperature=", {"temperature": 0}),
-    ("output_config=", {"output_config": {"temperature": 0}}),
     ("extra_body=", {"extra_body": {"temperature": 0}}),
 ]
 
