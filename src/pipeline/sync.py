@@ -1366,3 +1366,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # ingest.py 와 같은 이유로 확실히 종료합니다 — Vertex/Qdrant 클라이언트가
+    # 비데몬 스레드를 남겨 작업이 끝나도 프로세스가 안 죽는 경우가 있습니다.
+    # 이 스크립트는 cron 으로 돌기 때문에, 안 죽으면 다음 회차와 겹쳐 쌓입니다.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

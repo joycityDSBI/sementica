@@ -1040,5 +1040,24 @@ def main():
     print(f"\n  {'✅ 인제스천 완료' if stored else '❌ 저장된 페이지 없음'}")
 
 
+def _close_clients() -> None:
+    """가지고 있는 클라이언트를 닫습니다 (실패해도 종료를 막지 않습니다)."""
+    for obj in (_llm_client, _embed_model, _qdrant_store, _falkordb):
+        closer = getattr(obj, "close", None)
+        if callable(closer):
+            with contextlib.suppress(Exception):
+                closer()
+
+
 if __name__ == "__main__":
     main()
+    # 작업이 끝나도 프로세스가 안 죽는 문제가 있었습니다. 결과 출력과
+    # ingest_results.json 까지 모두 끝난 뒤 인터프리터가 종료를 기다리며
+    # 멈춥니다 — Vertex/Qdrant 클라이언트가 남긴 비데몬 스레드 때문입니다.
+    # 배치 작업이고 이 시점에는 모든 쓰기가 이미 끝났으므로, 정리해 본 뒤
+    # 출력만 flush 하고 확실히 종료합니다. cron 에서 프로세스가 쌓이거나
+    # 다음 단계가 영영 시작되지 않는 것보다 낫습니다.
+    _close_clients()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
