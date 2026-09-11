@@ -350,9 +350,14 @@ REL_QA_PROMPT = """다음 지식 그래프 관계들을 보고 평가용 Q&A를 
     "category": "관계",
     "difficulty": "easy|medium|hard",
     "question": "한국어 질문",
-    "answer": "관계에서 추출한 정확한 답변"
+    "answer": "관계에서 추출한 정확한 답변",
+    "source_index": 1
   }}
 ]
+
+source_index 는 이 Q&A 의 근거가 된 관계의 번호입니다 (목록의 [n]).
+여러 관계를 묶은 질문이면 정답의 핵심 근거가 되는 하나를 고르세요.
+이 번호로 출처 문서를 연결하므로 반드시 정확해야 합니다.
 
 조건:
 - 주어진 관계 데이터만으로 답할 수 있어야 함
@@ -683,10 +688,10 @@ if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
         if _rel_stop.is_set():
             return label, 0, [], [], None
         rel_text = "\n".join(
-            f"- {r['subject']} →[{r['predicate']}]→ {r['object']}"
+            f"[{i}] {r['subject']} →[{r['predicate']}]→ {r['object']}"
             + (f" (조건: {r['condition']})" if r.get("condition") else "")
             + f'\n    원문: "{r["quote"]}"'
-            for r in chunk
+            for i, r in enumerate(chunk, 1)
         )
         # 검증은 **원문 인용문만** 보고 합니다. 예전에는 트리플 목록 자체를
         # 근거로 넘겨서, "이 트리플로 답할 수 있는가"를 묻는 셈이었습니다 —
@@ -699,8 +704,15 @@ if relations and cat_counts.get("관계", 0) < CATEGORY_TARGETS["관계"]:
                 verify_text, REL_QA_PROMPT.format(relations=rel_text)
             )
             for item in accepted:
-                item["source_url"] = chunk[0].get("url", "")
-                item["source_title"] = f"관계: {chunk[0]['subject']}"
+                # 이 Q&A 의 근거가 된 관계를 골라 그 문서를 출처로 답니다.
+                # 예전에는 무조건 chunk[0] 의 URL 을 썼는데, 관계를 5개씩 묶어
+                # 처리하므로 2~5번째 관계에서 나온 정답은 **다른 문서**가 출처로
+                # 붙었습니다. 실측: 진단에서 "정답 근거 없음 — 문항 교체"로 잡힌
+                # Q20·Q24·Q28 이 전부 관계 문항이었고 원인이 이것입니다.
+                _i = item.pop("source_index", 1)
+                _rel = chunk[_i - 1] if isinstance(_i, int) and 1 <= _i <= len(chunk) else chunk[0]
+                item["source_url"] = _rel.get("url", "")
+                item["source_title"] = f"관계: {_rel['subject']}"
                 if args.baseline:
                     item["baseline_pass"] = baseline_search_pass(item["question"], item["answer"])
             return label, len(accepted) + len(rejected), accepted, rejected, None

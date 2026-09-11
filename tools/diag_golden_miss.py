@@ -34,6 +34,11 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src" / "pipeline"))
 
 from utils.llm import create_message  # noqa: E402
+
+# evaluate.py 와 같은 컨텍스트 예산 (한쪽만 바뀌면 진단이 어긋납니다)
+MAX_CONTEXT_DOCS = 25
+CONTEXT_MAX_CHARS = int(os.environ.get("CONTEXT_MAX_CHARS", "60000"))
+
 from utils.retrieval import (  # noqa: E402
     DECOMPOSE_MODEL_VERTEX,
     DEFAULT_PAGE_LIMIT as RETRIEVE_LIMIT,
@@ -263,6 +268,19 @@ def main() -> int:
             continue
         anchor = merged[prank - 1].get("anchor_index", chunks[0]["index"])
         hit_ground = anchor in ground
+        # evaluate.py 의 예산 채우기를 재현해 이 페이지가 실제로 컨텍스트에
+        # 들어가는지 봅니다. 예전에는 "상위 6건" 이라는 고정 기준을 썼는데,
+        # 컨텍스트는 개수가 아니라 문자 예산으로 채우도록 바뀐 지 오래입니다
+        # (문서 25건 상한). 6위 밖이라고 전달 실패로 단정하면 안 됩니다.
+        _total, in_context = 0, False
+        for _i, _d in enumerate(merged[:MAX_CONTEXT_DOCS]):
+            _block = len(_d.get("content", "")) + len(_d.get("title", "")) + 20
+            if _i and _total + _block > CONTEXT_MAX_CHARS:
+                break
+            _total += _block
+            if _d.get("source_url") == url:
+                in_context = True
+                break
         print(
             f"  ② 검색: ✅ 페이지 {prank}위 / 후보 {len(merged)}건 "
             f"(서브쿼리 {len(subs)}개, 앵커 #{anchor}"
@@ -282,17 +300,20 @@ def main() -> int:
 
         if len(full) <= max_chars:
             print(f"  ③ 전달: ✅ 페이지 전문 전달 ({len(full)}자 ≤ {max_chars}자)")
-            verdicts[qid] = "delivered" if prank <= 6 else "rank_low"
+            verdicts[qid] = "delivered" if in_context else "rank_low"
         elif lost:
             print(f"  ③ 전달: ❌ 근거 청크 {lost} 가 윈도우 밖 (윈도우 {len(piece)}자)")
             print(f"     → 앵커 #{anchor} 기준으로 잘려 근거를 잃었습니다")
             verdicts[qid] = "window_cut"
         else:
             print(f"  ③ 전달: ✅ 근거 청크 {kept} 모두 윈도우 포함 ({len(piece)}자)")
-            verdicts[qid] = "delivered" if prank <= 6 else "rank_low"
+            verdicts[qid] = "delivered" if in_context else "rank_low"
 
-        if prank > 6:
-            print(f"     ⚠️ 페이지 {prank}위 — 컨텍스트 상위 6건 밖이라 전달되지 않았을 수 있습니다")
+        if not in_context:
+            print(
+                f"     ⚠️ 페이지 {prank}위 — 컨텍스트 예산({CONTEXT_MAX_CHARS}자/"
+                f"{MAX_CONTEXT_DOCS}건)이 먼저 차서 전달되지 않습니다"
+            )
         print()
 
     # ── 요약 ────────────────────────────────────────────────────────────────
