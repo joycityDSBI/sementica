@@ -11,6 +11,11 @@ EnvironmentFile=/home/seongin/sementica/.env
 ExecStart=/home/seongin/sementica/.venv/bin/python src/ops/web_app.py --host 127.0.0.1 --port 8080
 Restart=on-failure
 RestartSec=5
+# systemd 아래에서는 stdout 이 블록 버퍼링됩니다. 그대로 두면 print()
+# 출력이 프로세스 종료 시점에 한꺼번에 나와, 로그에서 배너가 에러보다
+# 뒤에 찍힙니다 — 장애 원인을 잘못 짚기 딱 좋습니다.
+Environment=PYTHONUNBUFFERED=1
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=sementica-ops

@@ -30,6 +30,20 @@ systemctl status sementica-rest --no-pager
 curl -s localhost:8766/rest/health; echo
 ```
 
+**포트를 잡고 있는 유령 프로세스에 주의하세요.** `nohup ... &` 로 띄운 프로세스는
+셸의 job 이 끊겨도(`[1]- Terminated` 메시지) 살아남을 수 있습니다. 실제로
+2026-09-11 에 09:21 에 뜬 pyenv 프로세스가 8766 을 계속 잡고 있어, 새로 등록한
+systemd 서비스가 바인딩에 실패하며 10초마다 재시작을 반복했습니다
+(`[Errno 98] address already in use`, exit 3). 정리 순서:
+
+```bash
+sudo systemctl stop sementica-rest    # 먼저 재시작을 끈다 (안 그러면 경합)
+sudo ss -lptn 'sport = :8766'         # 누가 잡고 있는지 확인
+kill <PID>
+sleep 2 && sudo ss -lptn 'sport = :8766'   # 비었는지 확인
+sudo systemctl start sementica-rest
+```
+
 **인터프리터가 서로 다릅니다.** MCP 는 `.venv/bin/python`, REST 는
 `~/.pyenv/versions/3.11.9/bin/python` 으로 돌고 있었습니다. 두 프로세스가 다른
 site-packages 를 보므로, anthropic 버전 차이나 `mcp` 패키지 섀도잉 같은 문제가
