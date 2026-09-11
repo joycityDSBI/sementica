@@ -1,33 +1,45 @@
 """
-LLM 호출 래퍼 — SDK 버전 차이를 흡수합니다.
+LLM 호출 래퍼 — SDK 버전에 따라 temperature 전달 방식을 자동 선택합니다.
 ─────────────────────────────────────────────────────────────────────────────
 왜 필요한가:
     추출·채점을 재현 가능하게 하려고 모든 호출에 temperature=0 을 넣었더니,
     운영 VM 의 anthropic 1.2.0 이
         TypeError: Messages.create() got an unexpected keyword argument 'temperature'
-    를 내며 **모든 LLM 호출이 실패**했습니다. 인제스트는 정상 종료했지만
-    그래프의 트리플이 0개, 299페이지 중 248개가 error 로 기록됐습니다.
-    (임베딩은 Vertex 쪽이라 무사해서 벡터만 정상이었습니다.)
+    를 내며 **모든 LLM 호출이 실패**했습니다. 인제스트는 정상 종료했는데
+    그래프의 트리플이 0개, 299페이지 중 248개가 error 였습니다.
+    (임베딩은 Vertex 쪽이라 무사해서 벡터만 멀쩡했습니다.)
 
-    0.99.0 에서는 같은 인자가 동작합니다. 즉 버전을 올린다고 해결되지 않으며,
-    올리든 내리든 한쪽은 깨집니다. 그래서 호출 방식을 런타임에 고릅니다.
+    0.99.0 에는 명명 인자가 있고 1.2.0 에는 없습니다. 즉 버전을 올려도 내려도
+    한쪽이 깨지므로, 어느 통로가 열려 있는지 런타임에 고릅니다.
 
-전달 방식 우선순위:
-    ① temperature=  명명 인자        (0.x 계열)
-    ② extra_body={"temperature": …}  (명명 인자가 없지만 raw body 통로가 있을 때)
-    ③ 생략                            (둘 다 없으면 — 기본값 1.0 으로 샘플링됨)
+전달 방식 (위에서부터 시도):
+    ① temperature=                      명명 인자 (0.x)
+    ② output_config={"temperature": …}  1.x 에서 샘플링 설정이 모인 자리로 보임
+    ③ extra_body={"temperature": …}     raw body 통로
+    ④ 생략                               전부 막혔을 때 — 크게 경고
 
-    ③ 으로 떨어지면 **한 번 크게 경고**합니다. 조용히 빼면 추출이 회차마다
-    달라지는데도 아무도 모르게 됩니다 — 실제로 그래서 그래프가 흔들렸습니다.
+    후보는 시그니처로 1차 선별하고, 실제 호출 결과로 확정합니다. 서명에는
+    있지만 API 가 거부하는 경우가 있어 첫 호출 결과까지 봐야 합니다.
+
+    ④ 로 떨어지면 한 번 크게 경고합니다. 조용히 빼면 추출이 회차마다 달라지는데도
+    아무도 모르게 됩니다 — 실제로 그래서 그래프가 흔들렸습니다.
+
+    어느 방식이 쓰이는지 미리 보려면:  python tools/probe_llm.py
 """
 
 import inspect
 import threading
 
 _lock = threading.Lock()
-# None = 아직 판별 전, 이후 "named" | "extra_body" | "omit"
-_strategy: str | None = None
+_strategy: str | None = None  # None=미판별, 이후 named|output_config|extra_body|omit
 _warned = False
+
+# (이름, kwargs 생성기, 시그니처에서 요구하는 파라미터)
+_CANDIDATES = [
+    ("named", lambda t: {"temperature": t}, "temperature"),
+    ("output_config", lambda t: {"output_config": {"temperature": t}}, "output_config"),
+    ("extra_body", lambda t: {"extra_body": {"temperature": t}}, "extra_body"),
+]
 
 
 def _anthropic_version() -> str:
@@ -39,6 +51,36 @@ def _anthropic_version() -> str:
         return "unknown"
 
 
+def _params(create_fn) -> set:
+    try:
+        return set(inspect.signature(create_fn).parameters)
+    except (TypeError, ValueError):
+        return set()
+
+
+def _accepts_anything(create_fn) -> bool:
+    """**kwargs 를 받는 함수인지 — 그렇다면 시그니처 선별이 무의미합니다."""
+    try:
+        return any(
+            p.kind is inspect.Parameter.VAR_KEYWORD
+            for p in inspect.signature(create_fn).parameters.values()
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_param_rejection(exc: Exception, name: str) -> bool:
+    """이 예외가 '그 파라미터를 못 받는다'는 뜻인지 판정.
+
+    네트워크·쿼터 오류까지 삼키면 후보를 잘못 탈락시키므로, 파라미터 이름이
+    오류 메시지에 나올 때만 다음 후보로 넘어갑니다.
+    """
+    msg = str(exc).lower()
+    if isinstance(exc, TypeError):
+        return name in msg or "unexpected keyword" in msg
+    return name in msg and any(k in msg for k in ("unexpected", "invalid", "unknown", "extra"))
+
+
 def _warn_omitted() -> None:
     global _warned
     with _lock:
@@ -47,33 +89,17 @@ def _warn_omitted() -> None:
         _warned = True
     print(
         "\n"
-        f"  ⚠️  이 anthropic SDK({_anthropic_version()})는 temperature 를 전달할 수 없습니다.\n"
+        f"  ⚠️  이 anthropic SDK({_anthropic_version()})로는 temperature 를 전달할 수 없습니다.\n"
         "      기본값(1.0)으로 샘플링되므로 같은 문서에서도 추출 결과가 달라지고,\n"
         "      평가 점수도 회차마다 흔들립니다. 그래프는 영구 저장물이라 그대로 남습니다.\n"
-        "      SDK 버전을 바꿔야 합니다 (0.99.0 에서는 명명 인자가 동작합니다).\n"
+        "      python tools/probe_llm.py 로 통로를 다시 확인해 보세요.\n"
     )
 
 
-def _detect(create_fn) -> str:
-    """create 함수의 시그니처로 전달 방식을 고릅니다."""
-    try:
-        params = inspect.signature(create_fn).parameters
-    except (TypeError, ValueError):
-        # 시그니처를 못 읽으면 일단 명명 인자로 시도하고 TypeError 로 판별합니다.
-        return "named"
-    if "temperature" in params:
-        return "named"
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return "named"  # **kwargs 를 받으면 그대로 넘겨 봅니다
-    if "extra_body" in params:
-        return "extra_body"
-    return "omit"
-
-
 def create_message(client, **kwargs):
-    """client.messages.create(**kwargs) — temperature 전달 방식을 자동 선택.
+    """client.messages.create(**kwargs) — temperature 전달 방식을 자동 선택합니다.
 
-    temperature 가 없는 호출은 그대로 통과시킵니다.
+    temperature 가 없는 호출은 손대지 않고 그대로 넘깁니다.
     """
     global _strategy
 
@@ -82,39 +108,51 @@ def create_message(client, **kwargs):
     if temp is None:
         return create_fn(**kwargs)
 
-    if _strategy is None:
-        _strategy = _detect(create_fn)
+    # 이미 확정된 방식이 있으면 그대로 사용
+    if _strategy is not None:
+        if _strategy == "omit":
+            return create_fn(**kwargs)
+        extra = next(mk for name, mk, _ in _CANDIDATES if name == _strategy)(temp)
+        return create_fn(**_merge(kwargs, extra))
 
-    if _strategy == "named":
+    # 첫 호출 — 시그니처로 후보를 좁히고 실제 호출로 확정
+    params = _params(create_fn)
+    wildcard = _accepts_anything(create_fn)
+    for name, mk, needs in _CANDIDATES:
+        if not wildcard and needs not in params:
+            continue
         try:
-            return create_fn(temperature=temp, **kwargs)
-        except TypeError as e:
-            if "temperature" not in str(e):
-                raise
-            # 시그니처로는 받는 것처럼 보였지만 실제로는 거부 — 다음 방식으로.
-            _strategy = "extra_body" if "extra_body" in _sig_params(create_fn) else "omit"
+            result = create_fn(**_merge(kwargs, mk(temp)))
+        except Exception as e:
+            if _is_param_rejection(e, needs):
+                continue  # 이 통로는 막혀 있음 — 다음 후보
+            raise  # 네트워크·쿼터 등 실제 오류는 감추지 않습니다
+        _strategy = name
+        return result
 
-    if _strategy == "extra_body":
-        extra = dict(kwargs.pop("extra_body", None) or {})
-        extra.setdefault("temperature", temp)
-        try:
-            return create_fn(extra_body=extra, **kwargs)
-        except TypeError as e:
-            if "extra_body" not in str(e):
-                raise
-            _strategy = "omit"
-
+    _strategy = "omit"
     _warn_omitted()
     return create_fn(**kwargs)
 
 
-def _sig_params(create_fn) -> set:
-    try:
-        return set(inspect.signature(create_fn).parameters)
-    except (TypeError, ValueError):
-        return set()
+def _merge(kwargs: dict, extra: dict) -> dict:
+    """호출자가 이미 넘긴 extra_body/output_config 를 덮어쓰지 않고 합칩니다."""
+    merged = dict(kwargs)
+    for k, v in extra.items():
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = {**merged[k], **v}
+        else:
+            merged[k] = v
+    return merged
 
 
 def strategy() -> str:
-    """진단용 — 현재 선택된 전달 방식 ('미판별' 포함)."""
+    """진단용 — 현재 확정된 전달 방식."""
     return _strategy or "미판별"
+
+
+def reset() -> None:
+    """진단·테스트용 — 판별 상태 초기화."""
+    global _strategy, _warned
+    _strategy = None
+    _warned = False
