@@ -197,6 +197,7 @@ from google import genai as _genai  # noqa: E402
 from qdrant_client import QdrantClient  # noqa: E402
 
 import falkordb as _fdb  # noqa: E402
+from utils.llm import create_message  # noqa: E402
 
 embed_client = _genai.Client(project=GCP_PROJECT, location=LOCATION, vertexai=True)
 qdrant = QdrantClient(url=QDRANT_URL)
@@ -470,7 +471,8 @@ def _embed_text(text: str) -> list:
 
 def _judge_json(prompt: str, model: str = JUDGE_MODEL, max_tokens: int = 150) -> dict:
     """LLM 판정을 요청하고 JSON dict 를 반환. 실패 시 {}."""
-    resp = claude.messages.create(
+    resp = create_message(
+        claude,
         model=model,
         max_tokens=max_tokens,
         temperature=GOLDEN_TEMPERATURE,
@@ -562,7 +564,8 @@ def baseline_search_pass(question: str, answer: str, search_limit: int = 7) -> b
 
         # 평가 파이프라인을 재현하는 목적이므로 evaluate.py 와 같은 모델을 씁니다
         # (검증용 JUDGE_MODEL 이 아님).
-        gen = claude.messages.create(
+        gen = create_message(
+            claude,
             model=CLAUDE_MODEL,
             max_tokens=200,
             temperature=GOLDEN_TEMPERATURE,
@@ -602,7 +605,8 @@ def _generate_and_verify(source_text: str, prompt: str) -> tuple[list, list]:
     Returns:
         (채택된 item 목록, [(분류, 질문, 사유), ...] 탈락 목록)
     """
-    msg = claude.messages.create(
+    msg = create_message(
+        claude,
         model=GEN_MODEL,
         max_tokens=600,
         temperature=GOLDEN_TEMPERATURE,

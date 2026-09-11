@@ -54,6 +54,7 @@ EMBED_MODEL = "text-multilingual-embedding-002"
 # 검색 로직·파라미터는 utils.retrieval 이 정본입니다.
 # 서비스(server.py)와 같은 모듈을 쓰므로, 한쪽만 튜닝되어 평가가 다른 검색을
 # 측정하던 문제(coverage 부스트 0.15 vs 0.20, 복합 판정 임계값 등)가 사라집니다.
+from utils.llm import create_message
 from utils.retrieval import (
     DECOMPOSE_MODEL_VERTEX as _DECOMPOSE_MODEL_VERTEX,
     DEFAULT_PAGE_LIMIT as _DEFAULT_PAGE_LIMIT,
@@ -392,7 +393,8 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
 
         def _complete(prompt: str) -> str:
             # 분해 모델은 서비스와 동일해야 합니다 (utils.retrieval 정본).
-            msg = claude.messages.create(
+            msg = create_message(
+                claude,
                 model=_DECOMPOSE_MODEL_VERTEX,
                 max_tokens=400,
                 temperature=EVAL_TEMPERATURE,
@@ -507,7 +509,8 @@ def score_with_claude(claude, question: str, answer: str, response: str) -> dict
         response=response[:SCORE_RESPONSE_CHARS],
     )
     try:
-        msg = claude.messages.create(
+        msg = create_message(
+            claude,
             model=CLAUDE_MODEL,
             max_tokens=200,
             temperature=EVAL_TEMPERATURE,
@@ -542,7 +545,8 @@ def generate_response(context: str, question: str, claude) -> tuple[str, bool]:
 
 답변 (간결하게):"""
     try:
-        msg = claude.messages.create(
+        msg = create_message(
+            claude,
             model=CLAUDE_MODEL,
             max_tokens=ANSWER_MAX_TOKENS,
             temperature=EVAL_TEMPERATURE,

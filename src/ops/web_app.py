@@ -877,8 +877,11 @@ def golden_generate(dept: str = "strategic", count: int = 5):
         import anthropic as _anthropic
 
         _model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+        from utils.llm import create_message
+
         ac = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-        msg = ac.messages.create(
+        msg = create_message(
+            ac,
             model=_model,
             max_tokens=1024,
             temperature=0,

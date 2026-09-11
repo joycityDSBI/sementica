@@ -69,6 +69,7 @@ FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 # 검색 파라미터·공통 로직은 utils.retrieval 이 정본입니다.
 # 평가 파이프라인(evaluate.py)도 같은 모듈을 쓰므로 한쪽만 튜닝되어
 # 서로 다른 검색을 하던 문제가 재발하지 않습니다.
+from utils.llm import create_message
 from utils.retrieval import (
     DEFAULT_PAGE_LIMIT as _DEFAULT_PAGE_LIMIT,
     fetch_pages_by_source_urls as _fetch_pages_by_source_urls,
@@ -133,7 +134,8 @@ def _complete_for_decompose(prompt: str) -> str:
 
     from utils.retrieval import DECOMPOSE_MODEL_API
 
-    msg = anthropic.Anthropic().messages.create(
+    msg = create_message(
+        anthropic.Anthropic(),
         model=DECOMPOSE_MODEL_API,
         max_tokens=400,
         temperature=0,

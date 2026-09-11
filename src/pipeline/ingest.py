@@ -57,6 +57,7 @@ from semantica_helper import (
     reset_scope_report,
     upsert_event_node,
 )
+from utils.llm import create_message
 
 # ─── .env 로드 ────────────────────────────────────────────────────────────────
 _env_path = Path(__file__).parent.parent.parent / ".env"
@@ -406,7 +407,8 @@ def extract_events_from_text(text: str) -> list[dict]:
     if not _llm_client:
         return []
     try:
-        resp = _llm_client.messages.create(
+        resp = create_message(
+            _llm_client,
             model=HAIKU_MODEL,  # Sonnet → Haiku (3~5배 빠름)
             max_tokens=1024,
             temperature=EXTRACT_TEMPERATURE,
@@ -434,7 +436,8 @@ def extract_triplets(text: str) -> list:
         return []
     raw = ""
     try:
-        resp = _llm_client.messages.create(
+        resp = create_message(
+            _llm_client,
             model=HAIKU_MODEL,  # Sonnet → Haiku
             max_tokens=2048,
             temperature=EXTRACT_TEMPERATURE,

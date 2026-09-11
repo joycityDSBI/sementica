@@ -33,6 +33,8 @@ if _env_path.exists():
             key, _, val = line.partition("=")
             os.environ.setdefault(key.strip(), val.strip())
 
+sys.path.insert(0, str(Path(__file__).parent.parent))  # src/ — utils 패키지
+
 SAMPLES_DIR = Path(__file__).parent.parent.parent / "data" / "notion_samples"
 LOGS_DIR = Path(__file__).parent.parent.parent / "data" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -137,9 +139,12 @@ def extract_triplets(text: str, source_url: str = "") -> dict:
             "pass": False,
         }
 
+    from utils.llm import create_message
+
     raw = ""
     try:
-        response = _client.messages.create(
+        response = create_message(
+            _client,
             model=MODEL,
             max_tokens=2048,
             temperature=0,  # 추출은 파싱이므로 재현 가능해야 합니다 (ingest.py 와 동일)

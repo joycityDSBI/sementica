@@ -72,6 +72,7 @@ from semantica_helper import (  # noqa: E402
     reset_scope_report,
     upsert_event_node,
 )
+from utils.llm import create_message  # noqa: E402
 
 # DB 로거 (POSTGRES_URL 없으면 no-op)
 sys.path.insert(0, str(Path(__file__).parent.parent / "ops"))
@@ -474,7 +475,8 @@ def _norm_pred(val) -> dict:
 def extract_events_from_text(llm_client, text: str) -> list[dict]:
     """Claude로 텍스트에서 날짜 기반 시계열 이벤트를 추출합니다."""
     try:
-        resp = llm_client.messages.create(
+        resp = create_message(
+            llm_client,
             model=HAIKU_MODEL,  # Sonnet → Haiku (3~5배 빠름)
             max_tokens=1024,
             temperature=EXTRACT_TEMPERATURE,
@@ -500,7 +502,8 @@ def extract_events_from_text(llm_client, text: str) -> list[dict]:
 def extract_triplets(llm_client, text: str) -> list:
     raw = ""
     try:
-        resp = llm_client.messages.create(
+        resp = create_message(
+            llm_client,
             model=HAIKU_MODEL,
             max_tokens=2048,
             temperature=EXTRACT_TEMPERATURE,
