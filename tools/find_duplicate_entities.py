@@ -75,7 +75,6 @@ def main() -> int:
     args = ap.parse_args()
 
     import falkordb
-
     from dept_config import load_dept
 
     g = falkordb.FalkorDB(host=FALKORDB_HOST, port=FALKORDB_PORT).select_graph(
