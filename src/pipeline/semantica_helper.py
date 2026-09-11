@@ -31,6 +31,7 @@ Semantica 프레임워크 통합 헬퍼
 
 import contextlib
 import hashlib
+import os
 import re
 import threading
 import uuid
@@ -79,6 +80,64 @@ def _check_semantica_once():
         )
     except Exception as e:
         print(f"  [Semantica] 초기화 실패: {e}")
+
+
+# ─── 0-a. 추출 입력 분할 ─────────────────────────────────────────────────────
+# LLM 추출은 오랫동안 본문 앞 3000자만 보고 있었습니다. 실측: 299페이지
+# 344,338자 중 **45%(155,294자)가 추출 대상에서 잘려나갔고**, 가장 긴 문서는
+# 34,263자였습니다. 그 뒤쪽에 있는 관계·이벤트는 애초에 추출될 기회가
+# 없었습니다 — 페이지 절단으로 복합 카테고리가 전멸했던 것과 같은 구조이며,
+# 그때는 전달 단계, 이번엔 추출 단계입니다.
+#
+# 상한을 없애고 통째로 넣는 방법은 쓰지 않습니다. 입력은 들어가도 **응답**이
+# max_tokens 에서 잘려 JSON 파싱이 실패하고, 지금은 그 실패가 예외로 올라가
+# 페이지 전체가 error 가 됩니다. 그래서 겹치는 창으로 나눠 여러 번 호출하고
+# 결과를 합칩니다. 겹침은 창 경계에 걸친 관계를 놓치지 않기 위한 것입니다.
+EXTRACT_WINDOW_CHARS: int = int(os.environ.get("EXTRACT_WINDOW_CHARS", "6000"))
+EXTRACT_WINDOW_OVERLAP: int = int(os.environ.get("EXTRACT_WINDOW_OVERLAP", "600"))
+
+
+def text_windows(
+    text: str,
+    size: int = EXTRACT_WINDOW_CHARS,
+    overlap: int = EXTRACT_WINDOW_OVERLAP,
+) -> list[str]:
+    """본문을 겹치는 창으로 나눕니다. size 이하면 통째로 1개.
+
+    >>> text_windows("abc", size=10)
+    ['abc']
+    >>> [len(w) for w in text_windows("x" * 25, size=10, overlap=3)]
+    [10, 10, 10, 4]
+    >>> text_windows("   ")
+    []
+    """
+    text = text or ""
+    if len(text) <= size:
+        return [text] if text.strip() else []
+    step = max(1, size - overlap)
+    out: list[str] = []
+    start = 0
+    while start < len(text):
+        piece = text[start : start + size]
+        if piece.strip():
+            out.append(piece)
+        if start + size >= len(text):
+            break
+        start += step
+    return out
+
+
+def _warn_if_output_truncated(resp, label: str) -> None:
+    """응답이 max_tokens 에서 잘렸으면 경고합니다.
+
+    잘리면 JSON 이 미완성이라 파싱이 실패하고, 그 예외가 페이지 전체를 error 로
+    만듭니다. 원인을 "LLM 오류"로 오해하지 않도록 창 크기를 줄이라고 알려줍니다.
+    """
+    if getattr(resp, "stop_reason", None) == "max_tokens":
+        print(
+            f"    ⚠️  {label} 응답이 max_tokens 에서 잘렸습니다 — "
+            f"EXTRACT_WINDOW_CHARS({EXTRACT_WINDOW_CHARS})를 줄이세요"
+        )
 
 
 # ─── 0. 인덱스 ───────────────────────────────────────────────────────────────

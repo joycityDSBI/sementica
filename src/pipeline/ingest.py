@@ -43,6 +43,7 @@ except Exception:
 
 
 from semantica_helper import (
+    _warn_if_output_truncated,
     classify_page,
     content_hash,
     detect_realization_status,
@@ -55,6 +56,7 @@ from semantica_helper import (
     merge_node,
     record_decision_node,
     reset_scope_report,
+    text_windows,
     upsert_event_node,
 )
 from utils.llm import create_message
@@ -402,18 +404,17 @@ def _norm_pred(val) -> dict:
 # - 변경카테고리 → EVENT_TYPES 정규값 자동 변환
 
 
-def extract_events_from_text(text: str) -> list[dict]:
-    """Claude Haiku로 텍스트에서 날짜 기반 시계열 이벤트를 추출합니다."""
-    if not _llm_client:
-        return []
+def _events_in_window(window: str) -> list[dict]:
+    """창 하나에서 이벤트를 추출합니다."""
     try:
         resp = create_message(
             _llm_client,
             model=HAIKU_MODEL,  # Sonnet → Haiku (3~5배 빠름)
             max_tokens=1024,
             temperature=EXTRACT_TEMPERATURE,
-            messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=text[:3000])}],
+            messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=window)}],
         )
+        _warn_if_output_truncated(resp, "이벤트")
         raw = resp.content[0].text.strip()
         if raw.startswith("```"):
             parts = raw.split("```")
@@ -430,10 +431,24 @@ def extract_events_from_text(text: str) -> list[dict]:
         raise
 
 
-def extract_triplets(text: str) -> list:
-    """Claude Haiku로 타입 있는 트리플 추출 (Sonnet 대비 3~5배 빠름)"""
+def extract_events_from_text(text: str) -> list[dict]:
+    """본문 전체에서 이벤트를 추출합니다 (긴 문서는 창으로 나눠 합칩니다)."""
     if not _llm_client:
         return []
+    seen: set = set()
+    out: list[dict] = []
+    for window in text_windows(text):
+        for ev in _events_in_window(window):
+            key = (ev.get("game", ""), ev.get("date", ""), (ev.get("title") or "")[:60])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(ev)
+    return out
+
+
+def _triplets_in_window(window: str) -> list:
+    """창 하나에서 트리플을 추출합니다."""
     raw = ""
     try:
         resp = create_message(
@@ -441,8 +456,9 @@ def extract_triplets(text: str) -> list:
             model=HAIKU_MODEL,  # Sonnet → Haiku
             max_tokens=2048,
             temperature=EXTRACT_TEMPERATURE,
-            messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=text[:3000])}],
+            messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=window)}],
         )
+        _warn_if_output_truncated(resp, "트리플")
         raw = resp.content[0].text.strip()
         if raw.startswith("```"):
             parts = raw.split("```")
@@ -472,6 +488,26 @@ def extract_triplets(text: str) -> list:
         # extract_with_fallback 이 "error" 로 표시할 수 있도록 예외를 올립니다.
         print(f"    ⚠️  LLM 트리플 추출 실패: {type(e).__name__}: {e}")
         raise
+
+
+def extract_triplets(text: str) -> list:
+    """본문 전체에서 트리플을 추출합니다 (긴 문서는 창으로 나눠 합칩니다).
+
+    창 하나라도 실패하면 예외를 올립니다 — 절반만 담긴 그래프보다
+    다음 회차 재시도가 낫습니다 (content_hash 가 비어 있어 재처리됩니다).
+    """
+    if not _llm_client:
+        return []
+    seen: set = set()
+    out: list = []
+    for window in text_windows(text):
+        for t in _triplets_in_window(window):
+            key = (t["subject"]["name"], t["predicate"]["name"], t["object"]["name"])
+            if key in seen:
+                continue  # 창 겹침 구간에서 같은 트리플이 두 번 나옵니다
+            seen.add(key)
+            out.append(t)
+    return out
 
 
 # ─── 청킹 유틸 ───────────────────────────────────────────────────────────────
