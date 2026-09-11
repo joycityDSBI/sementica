@@ -29,6 +29,7 @@ Snowflake External Function 입출력 형식:
 """
 
 import argparse
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -38,6 +39,18 @@ _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE))  # server.py
 sys.path.insert(0, str(_HERE.parent / "pipeline"))  # dept_config 등
 sys.path.insert(0, str(_HERE.parent / "ops"))  # db_logger 등
+# ⚠️ src/ 를 sys.path 에 넣기 **전에** 진짜 mcp 패키지를 먼저 적재합니다.
+# 이 디렉터리 이름이 src/mcp 라서, src/ 가 경로에 들어가는 순간 최상위 `mcp`
+# 패키지를 가려 버립니다. fastmcp 는 내부에서
+#   from mcp.server.lowlevel.server import LifespanResultT
+# 를 호출하는데, 그때 우리 server.py 가 잡혀 순환 import 로 죽었습니다:
+#   ImportError: cannot import name 'FastMCP' from partially initialized
+#                module 'fastmcp.server.server' (circular import)
+# 여기서 한 번 import 해 두면 sys.modules 에 진짜 패키지가 남고, 이후
+# mcp.* 하위 모듈은 그 패키지의 __path__ 로 해석되어 그림자를 타지 않습니다.
+with contextlib.suppress(ImportError):  # mcp 미설치 환경이면 그냥 통과
+    import mcp as _real_mcp  # noqa: F401
+
 sys.path.insert(0, str(_HERE.parent))  # src/ — utils 패키지
 
 # ─── .env 로드 ────────────────────────────────────────────────────────────────
