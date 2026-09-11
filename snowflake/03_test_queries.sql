@@ -5,8 +5,8 @@
 -- ================================================================
 
 USE ROLE SYSADMIN;
-USE DATABASE SEMENTICA;   -- ← 실제 DB로 변경
-USE SCHEMA   PUBLIC;      -- ← 실제 스키마로 변경
+USE DATABASE DATAHUB;     -- 실제 배포 위치 (DATAHUB.DATAHUB)
+USE SCHEMA   DATAHUB;
 
 
 -- ── 1) 연결 확인 ─────────────────────────────────────────────────

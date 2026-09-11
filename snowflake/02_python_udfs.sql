@@ -3,12 +3,11 @@
 -- ================================================================
 -- 전제: 01_network_access.sql 실행 완료
 --
--- ← USE DATABASE / USE SCHEMA 를 실제 값으로 변경하세요.
 -- ================================================================
 
 USE ROLE ACCOUNTADMIN;
-USE DATABASE SEMENTICA;       -- ← 실제 데이터베이스로 변경
-USE SCHEMA   PUBLIC;          -- ← 실제 스키마로 변경
+USE DATABASE DATAHUB;         -- 실제 배포 위치 (DATAHUB.DATAHUB)
+USE SCHEMA   DATAHUB;
 
 -- ── 공통 상수 ─────────────────────────────────────────────────────
 -- ngrok URL이 바뀌면 아래 세 UDF만 재생성하면 됩니다.
@@ -50,7 +49,14 @@ def run(query: str, lim: float) -> dict:
         headers=_headers(),
         timeout=30,
     )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # REST API 는 실패 시 {"error": "..."} 를 돌려줍니다. raise_for_status 로
+        # 던지면 그 메시지가 사라지고 Agent 는 원인을 알 수 없는 Snowflake 오류만
+        # 받습니다. 본문을 그대로 올려 보냅니다.
+        try:
+            return {'error': resp.json().get('error', resp.text[:300]), 'status': resp.status_code}
+        except Exception:
+            return {'error': resp.text[:300], 'status': resp.status_code}
     return resp.json()
 $$;
 
@@ -104,7 +110,14 @@ def run(game: str, event_type: str, from_date: str, to_date: str, lim: float) ->
         headers=_headers(),
         timeout=30,
     )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # REST API 는 실패 시 {"error": "..."} 를 돌려줍니다. raise_for_status 로
+        # 던지면 그 메시지가 사라지고 Agent 는 원인을 알 수 없는 Snowflake 오류만
+        # 받습니다. 본문을 그대로 올려 보냅니다.
+        try:
+            return {'error': resp.json().get('error', resp.text[:300]), 'status': resp.status_code}
+        except Exception:
+            return {'error': resp.text[:300], 'status': resp.status_code}
     return resp.json()
 $$;
 
@@ -147,7 +160,14 @@ def run(query: str, lim: float) -> dict:
         headers=_headers(),
         timeout=30,
     )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # REST API 는 실패 시 {"error": "..."} 를 돌려줍니다. raise_for_status 로
+        # 던지면 그 메시지가 사라지고 Agent 는 원인을 알 수 없는 Snowflake 오류만
+        # 받습니다. 본문을 그대로 올려 보냅니다.
+        try:
+            return {'error': resp.json().get('error', resp.text[:300]), 'status': resp.status_code}
+        except Exception:
+            return {'error': resp.text[:300], 'status': resp.status_code}
     return resp.json()
 $$;
 
