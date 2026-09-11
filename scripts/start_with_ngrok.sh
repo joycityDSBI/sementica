@@ -51,13 +51,30 @@ nohup python src/mcp/rest_api.py --dept "$DEPT" --port "$REST_PORT" \
     > logs/rest_api.log 2>&1 &
 REST_PID=$!
 echo "  PID: $REST_PID"
-sleep 5
 
-# 헬스 체크
-if curl -s "http://localhost:$REST_PORT/rest/health" | grep -q '"ok"'; then
-    echo "  ✅ REST API 정상 가동"
-else
-    echo "  ❌ REST API 시작 실패 — logs/rest_api.log 확인"
+# 헬스 체크 — 최대 30초까지 기다립니다.
+# 예전에는 5초 뒤 한 번만 확인해서, 기동이 조금만 느려져도(임포트 추가·콜드
+# 스타트) 정상 기동 중인 서버를 "실패"로 판정하고 종료했습니다.
+# 프로세스가 이미 죽었으면 기다리지 않고 바로 로그를 보여줍니다.
+HEALTH_OK=0
+for i in $(seq 1 30); do
+    if ! kill -0 "$REST_PID" 2>/dev/null; then
+        echo "  ❌ REST API 프로세스가 종료되었습니다 (${i}초)"
+        break
+    fi
+    if curl -s --max-time 2 "http://localhost:$REST_PORT/rest/health" | grep -q '"ok"'; then
+        HEALTH_OK=1
+        echo "  ✅ REST API 정상 가동 (${i}초)"
+        break
+    fi
+    sleep 1
+done
+
+if [ "$HEALTH_OK" -ne 1 ]; then
+    echo "  ❌ REST API 시작 실패 — logs/rest_api.log 마지막 30줄:"
+    echo "  ----------------------------------------------------------"
+    tail -30 logs/rest_api.log | sed 's/^/  /'
+    echo "  ----------------------------------------------------------"
     exit 1
 fi
 
