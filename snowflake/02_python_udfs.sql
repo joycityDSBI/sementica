@@ -40,13 +40,25 @@ USE SCHEMA   DATAHUB;
 --   ② 실제 토큰으로 SECRET 교체
 --   ③ 서버 .env 에 같은 값 설정 후 rest_api.py 재시작
 -- 순서로 무중단 전환이 됩니다. ②③ 을 거꾸로 하면 그 사이 모든 UDF 가 401 입니다.
-CREATE OR REPLACE SECRET semantica_rest_token
+CREATE OR REPLACE SECRET DATAHUB.DATAHUB.semantica_rest_token
   TYPE          = GENERIC_STRING
   SECRET_STRING = 'CHANGE_ME_서버_env_의_SNOWFLAKE_REST_TOKEN_과_동일하게';
 
--- UDF 가 시크릿을 읽을 수 있도록 integration 에 등록
+-- 생성 확인 (아래 ALTER 가 실패하면 여기부터 다시 보세요)
+SHOW SECRETS LIKE 'semantica_rest_token' IN SCHEMA DATAHUB.DATAHUB;
+
+-- UDF 가 시크릿을 읽을 수 있도록 integration 에 등록.
+--
+-- ⚠️ 시크릿 이름은 **반드시 DB.SCHEMA 까지 붙인 전체 경로**여야 합니다.
+--    EXTERNAL ACCESS INTEGRATION 은 계정 레벨 객체라 USE SCHEMA 컨텍스트가
+--    적용되지 않습니다. 짧은 이름으로 쓰면 이렇게 실패합니다:
+--      SQL compilation error:
+--      Secret 'SEMANTICA_REST_TOKEN' does not exist or operation not authorized.
 ALTER EXTERNAL ACCESS INTEGRATION semantica_external_access
-  SET ALLOWED_AUTHENTICATION_SECRETS = (semantica_rest_token);
+  SET ALLOWED_AUTHENTICATION_SECRETS = (DATAHUB.DATAHUB.semantica_rest_token);
+
+-- 반영 확인 — ALLOWED_AUTHENTICATION_SECRETS 에 위 이름이 보여야 합니다.
+DESC INTEGRATION semantica_external_access;
 
 
 -- ================================================================
@@ -60,7 +72,7 @@ CREATE OR REPLACE FUNCTION sementica_search(query VARCHAR, lim NUMBER)
   RUNTIME_VERSION = '3.11'
   HANDLER = 'run'
   EXTERNAL_ACCESS_INTEGRATIONS = (semantica_external_access)
-  SECRETS = ('rest_token' = semantica_rest_token)
+  SECRETS = ('rest_token' = DATAHUB.DATAHUB.semantica_rest_token)
   PACKAGES = ('requests')
 AS $$
 import requests
@@ -128,7 +140,7 @@ CREATE OR REPLACE FUNCTION sementica_events(
   RUNTIME_VERSION = '3.11'
   HANDLER = 'run'
   EXTERNAL_ACCESS_INTEGRATIONS = (semantica_external_access)
-  SECRETS = ('rest_token' = semantica_rest_token)
+  SECRETS = ('rest_token' = DATAHUB.DATAHUB.semantica_rest_token)
   PACKAGES = ('requests')
 AS $$
 import requests
@@ -187,7 +199,7 @@ CREATE OR REPLACE FUNCTION sementica_hybrid(query VARCHAR, lim NUMBER)
   RUNTIME_VERSION = '3.11'
   HANDLER = 'run'
   EXTERNAL_ACCESS_INTEGRATIONS = (semantica_external_access)
-  SECRETS = ('rest_token' = semantica_rest_token)
+  SECRETS = ('rest_token' = DATAHUB.DATAHUB.semantica_rest_token)
   PACKAGES = ('requests')
 AS $$
 import requests
@@ -241,7 +253,7 @@ $$;
 -- 6) 생성 확인
 -- ================================================================
 SHOW USER FUNCTIONS LIKE 'sementica_%';
-SHOW SECRETS LIKE 'semantica_%';
+SHOW SECRETS LIKE 'semantica_%' IN SCHEMA DATAHUB.DATAHUB;
 
 -- 동작 확인 — 결과에 error 키가 없으면 정상입니다.
 SELECT sementica_search('점검 진행 프로세스', 3)        AS search_test;
