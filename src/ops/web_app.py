@@ -881,6 +881,7 @@ def golden_generate(dept: str = "strategic", count: int = 5):
         msg = ac.messages.create(
             model=_model,
             max_tokens=1024,
+            temperature=0,
             messages=[{"role": "user", "content": prompt}],
         )
         text = msg.content[0].text.strip()

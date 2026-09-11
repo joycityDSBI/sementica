@@ -110,6 +110,15 @@ FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 200
 
+# 추출·판정 계열 LLM 호출의 온도. 기본값(1.0)으로 샘플링하면 같은 문서에서
+# 매번 다른 트리플이 나옵니다 — 실측으로 재인제스트 후 "퍼포먼스팀 →[검토]→
+# GBTW 9월 마케팅 믹스표" 가 [작성] 로 바뀌고, 다른 트리플은 아예 사라졌습니다.
+# 그래프는 영구 저장물이라 이런 흔들림이 그대로 남습니다. 추출은 창작이 아니라
+# 파싱이므로 0 이 맞습니다.
+# ※ 0 이어도 완전한 재현성이 보장되지는 않습니다(서버측 배치·모델 갱신 등).
+#   편차를 크게 줄일 뿐입니다.
+EXTRACT_TEMPERATURE = float(os.environ.get("EXTRACT_TEMPERATURE", "0"))
+
 # ─── 이벤트 추출 프롬프트 (ingest.py와 동일) ──────────────────────────────────
 EVENT_EXTRACT_PROMPT = """\
 다음 텍스트에서 게임/서비스의 이벤트·업데이트를 추출하세요.
@@ -468,6 +477,7 @@ def extract_events_from_text(llm_client, text: str) -> list[dict]:
         resp = llm_client.messages.create(
             model=HAIKU_MODEL,  # Sonnet → Haiku (3~5배 빠름)
             max_tokens=1024,
+            temperature=EXTRACT_TEMPERATURE,
             messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=text[:3000])}],
         )
         raw = resp.content[0].text.strip()
@@ -493,6 +503,7 @@ def extract_triplets(llm_client, text: str) -> list:
         resp = llm_client.messages.create(
             model=HAIKU_MODEL,
             max_tokens=2048,
+            temperature=EXTRACT_TEMPERATURE,
             messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=text[:3000])}],
         )
         raw = resp.content[0].text.strip()

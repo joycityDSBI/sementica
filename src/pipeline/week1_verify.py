@@ -142,6 +142,7 @@ def extract_triplets(text: str, source_url: str = "") -> dict:
         response = _client.messages.create(
             model=MODEL,
             max_tokens=2048,
+            temperature=0,  # 추출은 파싱이므로 재현 가능해야 합니다 (ingest.py 와 동일)
             messages=[
                 {
                     "role": "user",

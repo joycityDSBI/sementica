@@ -81,6 +81,13 @@ FALKORDB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
 FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 CLAUDE_MODEL = "claude-sonnet-4-6@default"
 
+# 채점·생성·분해의 온도. 평가는 재현 가능해야 합니다 — 기본값(1.0)으로
+# 샘플링하면 코드가 그대로여도 문항 점수가 ±0.5 움직여, 파라미터 변경의
+# 효과와 난수를 구분할 수 없습니다. 이것 때문에 검색 튜닝을 점수로 판단하지
+# 못하고 tools/ab_retrieval.py 를 따로 만들어야 했습니다.
+EVAL_TEMPERATURE = float(os.environ.get("EVAL_TEMPERATURE", "0"))
+
+
 # 기본값 (--dept 없을 때)
 COLLECTION_NAME = "joycity_pages"
 GRAPH_NAME = "joycity_kg"
@@ -388,6 +395,7 @@ def hybrid_search(embed_client, qdrant, graph, query: str, claude=None) -> dict:
             msg = claude.messages.create(
                 model=_DECOMPOSE_MODEL_VERTEX,
                 max_tokens=400,
+                temperature=EVAL_TEMPERATURE,
                 messages=[{"role": "user", "content": prompt}],
             )
             return msg.content[0].text
@@ -502,6 +510,7 @@ def score_with_claude(claude, question: str, answer: str, response: str) -> dict
         msg = claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=200,
+            temperature=EVAL_TEMPERATURE,
             messages=[{"role": "user", "content": prompt}],
         )
         text = msg.content[0].text.strip()
@@ -536,6 +545,7 @@ def generate_response(context: str, question: str, claude) -> tuple[str, bool]:
         msg = claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=ANSWER_MAX_TOKENS,
+            temperature=EVAL_TEMPERATURE,
             messages=[{"role": "user", "content": prompt}],
         )
         return msg.content[0].text.strip(), True

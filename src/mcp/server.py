@@ -136,6 +136,7 @@ def _complete_for_decompose(prompt: str) -> str:
     msg = anthropic.Anthropic().messages.create(
         model=DECOMPOSE_MODEL_API,
         max_tokens=400,
+        temperature=0,
         messages=[{"role": "user", "content": prompt}],
     )
     return msg.content[0].text

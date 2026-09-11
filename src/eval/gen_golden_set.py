@@ -73,6 +73,12 @@ JUDGE_MODEL = os.environ.get("GOLDEN_JUDGE_MODEL", CLAUDE_MODEL)
 # 판정 JSON 이 잘리지 않도록 넉넉히 — 150 에서는 reason 이 길 때 파싱에 실패했습니다.
 JUDGE_MAX_TOKENS = 300
 
+# 생성·판정 온도. 0 이면 같은 입력에서 같은 문항이 나와 --seed 가 실제로
+# 재현성을 보장합니다. 문항 다양성은 샘플링하는 페이지·관계가 다르다는 데서
+# 나오지, 같은 입력을 흔들어서 얻을 것이 아닙니다.
+GOLDEN_TEMPERATURE = float(os.environ.get("GOLDEN_TEMPERATURE", "0"))
+
+
 # 카테고리 배분 비율 (합 20 기준) — 실제 목표는 --count 에 맞춰 스케일됩니다.
 CATEGORY_RATIO = {
     "담당자": 5,
@@ -467,6 +473,7 @@ def _judge_json(prompt: str, model: str = JUDGE_MODEL, max_tokens: int = 150) ->
     resp = claude.messages.create(
         model=model,
         max_tokens=max_tokens,
+        temperature=GOLDEN_TEMPERATURE,
         messages=[{"role": "user", "content": prompt}],
     )
     text = resp.content[0].text.strip()
@@ -558,6 +565,7 @@ def baseline_search_pass(question: str, answer: str, search_limit: int = 7) -> b
         gen = claude.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=200,
+            temperature=GOLDEN_TEMPERATURE,
             messages=[
                 {
                     "role": "user",
@@ -597,6 +605,7 @@ def _generate_and_verify(source_text: str, prompt: str) -> tuple[list, list]:
     msg = claude.messages.create(
         model=GEN_MODEL,
         max_tokens=600,
+        temperature=GOLDEN_TEMPERATURE,
         messages=[{"role": "user", "content": prompt}],
     )
     accepted: list = []
