@@ -53,7 +53,6 @@ def main() -> int:
         ap.error("cypher 또는 --rel 중 하나가 필요합니다")
 
     import falkordb
-
     from dept_config import load_dept
 
     graph_name = load_dept(args.dept)["falkordb_graph"]
