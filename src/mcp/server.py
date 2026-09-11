@@ -87,6 +87,7 @@ from utils.retrieval import (
     DEFAULT_PAGE_LIMIT as _DEFAULT_PAGE_LIMIT,
     fetch_pages_by_source_urls as _fetch_pages_by_source_urls,
     find_entities_in_query as _find_entities,
+    lookup_entity as _lookup_entity,
     merge_semantic_results as _merge_semantic_results,
     search_queries as _search_queries,
     vector_search_pages as _vector_search_pages,
@@ -499,39 +500,41 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
         # 동의어 확장: "드래곤슈퍼" → ["DS", "드래곤슈퍼", "Dragon Super"]
         # canonical로 저장된 신규 데이터와 비정규 이름의 구버전 데이터를 모두 검색합니다.
         entity_forms = _syn_expand(entity)
-        node_query = (
-            "MATCH (n) WHERE ANY(form IN $forms WHERE n.name CONTAINS form) "
-            "RETURN n.name AS name, labels(n)[0] AS type LIMIT 5"
+        # 부분 일치로 걸린 것 중 "찾던 것"을 고릅니다. 예전에는 LIMIT 5 의
+        # 첫 줄을 그냥 썼는데, Cypher 에 ORDER BY 가 없어 어느 노드가 오는지
+        # 정해져 있지 않았습니다 — "RESU" 를 물으면 엣지 12개짜리 본체 대신
+        # 엣지 2개짜리 "RESU Live History DB" 를 잡는 일이 가능했습니다
+        # (retrieval.rank_entity_matches 참고).
+        matched_name, matched_type, matched_types, matched_names = _lookup_entity(
+            graph, entity_forms
         )
-        node_result = graph.query(node_query, {"forms": entity_forms})
 
-        if not node_result.result_set:
+        if not matched_name:
             _result = {"entity": entity, "found": False, "relations": []}
             return _result
 
-        # 첫 번째 매칭 노드 기준으로 관계 탐색
-        matched_name = node_result.result_set[0][0]
-        matched_type = node_result.result_set[0][1]
-
+        # 이름 하나가 아니라 **같은 것으로 판정된 이름 전체**로 조회합니다.
+        # 표기가 갈린 노드("IN-JOY" / "In-Joy")는 이름이 다르므로, 한쪽만 보면
+        # 나머지 엣지를 통째로 놓칩니다 (실측 3건).
         if depth == 1:
             # v2: evidence_quote·realization_status·evidence_chunk_id 포함
             rel_query = (
-                "MATCH (n {name: $name})-[r:REL]->(m) "
+                "MATCH (n)-[r:REL]->(m) WHERE n.name IN $names "
                 "RETURN r.rel_name, m.name, labels(m)[0], "
                 "r.condition, r.order, r.source_url, "
                 "r.evidence_quote, r.realization_status, r.evidence_chunk_id "
                 "LIMIT 20"
             )
-            rel_result = graph.query(rel_query, {"name": matched_name})
+            rel_result = graph.query(rel_query, {"names": matched_names})
         else:
             # path 기반 추출 (depth=2) — source_url 제외, FalkorDB r[-1] 미지원
             rel_query = (
-                "MATCH p=(n {name: $name})-[:REL*1..2]->(m) "
+                "MATCH p=(n)-[:REL*1..2]->(m) WHERE n.name IN $names "
                 "RETURN [r IN relationships(p) | r.rel_name] AS relation, "
                 "m.name AS target, labels(m)[0] AS target_type "
                 "LIMIT 30"
             )
-            rel_result = graph.query(rel_query, {"name": matched_name})
+            rel_result = graph.query(rel_query, {"names": matched_names})
 
         relations = []
         for row in rel_result.result_set:
@@ -586,11 +589,11 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
 
         # ── 1홉 incoming (depth=1·2 공통) ────────────────────────────────────
         rev1_result = graph.query(
-            "MATCH (m)-[r:REL]->(n {name: $name}) "
+            "MATCH (m)-[r:REL]->(n) WHERE n.name IN $names "
             "RETURN r.rel_name AS relation, m.name AS source, labels(m)[0] AS source_type, "
             "r.source_url AS source_url "
             "LIMIT 10",
-            {"name": matched_name},
+            {"names": matched_names},
         )
         for row in rev1_result.result_set:
             src = row[1]
@@ -608,10 +611,10 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
         # ── 2홉 incoming (depth=2 전용 추가) ──────────────────────────────────
         if depth == 2:
             rev2_result = graph.query(
-                "MATCH (m)-[:REL]->(x)-[r:REL]->(n {name: $name}) "
+                "MATCH (m)-[:REL]->(x)-[r:REL]->(n) WHERE n.name IN $names "
                 "RETURN r.rel_name AS relation, m.name AS source, labels(m)[0] AS source_type "
                 "LIMIT 10",
-                {"name": matched_name},
+                {"names": matched_names},
             )
             for row in rev2_result.result_set:
                 src = row[1]
@@ -633,6 +636,15 @@ def graph_search(entity: str, depth: int = 1) -> dict[str, Any]:
             "outgoing": relations,
             "incoming": incoming,
         }
+        # 같은 대상이 여러 노드로 쪼개져 있으면 무엇을 합쳐서 답했는지 밝힙니다.
+        # 위 관계 조회가 이들을 모두 훑으므로, 하나만 적으면 답변하는 쪽이
+        # 관계의 출처를 오해합니다.
+        #   types  라벨만 다른 경우 (실측 24건: RESU = Game·Team·System·Process)
+        #   merged 표기가 다른 경우 (실측 3건: IN-JOY / In-Joy)
+        if len(matched_types) > 1:
+            _result["types"] = matched_types
+        if len(matched_names) > 1:
+            _result["merged_names"] = matched_names
         return _result
     except Exception as e:
         _err = str(e)

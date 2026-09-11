@@ -477,6 +477,163 @@ def merge_semantic_results(results_per_query: list, boost: float = COVERAGE_BOOS
 # ── 그래프 엔티티 탐색 ────────────────────────────────────────────────────────
 
 
+def rank_entity_matches(rows: list, forms: list) -> list:
+    """부분 일치로 걸린 노드들을 "찾던 것에 가까운 순"으로 정렬합니다.
+
+    graph_search 는 `n.name CONTAINS form` 으로 노드를 찾은 뒤 **그중 하나**의
+    관계만 탐색합니다. 그런데 부분 일치는 엉뚱한 것을 많이 답니다 — 실측으로
+    "RESU" 는 아래 전부에 걸렸습니다:
+
+        RESU                                              엣지 12   ← 찾던 것
+        RESU Live History DB                              엣지  2
+        RESU 빌드 알림 채널                                엣지  2
+        RESU 기획팀                                       엣지  1
+        data-science-division-216308.RESU.server_opentime 엣지  2
+
+    Cypher 에 ORDER BY 가 없으면 어느 것이 첫 줄로 오는지는 정해져 있지 않으므로,
+    같은 질문이 실행마다 다른 답을 낼 수 있었습니다. 엣지 12개짜리 본체 대신
+    2개짜리 테이블을 잡으면 관계가 통째로 사라집니다.
+
+    또 같은 이름이 여러 라벨로 쪼개져 있기도 합니다 (실측 24건). 예를 들어
+    "RESU" 는 Game(엣지 0) · Team(2) · System(12) · Process(2) 네 노드입니다.
+    첫 줄만 쓰면 엣지 0개짜리를 잡고 "관계 없음"이 될 수 있습니다.
+
+    정렬 기준 (앞선 것이 우선):
+        ① 표기를 지운 이름이 검색어와 **완전히 같은가**
+        ② 검색어로 **시작**하는가        ("RESU 기획팀" < "…216308.RESU.…")
+        ③ 엣지가 많은가                  실제로 정보를 가진 노드
+        ④ 이름이 짧은가 → 이름 → 라벨    동점 시 결과를 고정하기 위한 기준
+
+    Args:
+        rows:  [(name, label, degree), ...]
+        forms: 동의어 확장된 검색어 목록
+
+    Returns:
+        정렬된 [(name, label, degree), ...]
+
+    이름이 같은 것들이 먼저 오고(라벨이 갈려 있어도), 그 안에서 엣지가 많은
+    순입니다. 그 뒤가 접두 일치입니다.
+
+    >>> rows = [("RESU Live History DB", "System", 2), ("RESU", "System", 12),
+    ...         ("RESU", "Game", 0), ("RESU 기획팀", "Team", 1)]
+    >>> [(n, d) for n, _l, d in rank_entity_matches(rows, ["RESU"])]
+    [('RESU', 12), ('RESU', 0), ('RESU Live History DB', 2), ('RESU 기획팀', 1)]
+    """
+    from utils.synonym_resolver import norm_key
+
+    keys = [k for k in (norm_key(f) for f in forms) if k]
+
+    def _tier(name: str) -> int:
+        nk = norm_key(name)
+        if any(nk == k for k in keys):
+            return 0
+        if any(nk.startswith(k) for k in keys):
+            return 1
+        return 2
+
+    return sorted(
+        rows,
+        key=lambda r: (_tier(r[0]), -(r[2] or 0), len(r[0]), r[0], r[1] or ""),
+    )
+
+
+def _entity_candidates(graph, forms: list) -> list:
+    """검색어가 이름에 포함된 노드를 [(name, label, degree), ...] 로 가져옵니다.
+
+    **대소문자를 구분하지 않습니다.** Cypher 의 CONTAINS 는 구분하기 때문에
+    "In-Joy" 로 찾으면 "IN-JOY" 노드는 결과에 들어오지도 않습니다 — 표기가
+    갈린 노드를 합치려 해도 한쪽이 보이지 않으면 합칠 수가 없습니다.
+
+    toLower() 를 먼저 시도하고, FalkorDB 가 거부하면 이름을 전부 받아 파이썬에서
+    거릅니다. 어차피 CONTAINS 도 전체를 훑으므로 서버 쪽 일의 양은 비슷하고,
+    노드 수가 적어(실측 768개) 전송량도 문제가 되지 않습니다.
+    """
+    lowered = [f.lower() for f in forms if f]
+    if not lowered:
+        return []
+
+    try:
+        rows = (
+            graph.query(
+                "MATCH (n) WHERE n.name IS NOT NULL "
+                "OPTIONAL MATCH (n)-[r:REL]-() "
+                "WITH n.name AS name, labels(n)[0] AS lbl, count(r) AS deg "
+                "WHERE ANY(f IN $forms WHERE toLower(name) CONTAINS f) "
+                "RETURN name, lbl, deg",
+                {"forms": lowered},
+            ).result_set
+            or []
+        )
+        return [(r[0], r[1] or "", r[2] or 0) for r in rows]
+    except Exception:
+        pass
+
+    try:
+        rows = (
+            graph.query(
+                "MATCH (n) WHERE n.name IS NOT NULL "
+                "OPTIONAL MATCH (n)-[r:REL]-() "
+                "RETURN n.name, labels(n)[0], count(r)"
+            ).result_set
+            or []
+        )
+    except Exception:
+        return []
+    return [
+        (r[0], r[1] or "", r[2] or 0)
+        for r in rows
+        if r[0] and any(f in str(r[0]).lower() for f in lowered)
+    ]
+
+
+def lookup_entity(graph, forms: list) -> tuple:
+    """검색어에 해당하는 그래프 노드를 고릅니다.
+
+    같은 대상이 그래프에서 여러 노드로 쪼개져 있습니다 (실측 768개 노드 기준):
+
+      · 라벨만 다른 경우 24건 — "RESU" 가 Game(엣지 0)·Team(2)·System(12)·
+        Process(2) 네 노드. 이름이 같으므로 이름으로 조회하면 자연히 합쳐집니다.
+      · 표기만 다른 경우 3건 — "IN-JOY" 와 "In-Joy", "마케팅사이언스팀" 과
+        "마케팅 사이언스팀". 이름이 다르므로 한쪽만 조회하면 나머지 엣지를
+        통째로 놓칩니다.
+
+    그래서 대표 이름 하나가 아니라 **같은 것으로 판정된 이름 전체**를 돌려주고,
+    호출부가 `n.name IN $names` 로 한꺼번에 조회하게 합니다. 노드를 병합하거나
+    지우지 않습니다 — 되돌릴 수 없는 작업을 할 만큼의 이득이 없고, 재인제스트가
+    같은 중복을 다시 만들기 때문에 근본 해결도 아닙니다.
+
+    Cypher LIMIT 을 쓰지 않는 이유: CONTAINS 는 어차피 전체를 훑으므로 LIMIT 이
+    일을 줄이지 못하고, **정렬 전에 자르면** 정작 필요한 노드가 잘려나갑니다.
+
+    Returns:
+        (name, type, types, names) — 못 찾으면 ("", "", [], []).
+        name  대표 이름 (보고용)
+        type  대표 라벨
+        types 같은 것으로 묶인 노드들의 라벨 전체
+        names 같은 것으로 묶인 이름 전체 — 관계 조회에 이걸 쓰세요
+    """
+    from utils.synonym_resolver import norm_key
+
+    rows = _entity_candidates(graph, forms)
+    if not rows:
+        return ("", "", [], [])
+
+    ranked = rank_entity_matches(rows, forms)
+    if not ranked:
+        return ("", "", [], [])
+
+    # 대표와 **표기만 다른** 것들까지 한 묶음으로. 부분 일치로 걸린 다른 노드
+    # ("RESU Live History DB" 등)는 별개 대상이므로 포함하지 않습니다.
+    key = norm_key(ranked[0][0])
+    group = [(n, lbl, d) for n, lbl, d in ranked if norm_key(n) == key]
+    return (
+        ranked[0][0],
+        ranked[0][1],
+        sorted({lbl for _n, lbl, _d in group if lbl}),
+        sorted({n for n, _l, _d in group}),
+    )
+
+
 def find_entities_in_query(graph, query: str, limit: int = 5) -> list:
     """질문 문장에 등장하는 그래프 노드 이름을 찾습니다.
 

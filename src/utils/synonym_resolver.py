@@ -4,6 +4,7 @@ JoyCity 비즈니스 용어집 기반 동의어 해결기
 https://catalog.joycityplay.com/api/glossary/all 에서 전체 용어집을 로드하여
 엔티티 이름을 canonical form(term)으로 정규화하거나 동의어 전체로 확장합니다.
 
+  norm_key(name)           → 표기(공백·대소문자·부호)를 지운 비교용 키.
   resolve(name)            → canonical term. 미등록이면 원본 반환.
   expand(name)             → [canonical, synonym1, ...]. 미등록이면 [name].
   category_of(name)        → "game" | "organization" | "KPI" | ... 미등록이면 "".
@@ -110,7 +111,7 @@ _conflicts: list = []
 _loaded_at: float = 0.0
 
 
-def _norm_key(s: str) -> str:
+def norm_key(s: str) -> str:
     """표기 차이를 지운 조회용 키 — 공백·문장부호 제거 + 소문자.
 
     용어집 조회가 정확 일치만 하면, 등록돼 있는데도 못 찾는 표현이 대부분입니다.
@@ -170,10 +171,10 @@ def _build_indexes(entries: list) -> tuple[dict, dict, dict, dict, dict, dict, l
             if form != canonical and form in term_names:
                 continue
             alias[form] = canonical
-            norm_claims.setdefault(_norm_key(form), set()).add(canonical)
+            norm_claims.setdefault(norm_key(form), set()).add(canonical)
             if category:
                 by_cat.setdefault(category, {})[form] = canonical
-                norm_cat_claims.setdefault((category, _norm_key(form)), set()).add(canonical)
+                norm_cat_claims.setdefault((category, norm_key(form)), set()).add(canonical)
 
         expand_m[canonical] = all_forms
         if category:
@@ -393,7 +394,7 @@ def resolve(name: str) -> str:
     hit = _alias_map.get(name)
     if hit is not None:
         return hit
-    return _alias_norm.get(_norm_key(name), name)
+    return _alias_norm.get(norm_key(name), name)
 
 
 def expand(name: str) -> list[str]:
@@ -441,7 +442,7 @@ def resolve_in(name: str, category: str) -> str:
     if hit is not None:
         return hit
     # resolve() 와 같은 이유로 표기를 지운 키도 봅니다.
-    return _by_category_norm.get(category, {}).get(_norm_key(name), "")
+    return _by_category_norm.get(category, {}).get(norm_key(name), "")
 
 
 def terms_in(category: str) -> list[str]:
