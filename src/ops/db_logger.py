@@ -331,6 +331,7 @@ def log_store_snapshot(dept: str, **counts) -> None:
 def log_eval_run(
     dept: str,
     golden_set: str,
+    golden_hash: str = "",
     collection: str = "",
     total: int = 0,
     scored: int = 0,
@@ -343,9 +344,9 @@ def log_eval_run(
 ) -> None:
     """evaluate.py 결과 1회를 eval_run_log 에 기록합니다.
 
-    golden_set 을 함께 남기는 것이 중요합니다 — 골든셋이 바뀌면 회차 간 총점
-    비교가 무의미해지는데, 파일에만 있으면 나중에 무엇과 무엇을 비교하는지
-    알 수 없습니다.
+    golden_hash 가 핵심입니다. 파일명이 날짜 기준이라 같은 날 재생성하면 경로는
+    그대로인 채 문항만 바뀝니다 — 실제로 그렇게 두 회차가 같은 경로를 갖게 됐고,
+    해시가 없으면 "같은 세트로 잰 점수인가"를 사후에 알 수 없습니다.
     """
     import json as _json
 
@@ -357,13 +358,15 @@ def log_eval_run(
             cur.execute(
                 """
                     INSERT INTO eval_run_log
-                        (dept, golden_set, collection, total, scored, harness_failed,
-                         passed, avg_score, category_scores, difficulty_scores, detail)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (dept, golden_set, golden_hash, collection, total, scored,
+                         harness_failed, passed, avg_score, category_scores,
+                         difficulty_scores, detail)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                 (
                     dept,
                     golden_set,
+                    (golden_hash or "")[:16] or None,
                     (collection or "")[:100],
                     total,
                     scored,

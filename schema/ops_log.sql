@@ -191,7 +191,11 @@ CREATE TABLE IF NOT EXISTS eval_run_log (
     id                BIGSERIAL    PRIMARY KEY,
     ts                TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     dept              VARCHAR(50),
-    golden_set        TEXT,             -- 사용한 골든셋 파일 (회차 비교의 전제)
+    golden_set        TEXT,             -- 사용한 골든셋 파일 경로
+    -- 경로만으로는 부족합니다. 파일명이 golden_set_YYYYMMDD.json 이라 같은 날
+    -- 재생성하면 조용히 덮어써지고, 경로가 같은데 문항은 다른 상황이 생깁니다.
+    -- 문항 내용의 해시가 있어야 "같은 세트로 잰 점수인가"를 판정할 수 있습니다.
+    golden_hash       VARCHAR(16),
     collection        VARCHAR(100),
     total             INT,              -- 문항 수
     scored            INT,              -- 집계에 포함된 수 (하네스 실패 제외)
@@ -217,6 +221,7 @@ ALTER TABLE mcp_request_log ADD COLUMN IF NOT EXISTS graph_count    INT;
 ALTER TABLE mcp_request_log ADD COLUMN IF NOT EXISTS timeline_count INT;
 ALTER TABLE mcp_request_log ADD COLUMN IF NOT EXISTS sub_queries    INT;   -- 분해된 서브쿼리 수 (1=분해 안 됨)
 ALTER TABLE mcp_request_log ADD COLUMN IF NOT EXISTS truncated      BOOLEAN DEFAULT FALSE;
+ALTER TABLE eval_run_log    ADD COLUMN IF NOT EXISTS golden_hash    VARCHAR(16);
 
 
 -- =============================================================

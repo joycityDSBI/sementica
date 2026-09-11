@@ -131,7 +131,18 @@ if _GOLDEN_PATH and not Path(_GOLDEN_PATH).exists():
     raise SystemExit(f"❌ 골든셋 파일을 찾을 수 없습니다: {_GOLDEN_PATH}")
 if _GOLDEN_PATH:
     GOLDEN_SET = _load_golden(_GOLDEN_PATH)
-    print(f"  📂 외부 골든셋 로드: {_GOLDEN_PATH} ({len(GOLDEN_SET)}문항)")
+    import hashlib as _hl
+
+    _gsum = _hl.sha256(
+        json.dumps(
+            [(q.get("id"), q.get("question")) for q in GOLDEN_SET],
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:8]
+    # 해시를 함께 찍습니다. 파일명이 날짜 기준이라 같은 날 재생성하면 경로가
+    # 같은 채 문항만 바뀌는데, 그러면 회차 간 점수 비교가 성립하지 않습니다.
+    print(f"  📂 외부 골든셋 로드: {_GOLDEN_PATH} ({len(GOLDEN_SET)}문항, 해시 {_gsum})")
 else:
     # 내장 기본 골든셋 (하위 호환)
     GOLDEN_SET = [
@@ -726,11 +737,24 @@ def run_evaluation():
     # 무의미해지는데, 파일에만 있으면 나중에 무엇과 무엇을 비교하는지 알 수 없습니다.
     try:
         sys.path.insert(0, str(ROOT / "src" / "ops"))
+        # 문항 내용의 해시 — 경로는 같은데 문항이 다른 경우를 구분합니다.
+        # 골든셋 파일명이 날짜 기준이라 같은 날 재생성하면 조용히 덮어써집니다.
+        import hashlib as _hashlib
+
         from db_logger import log_eval_run
+
+        _gh = _hashlib.sha256(
+            json.dumps(
+                [(q.get("id"), q.get("question"), q.get("answer")) for q in GOLDEN_SET],
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:16]
 
         log_eval_run(
             dept=_known.dept or "legacy",
             golden_set=_GOLDEN_PATH or "(내장 기본 골든셋)",
+            golden_hash=_gh,
             collection=COLLECTION_NAME,
             total=len(results),
             scored=len(scored_rows),
