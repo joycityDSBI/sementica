@@ -33,6 +33,23 @@ import socket
 import ssl
 from email.message import EmailMessage
 from email.utils import formatdate
+from pathlib import Path
+
+# ─── .env 로드 ────────────────────────────────────────────────────────────────
+# 이 모듈은 **단독으로도 실행됩니다** — `notify.py --test` 와 backup.sh 가
+# 서브프로세스로 부르는 경로가 그렇습니다. ingest.py·sync.py 가 import 할 때는
+# 그쪽이 이미 .env 를 올려둬서 동작하지만, 단독 실행에서는 아무도 올려주지
+# 않아 "설정이 부족합니다" 만 나왔습니다.
+#
+# 코드는 다른 진입점들과 **글자 그대로 같습니다**(setdefault, 따옴표 미제거).
+# 여기서만 다르게 처리하면 같은 .env 가 프로세스마다 다르게 읽힙니다.
+_env_path = Path(__file__).parent.parent.parent / ".env"
+if _env_path.exists():
+    for _line in _env_path.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 # SMTP 가 응답하지 않을 때 인제스트가 매달리지 않도록 짧게 끊습니다.
 SMTP_TIMEOUT: float = float(os.environ.get("SMTP_TIMEOUT", "10"))
