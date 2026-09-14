@@ -63,6 +63,7 @@ from semantica_helper import (  # noqa: E402
     batch_texts,
     classify_page,
     content_hash,
+    delete_page_events,
     detect_realization_status,
     event_from_db_props,
     extract_with_fallback,
@@ -348,19 +349,6 @@ def _mark_page_deleted(page_id: str, dept: str) -> None:
     finally:
         with contextlib.suppress(Exception):
             conn.close()
-
-
-def delete_page_events(graph, source_url: str) -> int:
-    """:Event 노드 중 source_url 일치하는 것 삭제. 삭제된 수 반환."""
-    try:
-        res = graph.query(
-            "MATCH (e:Event {source_url: $url}) DETACH DELETE e RETURN count(e) AS cnt",
-            {"url": source_url},
-        )
-        return res.result_set[0][0] if res.result_set else 0
-    except Exception as e:
-        print(f"    ⚠️  Event 노드 삭제 실패: {e}")
-        return 0
 
 
 def reconcile_deleted_pages(
@@ -918,6 +906,13 @@ def sync_page(
     print(f"     그래프: {len(node_cache)}개 노드 / {edges_created}개 엣지")
 
     # 6. 이벤트 → FalkorDB :Event 노드 저장
+    # 넣기 전에 이 페이지의 옛 이벤트를 지웁니다. event_id 가 이벤트 내용까지
+    # 반영하므로, 제목·날짜가 바뀌면 새 노드가 생기고 옛 노드는 그대로 남습니다.
+    # (예전에는 페이지당 ID 가 하나라 MERGE 가 알아서 덮어썼습니다)
+    ev_purged = delete_page_events(graph, source_url)
+    if ev_purged:
+        print(f"     이벤트: 기존 {ev_purged}개 정리")
+
     ev_stored = 0
     if ev_from_db:
         # 6a. DB 속성에서 직접 생성 (LLM 없음, 100% 정확)

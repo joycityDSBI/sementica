@@ -53,6 +53,7 @@ from semantica_helper import (
     batch_texts,
     classify_page,
     content_hash,
+    delete_page_events,
     detect_realization_status,
     ensure_indexes,
     event_from_db_props,
@@ -744,6 +745,57 @@ def store_graph(
     return {"nodes": len(node_cache), "edges": edges_created}
 
 
+def _store_page_events(
+    source_url: str,
+    title: str,
+    db_props: dict,
+    body: str,
+    reset: bool,
+    write_failed: list,
+) -> int:
+    """한 페이지의 이벤트를 :Event 노드로 저장하고 저장된 수를 반환합니다.
+
+    Notion DB 속성이 있으면 그걸 쓰고(LLM 없이 정확), 없으면 본문에서 추출합니다.
+    """
+    # --reset 이면 그래프가 비어 있어 아무 일도 하지 않습니다. --reset 없이 다시
+    # 돌릴 때 옛 이벤트가 남아 중복되는 것을 막습니다 — event_id 가 이벤트
+    # 내용까지 반영하므로 MERGE 가 알아서 덮어쓰지 않습니다.
+    if not reset:
+        with _falkordb_lock:
+            delete_page_events(_falkordb, source_url)
+
+    # 4a. Notion DB 속성에서 직접 생성 (LLM 없이, 정확도 100%)
+    if db_props:
+        ev = event_from_db_props(db_props, source_url, title)
+        if ev:
+            with _falkordb_lock:
+                nid = upsert_event_node(_falkordb, ev)
+            if nid >= 0:
+                print(f"     이벤트: DB 속성에서 직접 생성 ({ev['game']} / {ev['date']})")
+                return 1
+
+    # 4b. DB 속성에 이벤트 없으면 LLM으로 텍스트 추출 (API 호출, 락 불필요)
+    try:
+        events = extract_events_from_text(body)
+    except Exception as e:
+        events = []
+        write_failed.append(f"이벤트 추출 실패: {type(e).__name__}: {e}")
+
+    if not events:
+        print("     이벤트: 없음 (날짜 명시 이벤트 미감지)")
+        return 0
+
+    stored = 0
+    with _falkordb_lock:
+        for ev in events:
+            ev["source_url"] = source_url
+            if upsert_event_node(_falkordb, ev) >= 0:
+                stored += 1
+    if stored:
+        print(f"     이벤트: {stored}/{len(events)}개 :Event 노드 저장 (LLM 추출)")
+    return stored
+
+
 # ─── 페이지 인제스천 ─────────────────────────────────────────────────────────
 def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool = False) -> dict:
     page = parse_md(path)
@@ -875,41 +927,14 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
 
         # 4. 이벤트 저장 (DB 속성 우선 → 없으면 LLM 텍스트 추출)
         source_url = meta.get("notion_url", "")
-        db_props = meta.get("db_properties", {})
-        ev_stored = 0
-        skip_llm_ev = False
-
-        # 4a. Notion DB 속성에서 직접 생성 (LLM 없이, 정확도 100%)
-        if db_props:
-            ev = event_from_db_props(db_props, source_url, meta.get("title", ""))
-            if ev:
-                with _falkordb_lock:
-                    nid = upsert_event_node(_falkordb, ev)
-                if nid >= 0:
-                    ev_stored += 1
-                    skip_llm_ev = True
-                    print(f"     이벤트: DB 속성에서 직접 생성 ({ev['game']} / {ev['date']})")
-
-        # 4b. DB 속성에 이벤트 없으면 LLM으로 텍스트 추출 (API 호출, 락 불필요)
-        if not skip_llm_ev:
-            try:
-                events = extract_events_from_text(body)
-            except Exception as e:
-                events = []
-                write_failed.append(f"이벤트 추출 실패: {type(e).__name__}: {e}")
-            if events:
-                with _falkordb_lock:
-                    for ev in events:
-                        ev["source_url"] = source_url
-                        nid = upsert_event_node(_falkordb, ev)
-                        if nid >= 0:
-                            ev_stored += 1
-                if ev_stored:
-                    print(f"     이벤트: {ev_stored}/{len(events)}개 :Event 노드 저장 (LLM 추출)")
-            else:
-                print("     이벤트: 없음 (날짜 명시 이벤트 미감지)")
-
-        result["event_count"] = ev_stored
+        result["event_count"] = _store_page_events(
+            source_url=source_url,
+            title=meta.get("title", ""),
+            db_props=meta.get("db_properties", {}),
+            body=body,
+            reset=reset,
+            write_failed=write_failed,
+        )
 
         # ── notion_pages 레지스트리 업서트 (PostgreSQL) ──────────────────
         _status, _hash, _err = _persist_state()
@@ -926,7 +951,7 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
                 word_count=word_count,
                 chunk_count=result.get("chunk_count", 0),
                 triplet_count=result.get("triplet_count", 0),
-                event_count=ev_stored,
+                event_count=result.get("event_count", 0),
                 is_db_item=bool(meta.get("db_properties")),
                 has_html_attachment=has_html_attach,
                 status=_status,

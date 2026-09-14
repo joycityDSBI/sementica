@@ -800,6 +800,77 @@ def trace_decision_chain(graph, entity_name: str, max_depth: int = 4) -> dict:
 
 # ─── 7. 이벤트 노드 (upsert_event_node) ─────────────────────────────────────
 
+
+def make_event_id(
+    source_url: str, game: str = "", event_type: str = "", date: str = "", title: str = ""
+) -> str:
+    """이벤트의 안정적 식별자. 같은 이벤트는 몇 번을 넣어도 같은 ID 입니다.
+
+    **한 페이지 안에서도 이벤트를 구분해야 합니다.** 예전에는 source_url 만
+    썼는데, 그러면 한 페이지에서 이벤트를 3개 추출해도 셋 다 같은 ID 로
+    MERGE 되어 앞의 둘을 덮어썼습니다. 장부에는 "3개 저장"으로 기록되고
+    그래프에는 1개만 남습니다 — 실측:
+
+        notion_pages 기준  이벤트 182개 / 이벤트를 만든 페이지 165개
+        그래프 :Event      165개          ← 페이지 수와 정확히 일치
+
+    17개가 그렇게 사라졌습니다. 그 전에는 `game|event_type|date` 만 써서 같은
+    날 같은 유형의 다른 행이 충돌했고, 그걸 고치려다 반대로 너무 뭉쳤습니다.
+    지금은 **출처와 내용을 모두** 봅니다.
+
+    title 까지 넣는 이유: 같은 페이지에 같은 날 같은 유형의 이벤트가 여럿일 수
+    있습니다(캠페인 조정 등). 셋이 모두 같다면 실제로 같은 이벤트이므로 합쳐지는
+    것이 맞습니다.
+
+    >>> a = make_event_id("https://notion.so/p1", "RESU", "season", "2026-04-02", "주간상점 도입")
+    >>> a == make_event_id("https://notion.so/p1", "RESU", "season", "2026-04-02", "주간상점 도입")
+    True
+
+    같은 페이지의 다른 이벤트는 다른 ID 입니다:
+
+    >>> b = make_event_id("https://notion.so/p1", "RESU", "season", "2026-04-09", "시즌 종료")
+    >>> a == b
+    False
+
+    다른 페이지의 같은 내용도 다른 ID 입니다 (문서가 다르면 별개 기록):
+
+    >>> a == make_event_id("https://notion.so/p2", "RESU", "season", "2026-04-02", "주간상점 도입")
+    False
+
+    source_url 이 없으면 내용만으로 만듭니다:
+
+    >>> c = make_event_id("", "RESU", "season", "2026-04-02", "주간상점 도입")
+    >>> c == make_event_id("", "RESU", "season", "2026-04-02", "주간상점 도입")
+    True
+    >>> c == a
+    False
+    """
+    title_hash = hashlib.md5((title or "").encode("utf-8")).hexdigest()[:8]
+    key = f"{source_url}|{game}|{event_type}|{date}|{title_hash}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+
+def delete_page_events(graph, source_url: str) -> int:
+    """한 페이지의 :Event 노드를 모두 삭제합니다. 삭제된 수 반환.
+
+    페이지를 다시 처리하기 **전에** 불러야 합니다. event_id 가 이벤트 내용까지
+    반영하므로, 페이지가 고쳐져 이벤트의 제목·날짜가 바뀌면 새 ID 가 만들어지고
+    옛 노드는 아무도 지우지 않는 한 그대로 남습니다. 예전에는 ID 가 페이지당
+    하나로 고정이라 MERGE 가 알아서 덮어썼지만, 이제는 명시적으로 지워야 합니다.
+    """
+    if not source_url:
+        return 0
+    try:
+        res = graph.query(
+            "MATCH (e:Event {source_url: $url}) DETACH DELETE e RETURN count(e) AS cnt",
+            {"url": source_url},
+        )
+        return res.result_set[0][0] if res.result_set else 0
+    except Exception as e:
+        print(f"    ⚠️  Event 노드 삭제 실패: {e}")
+        return 0
+
+
 EVENT_TYPES: frozenset = frozenset(
     [
         "client_update",
@@ -1257,16 +1328,7 @@ def upsert_event_node(graph, event: dict) -> int:
     except Exception:
         year, month, quarter = 0, 0, ""
 
-    # 안정적 ID: source_url이 있으면 Notion 페이지 URL 기준 (행마다 고유)
-    # source_url이 없으면 game|event_type|date|title 해시로 폴백
-    # ※ 이전: game|event_type|date 만 사용 → 같은 날 같은 유형 여러 행이 충돌
-    if source_url:
-        event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, source_url))
-    else:
-        import hashlib
-
-        title_hash = hashlib.md5(title.encode()).hexdigest()[:8]
-        event_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{game}|{event_type}|{date}|{title_hash}"))
+    event_id = make_event_id(source_url, game, event_type, date, title)
     ts = datetime.now(UTC).isoformat()
 
     # ── 1. :Event 노드 MERGE ────────────────────────────────────────────────
