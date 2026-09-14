@@ -18,6 +18,8 @@
     SMTP_PASSWORD=...
     SMTP_FROM=semantica@joycity.com   # 생략 시 SMTP_USER, 그것도 없으면 호스트명
     SMTP_TLS=1                    # STARTTLS. 465 포트면 SMTP_SSL=1
+    SMTP_CA_FILE=                 # 자체 서명 릴레이의 CA 인증서 (권장)
+    SMTP_TLS_VERIFY=1             # 0 이면 인증서 검증 생략 (암호화는 유지)
     ALERT_ON_SUCCESS=1            # 0 이면 실패에만 보냅니다
 
 설정이 없으면 **조용히 넘어갑니다.** 알림은 보조 기능이고, 이것 때문에
@@ -66,9 +68,41 @@ def _cfg() -> dict:
         "from": os.environ.get("SMTP_FROM", "").strip(),
         "tls": os.environ.get("SMTP_TLS", "1").strip().lower() in {"1", "true", "yes"},
         "ssl": os.environ.get("SMTP_SSL", "0").strip().lower() in {"1", "true", "yes"},
+        "ca_file": os.environ.get("SMTP_CA_FILE", "").strip(),
+        "verify": os.environ.get("SMTP_TLS_VERIFY", "1").strip().lower()
+        not in {"0", "false", "no"},
         "on_success": os.environ.get("ALERT_ON_SUCCESS", "1").strip().lower()
         in {"1", "true", "yes"},
     }
+
+
+def _ssl_context(c: dict) -> ssl.SSLContext:
+    """TLS 컨텍스트. 사내 릴레이가 자체 서명 인증서를 쓰는 경우를 다룹니다.
+
+    실측: 사내 릴레이(포트 25)가 자체 서명 인증서라 STARTTLS 검증이 실패했습니다
+    (`CERTIFICATE_VERIFY_FAILED: self-signed certificate`).
+
+    여기서 **SMTP_TLS=0 으로 암호화를 끄는 것은 나쁜 선택**입니다 — 인증을
+    쓰고 있으므로 계정 비밀번호가 평문으로 나갑니다. 선택지는 둘입니다:
+
+      ① SMTP_CA_FILE=/path/to/ca.pem   ← 권장. 릴레이의 CA 인증서를 신뢰합니다.
+                                          검증도 암호화도 그대로 유지됩니다.
+      ② SMTP_TLS_VERIFY=0              ← 차선. 암호화는 하되 인증서를 확인하지
+                                          않습니다. 엿듣기는 막지만 중간자
+                                          공격은 막지 못합니다.
+
+    ②는 사내망의 자체 서명 릴레이에서 흔히 쓰는 타협이지만, 타협이라는 사실이
+    기록에 남아야 합니다. 그래서 켤 때마다 경고를 출력합니다.
+    """
+    if c["ca_file"]:
+        return ssl.create_default_context(cafile=c["ca_file"])
+    ctx = ssl.create_default_context()
+    if not c["verify"]:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        print("  ⚠️  SMTP 인증서 검증 꺼짐 (SMTP_TLS_VERIFY=0) — 중간자 공격에 노출됩니다.")
+        print("      릴레이의 CA 를 구할 수 있으면 SMTP_CA_FILE 로 바꾸세요.")
+    return ctx
 
 
 def is_configured() -> bool:
@@ -90,15 +124,14 @@ def send_mail(subject: str, body: str) -> bool:
     msg.set_content(body)
 
     try:
+        ctx = _ssl_context(c)
         if c["ssl"]:
-            server = smtplib.SMTP_SSL(
-                c["host"], c["port"], timeout=SMTP_TIMEOUT, context=ssl.create_default_context()
-            )
+            server = smtplib.SMTP_SSL(c["host"], c["port"], timeout=SMTP_TIMEOUT, context=ctx)
         else:
             server = smtplib.SMTP(c["host"], c["port"], timeout=SMTP_TIMEOUT)
         with server:
             if c["tls"] and not c["ssl"]:
-                server.starttls(context=ssl.create_default_context())
+                server.starttls(context=ctx)
             if c["user"]:
                 server.login(c["user"], c["password"])
             server.send_message(msg)
@@ -210,7 +243,16 @@ def _main() -> int:
     print(_fmt("SMTP", f"{c['host'] or '❌ SMTP_HOST 미설정'}:{c['port']}"))
     print(_fmt("발신", c["from"] or c["user"] or f"semantica@{socket.gethostname()}"))
     print(_fmt("인증", c["user"] or "없음 (익명 릴레이)"))
-    print(_fmt("암호화", "SMTPS" if c["ssl"] else ("STARTTLS" if c["tls"] else "없음")))
+    enc = (
+        "SMTPS"
+        if c["ssl"]
+        else ("STARTTLS" if c["tls"] else "❌ 없음 (비밀번호가 평문으로 나갑니다)")
+    )
+    if (c["ssl"] or c["tls"]) and c["ca_file"]:
+        enc += f" / CA: {c['ca_file']}"
+    elif (c["ssl"] or c["tls"]) and not c["verify"]:
+        enc += " / ⚠️ 인증서 검증 안 함"
+    print(_fmt("암호화", enc))
     print(_fmt("성공 시 발송", "예" if c["on_success"] else "아니오 (실패만)"))
 
     if not is_configured():
