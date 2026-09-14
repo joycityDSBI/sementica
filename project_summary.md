@@ -293,6 +293,33 @@ https://catalog.joycityplay.com/api/glossary/all  (인증 없음)
 LLM 추출 → "드래곤슈퍼" → resolve() → "DS" → merge_node() → FalkorDB (:Team {name: "DS"})
 ```
 
+**표기가 조금만 달라도 못 찾던 문제 (2026-09-14 수정)**
+
+`resolve()` 가 문자열 **정확 일치**로만 용어집을 찾고 있었습니다. 스냅샷의
+등록 표현 350개 중 **241개**가 공백·대소문자·부호를 포함해 이 문제에 노출돼
+있었고, 실제 동작은 이랬습니다:
+
+```
+resolve("평균 동접")  → "ACU"       ← 용어집에 등록된 표기
+resolve("평균동접")   → "평균동접"    ← 띄어쓰기 하나에 실패
+resolve("android")   → "android"   ← Android / ANDROID 둘 다 등록돼 있는데도
+```
+
+문서 저자가 용어집과 똑같이 띄어 쓸 이유가 없으므로, 등록된 용어조차 정규화되지
+않고 그래프에 별개 노드로 쌓이고 있었습니다. 정확 일치가 실패하면 표기를 지운
+키(`norm_key` — 공백·대소문자·부호 무시)로 한 번 더 찾습니다. 정확 일치의 결과는
+바뀌지 않으므로 기존 동작이 나빠질 수 없습니다.
+
+인덱스를 만들 때의 모호함 두 가지도 **추측하지 않고** 처리합니다:
+
+| 상황 | 실측 | 처리 |
+|---|---|---|
+| 용어가 남의 동의어로도 등록됨 | `가입 경과일` 은 그 자체로 용어인데 `코호트` 의 동의어이기도 해서, 사전 생성 순서가 결과를 정했음 | **용어 자신이 이깁니다.** 응답을 모두 모은 뒤 한 번에 인덱싱해 순서 의존 제거 |
+| 표기를 지우면 다른 용어가 됨 | `신규가입자`→RU, `신규 가입자`→DRU. 띄어쓰기 하나로 다른 엔티티 | **정규화 폴백에서 제외**하고 `conflicts()` 로 보고. 어느 쪽을 골라도 절반은 틀림 |
+
+두 번째는 코드가 고칠 수 없습니다 — `RU` 의 동의어에 `DRU` 가, `DRU` 의 동의어에
+`RU` 가 들어 있어 **용어집 데이터 자체가 모순**입니다. 용어집에서 정리해야 합니다.
+
 **용어집 현황** (2026-09-10 기준): 전체 109개 term, 그중 23개가 `category=game`
 (`3on3, BLESS, CBZ, CCCC, DS, FS1, FS1R, FS2, FSF2, GBTW, GNSS, GOD, GW-CHINA,
 HBZ, IMGN, JTWN, KOFS, ONE, POTC, RESU, TERA, WSB, WWM`).
@@ -487,6 +514,66 @@ python falkordb/export_graph.py --output graph.json --html graph.html
   - `graph_search(entity, depth)` — 그래프 엔티티 탐색
   - `timeline_search(game, event_type, from_date, to_date, limit, keyword)` — 이벤트 이력 + **벡터 크로스링킹**
   - `hybrid_search(query, limit)` — 벡터 + 그래프 + **이벤트 타임라인** 통합
+
+#### `graph_search` 가 임의의 노드를 잡던 문제 (2026-09-14 수정)
+
+엔티티 조회가 이랬습니다:
+
+```cypher
+MATCH (n) WHERE ANY(form IN $forms WHERE n.name CONTAINS form)
+RETURN n.name, labels(n)[0] LIMIT 5
+```
+```python
+matched_name = node_result.result_set[0][0]   # ← 첫 줄 하나만 쓰고 그 노드의 관계만 탐색
+```
+
+**`ORDER BY` 가 없습니다.** 어느 노드가 첫 줄로 오는지 정해져 있지 않은데,
+부분 일치는 엉뚱한 것을 많이 답니다. 실측으로 `"RESU"` 는 이 전부에 걸렸습니다:
+
+| 노드 | 엣지 |
+|---|---|
+| `RESU` | **12** ← 찾던 것 |
+| `RESU Live History DB` | 2 |
+| `RESU 빌드 알림 채널` | 2 |
+| `RESU 기획팀` | 1 |
+| `data-science-division-216308.RESU.server_opentime` | 2 |
+
+엣지 12개짜리 본체 대신 2개짜리 테이블을 잡으면 관계가 통째로 사라지고, 같은
+질문이 실행마다 다른 답을 낼 수 있었습니다. 평가 점수의 흔들림 중 일부는 추출
+비결정성이 아니라 여기였을 수 있습니다.
+
+**수정** (`utils/retrieval.rank_entity_matches` / `lookup_entity`):
+
+1. **순위화** — 완전일치 > 접두 > 부분, 그 안에서 엣지 많은 순, 동점은 이름·라벨로
+   고정. 입력 순서 50가지에 대해 결과가 같음을 확인했습니다.
+2. **대표 하나가 아니라 같은 것으로 판정된 이름 전체**로 관계를 조회합니다.
+   표기가 갈린 노드(`IN-JOY`/`In-Joy`, `마케팅사이언스팀`/`마케팅 사이언스팀` —
+   실측 3건)는 이름이 다르므로 한쪽만 보면 나머지 엣지를 놓쳤습니다.
+3. **후보 탐색을 표기 무시 기준으로.** Cypher `CONTAINS` 는 대소문자를 구분하고,
+   `마케팅사이언스팀` 은 `마케팅 사이언스팀` 의 부분 문자열이 **아닙니다**.
+   `toLower()` 로는 두 번째가 해결되지 않아, 이름만 받아 파이썬에서 `norm_key`
+   기준으로 거릅니다. 비용은 오히려 줄었습니다 — 예전에는 전체 노드의 엣지를
+   집계한 뒤 걸렀는데, 이제 이름·라벨만 받아 거른 뒤 후보에 대해서만 집계합니다.
+
+**라벨만 다른 중복(실측 24건)은 저절로 해결됩니다.** 관계 조회가 라벨을 보지
+않으므로(`n.name IN $names`) `RESU` 의 Game·Team·System·Process 네 노드의 엣지가
+모두 합쳐집니다. 무엇을 합쳤는지는 응답의 `types` / `merged_names` 로 밝힙니다.
+
+**노드를 병합하거나 지우지 않습니다.** 되돌릴 수 없는 작업을 할 만큼의 이득이
+없고(쿼리에서 이미 해결됨), 재인제스트가 같은 중복을 다시 만들어 근본 해결도
+아닙니다. `tools/find_duplicate_entities.py` 로 중복 현황만 실측합니다.
+
+##### 자동 병합에서 제외한 것
+
+| 유형 | 건수 | 판단 |
+|---|---|---|
+| 라벨만 다름 | 24 | 쿼리에서 해결 |
+| 표기만 다름 | 3 | 쿼리에서 해결 |
+| 포함 관계 | 507 | **오탐 압도적** — `로그` ⊂ `프로그램팀`, `진단` ⊂ `LTV 성장 진단 워크플로우`. 한국어 짧은 이름의 부분 문자열은 우연히 걸림 |
+| 문자열 유사도 | 4 | **4건 전부 오탐** — `V_0317…_V` ~ `T_0317…_V`(뷰/테이블), `payment_detail_view` ~ `payment_raw_detail_view`. DB 객체는 한 토큰이 곧 다른 객체라 정밀도 0/4 |
+
+문자열 유사도 기반 엔티티 병합은 이 데이터에서 **쓰면 안 됩니다**. 진짜 중복
+(`데브옵스` ⊂ `데브옵스팀`)은 사람이 보고 용어집에 등록하는 쪽이 맞습니다.
 
 #### 한국어 조사 매칭 (`src/utils/korean.py`, 2026-09-10 추가)
 
@@ -793,26 +880,57 @@ python tools/debug_html_blocks.py --page-id 3c7ea67a568180b4b288fab957019624
 
 ### 7-2. 서비스 재시작 (git pull 후)
 
+세 서비스 모두 systemd 로 관리합니다 (2026-09-14). 설치·문제 해결은
+[`deploy/README.md`](deploy/README.md) 참고.
+
 ```bash
-git pull
+cd ~/sementica && git pull
 
-# 전체 재시작
-pkill -f rest_api.py; pkill -f ngrok; pkill -f web_app.py; pkill -f "server.py"
-sleep 2
+sudo systemctl restart sementica-mcp      # MCP 서버 (8765)
+sudo systemctl restart sementica-rest     # REST API (8766)
+sudo systemctl restart sementica-ops      # 웹 대시보드 (8080)
 
-# REST API + ngrok (bash로 실행 — 파일시스템 noexec 우회)
-bash scripts/start_with_ngrok.sh
-
-# 웹 대시보드
-nohup python src/ops/web_app.py > logs/web_app.log 2>&1 &
-
-# MCP 서버
-nohup python src/mcp/server.py --dept strategic \
-  --transport streamable-http --port 8765 > logs/mcp.log 2>&1 &
+systemctl status sementica-rest --no-pager | head -8
+curl -s localhost:8766/rest/health; echo
 ```
 
-> ⚠️ **`./scripts/start_with_ngrok.sh` Permission denied 발생 시**:  
+ngrok 은 별도입니다. REST 가 systemd 로 떠 있으면 스크립트가 REST 기동을
+건너뛰고 터널만 엽니다:
+
+```bash
+bash scripts/start_with_ngrok.sh
+```
+
+> ⚠️ **`./scripts/start_with_ngrok.sh` Permission denied 발생 시**:
 > `bash scripts/start_with_ngrok.sh` 으로 실행 (파일시스템 noexec 마운트 우회)
+
+#### REST API 가 systemd 밖에 있던 문제 (2026-09-14)
+
+REST API 는 `nohup python src/mcp/rest_api.py &` 로만 떠 있었습니다. 결과:
+
+- 셸이 닫히면 죽고, 재부팅 후에도 올라오지 않음
+- Snowflake UDF 가 이 API 를 호출하므로 죽으면 **UDF 쪽에서만** 에러가 나고
+  서버에는 아무 흔적이 남지 않음 — 실제로 죽은 채 방치된 것을 발견
+- MCP 는 `.venv`, REST 는 pyenv 3.11.9 로 돌아 **서로 다른 site-packages** 를
+  봄. anthropic 버전 차이나 `mcp` 패키지 섀도잉처럼 인터프리터별로 다르게
+  나타나는 문제를, 한쪽만 고쳐놓고 다 고쳤다고 믿기 쉬운 구조였음
+
+`deploy/sementica-rest.service` 로 등록했습니다. 세 유닛 모두 `.venv` 와
+`PYTHONUNBUFFERED=1` 을 씁니다. 후자가 없으면 systemd 아래에서 stdout 이 블록
+버퍼링되어 `print()` 출력이 종료 시점에 몰려 나오고, 로그에서 **배너가 에러보다
+뒤에 찍힙니다** — 장애 원인을 잘못 짚게 됩니다.
+
+**포트를 잡고 있는 유령 프로세스에 주의.** `nohup` 프로세스는 셸 job 이 끊겨도
+(`[1]- Terminated`) 살아남을 수 있습니다. 실제로 이것 때문에 새 서비스가
+`[Errno 98] address already in use` 로 10초마다 재시작을 반복했습니다:
+
+```bash
+sudo systemctl stop sementica-rest    # 먼저 재시작을 끈다 (안 그러면 경합)
+sudo ss -lptn 'sport = :8766'         # 누가 잡고 있는지
+kill <PID>
+sleep 2 && sudo ss -lptn 'sport = :8766'
+sudo systemctl start sementica-rest
+```
 
 ### 7-3. FalkorDB 수동 초기화
 
@@ -888,6 +1006,40 @@ python src/eval/evaluate.py --dept strategic --golden data/eval/golden_set_YYYYM
 
 결과: `data/eval/eval_result_*.json`, `eval_report_*.md`
 
+#### dev / holdout 분할 (2026-09-14)
+
+**지금까지의 점수는 전부 같은 40문항에서 나왔습니다.** 그 문항을 보면서
+파라미터를 고르고 결함을 고쳤으니, 0.900 이 시스템의 실력인지 그 40문항에
+맞춰진 숫자인지 구분할 수단이 없습니다.
+
+```bash
+python src/eval/gen_golden_set.py --dept strategic --count 90 --out data/eval/golden_v2.json
+python tools/split_golden_set.py data/eval/golden_v2.json
+
+python src/eval/evaluate.py --dept strategic --golden data/eval/golden_v2_dev.json      # 평소
+python src/eval/evaluate.py --dept strategic --golden data/eval/golden_v2_holdout.json  # 큰 변경 뒤
+```
+
+두 점수의 **차이**가 과적합의 크기입니다. dev 0.90 / holdout 0.88 이면 실력이고,
+dev 0.90 / holdout 0.72 면 0.18 만큼은 그 문항들에만 맞춰져 있던 것입니다.
+
+**holdout 은 점수만 봅니다.** 어느 문항이 틀렸는지 보고 고치기 시작하면 그 순간
+holdout 이 dev 가 되고, 일반화 여부를 잴 수단이 사라집니다.
+
+**질문이 아니라 출처 문서 단위로 나눕니다.** 같은 페이지에서 나온 질문 둘을
+양쪽으로 갈라놓으면 홀드아웃이 오염됩니다 — `CHUNK_OVERSAMPLE` 을 8 로 정할 때
+실제로 본 것이 "근거 페이지가 컨텍스트에 들어오는가" 였습니다. dev 질문을 보고
+그 페이지가 검색되게 만들면 같은 페이지를 쓰는 holdout 질문은 공짜로 맞고,
+재려던 "새 문서에도 통하는가"를 못 재게 됩니다.
+
+카테고리 균형도 함께 맞춥니다. 총량만 맞추면 쏠리는데(합성 표본에서 관계 5/1,
+정책/규정 1/4), 하필 정책/규정이 제일 약한 카테고리(0.69)라 그대로 두면
+홀드아웃이 낮게 나와도 과적합 탓인지 구성 탓인지 구분할 수 없습니다.
+
+**문항 수 주의.** 40문항을 20/20 으로 쪼개면 홀드아웃의 표준오차가 ±0.07 정도라,
+0.13 미만의 차이는 노이즈와 구분되지 않습니다. 재려는 것이 바로 그 차이이므로
+문항을 먼저 늘려야 합니다 (90문항 → 45/45 에서 ±0.045).
+
 **채택 기준 — 검색 통과가 아니라 원문 근거** (2026-09-09 수정)
 
 기존 생성기는 `verify_by_search()`로 **검색 파이프라인이 답할 수 있는 질문만** 채택했습니다.
@@ -935,6 +1087,7 @@ python src/eval/evaluate.py --dept strategic --golden data/eval/golden_set_YYYYM
 | 2026-09-10 ⑩ | **0.963** | 1.00 | 1.00 | **1.00** | 0.83 | 0.92 | **분해 시 원본 질문 포함** (Q27 회복) |
 | 2026-09-11 ⑪ | 0.838 | 0.90 | 0.94 | 0.80 | 0.75 | 0.75 | 코퍼스 정정(1258파일 → 299페이지) 후 첫 측정 |
 | 2026-09-11 ⑫ | **0.925** | **1.00** | 0.88 | 0.95 | **1.00** | 0.75 | 관계 문항 출처 오연결 수정 + 골든셋 재생성 |
+| 2026-09-11 ⑬ | 0.900 | 1.00 | 0.69 | 0.90 | 1.00 | 0.92 | 골든셋 재생성(해시 `778ba8f1`, 40문항). ⑫ 와 **문항이 달라 총점 비교 불가** — 카테고리별 추이로만 읽으세요 |
 
 > ⑪ 이전 회차와는 **비교할 수 없습니다.** 코퍼스가 1258개 "페이지"에서 실제 299개로
 > 정정되었고(아래 4-1 참고), 그래프 내용·문항·채점 근거가 모두 달라졌습니다.
@@ -1164,14 +1317,19 @@ Q38·Q39 가 동시에 0.0 → 1.0 이 되었고 복합 카테고리가 0.58 →
 | 57 | 인덱스 자동 생성 | ✅ | `--reset` 이 그래프와 함께 인덱스를 지우므로 ingest 안으로 이동. 누락된 4개(`Event.event_id`·`Event.scope`·`Decision.name`·`Unknown.name`) 추가, 2026-09-11 |
 | 58 | 진단 도구 정비 | ✅ | 7종 추가. 파이프라인을 **베끼지 않고 호출**하도록 통일 — 베낀 도구는 파이프라인이 바뀌면 어긋납니다, 2026-09-11 |
 | 59 | Snowflake UDF 인증 | ✅ | `SECRETS` + `Authorization` 헤더. 없는 동안 서버 토큰을 켤 수 없었음, 2026-09-11 |
-| 60 | 엔티티 정규화 확대 | 🔜 | 추출 비결정성(45.9%)의 실질적 해법. `merge_node` 범위 확대 |
+| 60 | 엔티티 정규화 | ✅ | **노드 병합이 아니라 조회에서 해결.** 용어집 정확일치 → 표기 무시, graph_search 후보 순위화. 실측 결과 문자열 유사도 병합은 정밀도 0/4 라 폐기, 2026-09-14 |
 | 61 | 이벤트 `manager` 누락 | ✅ | **결함 아님**(2026-09-11 정정). DB 속성에 담당자 컬럼이 있으면 정상 기록됨(GBTW 페이지 → 박준혁). 94.5% 가 빈 것은 UA 히스토리 DB 에 담당자 컬럼이 없고 LLM 추출이 보수적으로 비우기 때문. 키워드 검색은 title·description·game·category·scope 도 함께 봄 |
-| 62 | FOLLOWED_BY 건너뛰기 엣지 | 🔜 | 병렬 인제스트에서 두 스레드가 같은 구간을 동시에 가르면 재발 — 락 필요 |
-| 37 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
-| 38 | LLM 결과 캐싱 | 🔜 | content_hash 기반 triplets 캐시 → --reset 속도 대폭 단축 |
-| 39 | 동의어 사전 "데사실" 등록 | 🔜 | Business Glossary API에 데사실 → 데이터사이언스실 추가 필요 |
-| 40 | EntityDeduplicator (그래프 중복 병합) | 🔜 | 향후 개선 |
-| 41 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
+| 62 | FOLLOWED_BY 건너뛰기 엣지 | ✅ | 증분 유지를 걷어내고 `rebuild_followed_by()` 로 전량 재구축. 삽입 순서·동시성과 무관, 2026-09-11 |
+| 63 | graph_search 임의 노드 선택 | ✅ | `CONTAINS` + `LIMIT 5` 의 첫 줄을 쓰던 것 — ORDER BY 가 없어 실행마다 다른 노드를 잡았음. 완전일치 > 접두 > 부분 순위화, 2026-09-14 |
+| 64 | 용어집 표기 차이 | ✅ | 등록 표현 350개 중 241개가 정확일치에서 깨짐(`평균 동접`≠`평균동접`). 정규화 폴백 + 순서 의존 제거, 2026-09-14 |
+| 65 | REST API systemd 등록 | ✅ | `nohup` 으로만 떠 있어 셸이 닫히면 죽고 재부팅 후 안 올라옴. Snowflake UDF 가 호출하므로 죽으면 UDF 쪽에서만 에러, 2026-09-14 |
+| 66 | 골든셋 dev/holdout 분할 | ✅ | `tools/split_golden_set.py` — 출처 문서 단위 분할. 점수가 일반화되는지 재는 수단, 2026-09-14 |
+| 67 | 홀드아웃 기준선 측정 | 🔜 | 문항 90개 생성 → 분할 → dev/holdout 점수 차이 확인 |
+| 68 | End-to-End 통합 테스트 | 🔜 | Snowflake ↔ Semantica ↔ Cortex 전구간 |
+| 69 | LLM 결과 캐싱 | 🔜 | content_hash 기반 triplets 캐시 → --reset 속도 대폭 단축 |
+| 70 | 용어집 등록 필요 | 🔜 | ① "데사실" → 데이터사이언스실 ② `RU`↔`DRU` 상호 동의어 모순 해소 (`conflicts()` 로 확인) ③ 사람이 확인한 중복(`데브옵스`/`데브옵스팀` 등) |
+| 71 | ~~EntityDeduplicator (그래프 중복 병합)~~ | ❌ | **하지 않기로 결정** (2026-09-14). 실측 768개 노드에서 문자열 유사도 후보 4건이 전부 오탐. DB 객체 이름은 한 토큰이 곧 다른 객체라 자동 병합이 그래프를 망가뜨림. 확실한 중복은 조회 단계에서 합치고(63번), 나머지는 용어집 등록(70번) |
+| 72 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
 
 > **Cortex Analyst YAML 모델**은 대상에서 제외되었습니다 — Cortex에 Analytics Agent를 직접 생성하고
 > UDF로 온톨로지 API를 호출하는 구조로 동작 확인이 완료되어, `05_cortex_agent.sql`의
@@ -1228,6 +1386,8 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | **트리플 추출 재현성 45.9%** | 온도 0 을 적용해도 재인제스트마다 엔티티 이름이 달라집니다. 관계 질문의 답이 회차마다 바뀔 수 있습니다 (4-2 ③ 참고) |
 | **anthropic SDK 버전 의존** | 1.x 는 `temperature` 명명 인자가 없습니다. `utils/llm.create_message` 가 흡수하지만, SDK 를 바꿀 때는 `tools/probe_llm.py` 로 먼저 확인하세요 |
 | 짧은 DB 행 검색 | Notion DB 행은 청크가 100자 안팎이라 벡터 유사도가 낮습니다. 제목 임베딩으로 완화했으나 한계는 남아 있습니다 |
+| **점수의 일반화 여부 미검증** | 지금까지의 모든 점수가 **같은 문항을 보면서 고친 결과**입니다. 홀드아웃(7-5) 측정 전까지 0.900 이 실력인지 그 문항들에 맞춰진 값인지 알 수 없습니다 |
+| 골든셋 재생성 시 총점 비교 불가 | 문항이 바뀌면 난이도 구성이 바뀝니다. `eval_run_log.golden_hash` 가 같은 회차끼리만 비교하세요 |
 
 ---
 
@@ -1266,6 +1426,13 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-14 | **골든셋 dev/holdout 분할** (`tools/split_golden_set.py`) — 지금까지의 점수가 전부 같은 40문항에서 나왔음. **출처 문서 단위**로 나눔(질문 단위로 나누면 같은 페이지를 쓰는 홀드아웃 문항이 공짜로 맞아 오염) |
+| 2026-09-14 | **REST API systemd 등록** — `nohup` 으로만 떠 있어 셸이 닫히면 죽고 재부팅 후 안 올라옴. Snowflake UDF 가 호출하므로 죽으면 UDF 쪽에서만 에러가 나고 서버에는 흔적 없음. MCP(.venv)/REST(pyenv) 인터프리터 분리도 해소 |
+| 2026-09-14 | **`graph_search` 임의 노드 선택 수정** — `CONTAINS` + `LIMIT 5` 의 첫 줄을 쓰는데 `ORDER BY` 가 없어, "RESU" 를 물으면 엣지 12개짜리 본체 대신 2개짜리 테이블을 잡을 수 있었음. 실행마다 답이 달라지던 원인 |
+| 2026-09-14 | **엔티티 정규화 — 병합이 아니라 조회로 해결.** 실측 768개 노드에서 문자열 유사도 후보 4건이 **전부 오탐**(뷰/테이블, raw/non-raw)이라 자동 병합 폐기. 라벨 분리 24건·표기 차이 3건은 쿼리에서 합침 |
+| 2026-09-14 | **용어집 표기 차이 수정** — 등록 표현 350개 중 241개가 정확일치에서 깨짐(`평균 동접`≠`평균동접`, `android`≠`Android`). 정규화 폴백 추가 + 사전 생성 순서 의존 제거(`가입 경과일`→`코호트` 오연결). 용어집 자체 모순 2건은 `conflicts()` 로 노출 |
+| 2026-09-11 | **FOLLOWED_BY 전량 재구축** — 증분 유지를 걷어내고 `rebuild_followed_by()`. 삽입 순서·동시성에 따라 건너뛰기 엣지가 213개 중 14개 남던 문제 |
+| 2026-09-11 | **임베딩 배치 토큰 초과** — 개수(50개)로만 묶어 요청당 한도(20,000토큰)를 넘김. 34,263자 문서가 세 번의 `--reset` 내내 벡터 없이 남아 있었음 |
 | 2026-09-11 | **평가 기준선 재설정 — 0.925** (담당자·문서위치 1.00). 코퍼스·그래프·문항이 모두 달라져 이전 회차와 비교 불가 |
 | 2026-09-11 | **Snowflake UDF 정비** — `SECRETS` + `Authorization` 헤더(없어서 서버 토큰을 켤 수 없었음), 오류 본문 보존, 시크릿 전체 경로(integration 은 계정 레벨이라 `USE SCHEMA` 무효) |
 | 2026-09-11 | **임베딩에 제목 포함** — 100자짜리 DB 행이 검색에 안 잡히던 문제. 질문이 묻는 문구가 제목에 있으면서 벡터에는 없었음 |
