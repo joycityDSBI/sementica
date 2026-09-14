@@ -147,19 +147,42 @@ def main() -> int:
                 rank = (i, h.score, (h.payload or {}).get("chunk_index", "?"))
                 break
 
+        # 페이지 순위 — **이게 실제로 결과를 정합니다.**
+        # vector_search_pages 는 청크 window 개를 가져온 뒤 page_id 로 묶고
+        # 페이지 최고점 기준 상위 limit 개만 남깁니다. 청크로 50위여도 그 위에
+        # 서로 다른 페이지가 10개 있으면 잘려나갑니다.
+        page_best: dict = {}
+        for h in hits[:window]:
+            p = h.payload or {}
+            u = p.get("source_url", "")
+            if u and (u not in page_best or h.score > page_best[u][0]):
+                page_best[u] = (h.score, str(p.get("title", "")))
+        ordered = sorted(page_best.items(), key=lambda kv: -kv[1][0])
+        page_rank = next((i for i, (u, _v) in enumerate(ordered, 1) if u == target_url), None)
+
         print(f"  ■ {sq[:62]}")
         if rank:
             i, score, ci = rank
-            mark = "✅ 창 안" if i <= window else "❌ 창 밖"
-            print(f"      최고 순위 {i}위 (청크 {ci}, 점수 {score:.4f})  {mark}")
-            if best_overall is None or i < best_overall[0]:
-                best_overall = (i, sq, score)
+            print(f"      청크 순위 {i}위 (청크 {ci}, 점수 {score:.4f})", end="")
+            print("  ✅ 창 안" if i <= window else "  ❌ 창 밖")
         else:
-            print(f"      {args.depth}위 안에 없음")
-        for j, h in enumerate(hits[: args.show], 1):
-            p = h.payload or {}
-            same = "←대상" if p.get("source_url") == target_url else "     "
-            print(f"        {j}. {h.score:.4f} {same} {str(p.get('title', ''))[:46]}")
+            print(f"      청크 {args.depth}위 안에 없음")
+
+        if page_rank:
+            mark = "✅ 통과" if page_rank <= DEFAULT_PAGE_LIMIT else "❌ 잘림"
+            print(
+                f"      페이지 순위 {page_rank}위 / 창 안 서로 다른 페이지 {len(ordered)}개  {mark}"
+            )
+            if best_overall is None or page_rank < best_overall[0]:
+                best_overall = (page_rank, sq, rank[1] if rank else 0.0, len(ordered))
+        else:
+            print(f"      페이지 순위 — 창(청크 {window}개) 안에 이 페이지의 청크가 없음")
+
+        print(f"      창 안 상위 페이지 (limit {DEFAULT_PAGE_LIMIT} 까지 통과):")
+        for j, (u, (sc, ttl)) in enumerate(ordered[: args.show], 1):
+            same = "←대상" if u == target_url else "     "
+            cut = " " if j <= DEFAULT_PAGE_LIMIT else "✂"
+            print(f"        {cut}{j}. {sc:.4f} {same} {ttl[:46]}")
         print()
 
     # ── 결론 ────────────────────────────────────────────────────────────────
@@ -171,19 +194,23 @@ def main() -> int:
         print("        청크 분할 방식을 바꾸는 쪽을 봐야 합니다.")
         return 0
 
-    best_rank, best_q, best_score = best_overall
-    print(f"  결론: 가장 잘 나온 순위 {best_rank}위 (점수 {best_score:.4f})")
+    best_rank, best_q, best_score, n_pages = best_overall
+    print(f"  결론: 가장 잘 나온 **페이지** 순위 {best_rank}위 (점수 {best_score:.4f})")
     print(f"        서브쿼리: {best_q[:60]}")
-    if best_rank <= window:
-        print(f"        현재 창({window}) 안입니다 — 검색은 되는데 다른 단계에서 잃었습니다.")
-        print("        diag_golden_miss 의 ③ 전달 단계를 확인하세요.")
+    if best_rank <= DEFAULT_PAGE_LIMIT:
+        print(f"        limit({DEFAULT_PAGE_LIMIT}) 안이라 검색 결과에 들어갑니다.")
+        print("        그런데도 답이 안 나왔다면 전달 단계에서 잘린 것입니다 —")
+        print("        diag_golden_miss 의 ③ 을 확인하세요.")
     else:
-        need = -(-best_rank // DEFAULT_PAGE_LIMIT)  # 올림
-        print(f"        현재 창({window}) 밖입니다.")
-        print(f"        오버샘플을 {need} 이상으로 올리면 들어옵니다 (현재 {CHUNK_OVERSAMPLE}).")
-        if need > CHUNK_OVERSAMPLE * 4:
-            print("        ⚠️  다만 그만큼 올리는 것은 이 문항 하나를 위한 과적합입니다.")
-            print("           다른 문항으로도 같은 값이 필요한지 먼저 확인하세요.")
+        print(
+            f"        limit({DEFAULT_PAGE_LIMIT}) 밖이라 잘립니다. 창 안 페이지 {n_pages}개 중 {best_rank}위."
+        )
+        print()
+        print("        ※ 오버샘플을 올려도 해결되지 않습니다. 청크를 더 가져오면")
+        print("          경쟁 페이지도 같이 늘어 페이지 순위는 그대로이거나 나빠집니다.")
+        print("          문제는 청크 창이 아니라 **서브쿼리마다 상위 10페이지로 자른 뒤에**")
+        print("          합치는 순서입니다 — 여러 서브쿼리에 걸쳐 고루 걸린 문서가")
+        print("          한 서브쿼리에서만 강한 문서에 밀려 합류 전에 사라집니다.")
     return 0
 
 
