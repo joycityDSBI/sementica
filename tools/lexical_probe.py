@@ -33,11 +33,9 @@ Q37 실측에서 벡터 검색의 한계가 드러났습니다:
 
 import argparse
 import json
-import math
 import os
-import re
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
@@ -54,74 +52,10 @@ if _env.exists():
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 
-# BM25 기본 파라미터 — 널리 쓰이는 값입니다.
-BM25_K1 = 1.5
-BM25_B = 0.75
-
-_ASCII_WORD = re.compile(r"[A-Za-z0-9_]+")
-_HANGUL = re.compile(r"[가-힣]+")
-
-
-def tokenize(text: str) -> list:
-    """한국어는 문자 2-gram, 영문·숫자는 단어 단위.
-
-    형태소 분석기 없이 조사를 견디는 실용적인 방법입니다.
-
-    >>> tokenize("워크북을 붙여넣기")
-    ['워크', '크북', '북을', '붙여', '여넣', '넣기']
-    >>> tokenize("BigQuery 적재")
-    ['bigquery', '적재']
-    >>> tokenize("")
-    []
-    """
-    low = (text or "").lower()
-    out: list = [m.group() for m in _ASCII_WORD.finditer(low)]
-    for m in _HANGUL.finditer(low):
-        w = m.group()
-        if len(w) == 1:
-            out.append(w)
-        else:
-            out.extend(w[i : i + 2] for i in range(len(w) - 1))
-    return out
-
-
-class BM25:
-    """문서 집합에 대한 BM25 점수기.
-
-    >>> docs = [["워크", "크북"], ["리포", "포트"], ["워크", "크북", "붙여"]]
-    >>> b = BM25(docs)
-    >>> s = b.scores(["워크", "크북"])
-    >>> s[1] == 0.0 and s[0] > 0 and s[2] > 0
-    True
-    """
-
-    def __init__(self, docs: list):
-        self.docs = docs
-        self.n = len(docs)
-        self.freqs = [Counter(d) for d in docs]
-        self.lens = [len(d) for d in docs]
-        self.avglen = (sum(self.lens) / self.n) if self.n else 0.0
-        df: dict = defaultdict(int)
-        for f in self.freqs:
-            for t in f:
-                df[t] += 1
-        # BM25 의 표준 idf — 흔한 단어일수록 0 에 가까워집니다.
-        self.idf = {t: math.log(1 + (self.n - c + 0.5) / (c + 0.5)) for t, c in df.items()}
-
-    def scores(self, query_tokens: list) -> list:
-        out = [0.0] * self.n
-        qt = Counter(query_tokens)
-        for t in qt:
-            idf = self.idf.get(t)
-            if not idf:
-                continue
-            for i, f in enumerate(self.freqs):
-                tf = f.get(t, 0)
-                if not tf:
-                    continue
-                denom = tf + BM25_K1 * (1 - BM25_B + BM25_B * self.lens[i] / (self.avglen or 1))
-                out[i] += idf * tf * (BM25_K1 + 1) / denom
-        return out
+# BM25·토큰화는 파이프라인과 **같은 구현**을 씁니다 (src/utils/lexical.py).
+# 도구가 따로 구현하면 실험 결과와 실제 검색이 어긋납니다 — 이번 세션에서
+# 이미 겪은 실수라(진단 도구가 파이프라인을 베껴 드리프트) 반복하지 않습니다.
+from utils.lexical import BM25, tokenize  # noqa: E402
 
 
 def load_chunks(qc, collection: str) -> list:

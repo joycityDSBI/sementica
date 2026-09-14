@@ -697,7 +697,9 @@ def _embed_query(query: str) -> list[float]:
     return list(res.embeddings[0].values)
 
 
-def _qdrant_search(collection: str, vec: list[float], top_k: int) -> list[dict]:
+def _qdrant_search(
+    collection: str, vec: list[float], top_k: int, query_text: str = ""
+) -> list[dict]:
     """골든셋 채점용 검색 — **서비스와 같은 경로**(utils.retrieval)를 씁니다.
 
     이전에는 여기서 raw 청크를 직접 조회했습니다. 그러면 대시보드 점수는
@@ -709,9 +711,10 @@ def _qdrant_search(collection: str, vec: list[float], top_k: int) -> list[dict]:
     """
     from qdrant_client import QdrantClient
 
-    from utils.retrieval import vector_search_pages
+    from utils.retrieval import hybrid_search_pages
 
-    return vector_search_pages(QdrantClient(url=QDRANT_URL), collection, vec, top_k)
+    # query_text 를 함께 넘겨 어휘 축(LEXICAL_ENABLED)이 켜지면 같이 동작하게 합니다.
+    return hybrid_search_pages(QdrantClient(url=QDRANT_URL), collection, vec, query_text, top_k)
 
 
 @app.post("/api/golden/run")
@@ -750,7 +753,7 @@ def golden_run(dept: str = "strategic"):
     for gid, query, expected, top_k in items:
         try:
             vec = _embed_query(query)
-            hits = _qdrant_search(collection, vec, top_k)
+            hits = _qdrant_search(collection, vec, top_k, query)
             result_titles = [h.get("title", "") for h in hits]
             result_scores = [round(h.get("score", 0.0), 4) for h in hits]
 

@@ -59,9 +59,9 @@ from utils.retrieval import (
     DECOMPOSE_MODEL_VERTEX as _DECOMPOSE_MODEL_VERTEX,
     DEFAULT_PAGE_LIMIT as _DEFAULT_PAGE_LIMIT,
     find_entities_in_query as _find_entities,
+    hybrid_search_pages as _search_pages,
     merge_semantic_results as _merge_semantic_results,
     search_queries as _search_queries,
-    vector_search_pages as _vector_search_pages,
 )
 
 # 검색·컨텍스트 구성
@@ -348,7 +348,7 @@ def semantic_search(embed_client, qdrant, query: str, limit: int = RETRIEVE_LIMI
 
     반환 항목의 키는 서비스와 동일하게 `source_url` / `content` 입니다.
     """
-    return _vector_search_pages(qdrant, COLLECTION_NAME, embed(embed_client, query), limit)
+    return _search_pages(qdrant, COLLECTION_NAME, embed(embed_client, query), query, limit)
 
 
 def graph_search(graph, entity: str) -> list:

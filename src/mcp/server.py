@@ -87,10 +87,10 @@ from utils.retrieval import (
     DEFAULT_PAGE_LIMIT as _DEFAULT_PAGE_LIMIT,
     fetch_pages_by_source_urls as _fetch_pages_by_source_urls,
     find_entities_in_query as _find_entities,
+    hybrid_search_pages as _search_pages,
     lookup_entity as _lookup_entity,
     merge_semantic_results as _merge_semantic_results,
     search_queries as _search_queries,
-    vector_search_pages as _vector_search_pages,
 )
 
 # 도구 응답 문자 예산. 분해된 질문은 (서브쿼리 수 * limit 페이지 * PAGE_MAX_CHARS)
@@ -269,7 +269,9 @@ def _run_sub_search(sub_query: str, limit: int) -> tuple[list, list, list]:
 
     def _do_vector() -> list:
         try:
-            return _vector_search_pages(_get_qdrant(), COLLECTION_NAME, _embed(sub_query), limit)
+            return _search_pages(
+                _get_qdrant(), COLLECTION_NAME, _embed(sub_query), sub_query, limit
+            )
         except Exception as e:
             # 삼키기만 하면 Qdrant 가 죽어도 "문서 없음"과 똑같이 보입니다.
             # 빈 결과는 유지하되(부분 응답이 낫습니다) 사유는 위로 올립니다.
@@ -424,7 +426,7 @@ def semantic_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     try:
         # 청크 오버샘플 + 앵커 윈도우를 포함한 공통 경로 사용
         # (hybrid_search 와 동일한 로직 — 이전에는 이 도구만 오버샘플이 빠져 있었음)
-        results = _vector_search_pages(_get_qdrant(), COLLECTION_NAME, _embed(query), limit)
+        results = _search_pages(_get_qdrant(), COLLECTION_NAME, _embed(query), query, limit)
         return results
     except Exception as e:
         _err = str(e)

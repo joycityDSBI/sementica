@@ -66,6 +66,26 @@ NEAR_DUP_PREFIX: int = int(os.environ.get("NEAR_DUP_PREFIX", "600"))
 # 실제 서비스 결과를 뜻합니다 (이전: 평가 10 / 서비스 12).
 DEFAULT_PAGE_LIMIT: int = int(os.environ.get("RETRIEVE_LIMIT", "10"))
 
+# ── 하이브리드 검색 (벡터 + 어휘) ────────────────────────────────────────────
+# **기본 꺼짐.** 켜기 전에 dev 골든셋으로 A/B 를 하세요 — 한 문항(Q37)을 위해
+# 검색 경로를 바꾸면 다른 문항을 잃을 수 있고, 그건 평가 총점에 묻힙니다.
+#
+# 근거(실측): Q37 은 벡터로 페이지 20위, BM25 로 1위. 벡터의 서브쿼리 4개 중
+# 3개는 청크 창(80)에도 들지 못했습니다. 의미 거리 자체가 멀어 오버샘플이나
+# limit 으로는 옮길 수 없었습니다.
+#
+# ※ BM25 단독이 dev 45문항 중 44개를 상위 10 안에 넣었지만, 이 수치를 근거로
+#   벡터를 줄이면 안 됩니다. 골든셋 문항은 문서에서 LLM 이 생성하므로 문서의
+#   어휘를 그대로 물려받습니다 — 어휘 검색에 유리하게 기울어진 측정입니다.
+#   실제 사용자는 문서와 다른 말로 묻습니다.
+LEXICAL_ENABLED: bool = os.environ.get("LEXICAL_ENABLED", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+# RRF 의 k — 원 논문 값. 작을수록 1위가 독식합니다.
+RRF_K: int = int(os.environ.get("RRF_K", "60"))
+
 # 쿼리 분해용 모델 — 평가와 서비스가 반드시 같아야 합니다. 분해는 검색의 첫
 # 단계라 여기서 갈리면 이후 모든 결과가 갈립니다 (이전: 서비스 Haiku / 평가
 # Sonnet). 서비스는 Anthropic API, 평가는 Vertex 라 모델 ID 표기만 다릅니다.
@@ -395,6 +415,143 @@ def vector_search_pages(
     full_pages = fetch_full_pages(qc, collection_name, top_pids, max_chars, anchors)
 
     result = [{**page, "score": page_scores.get(pid, 0.0)} for pid, page in full_pages.items()]
+    result.sort(key=lambda x: x["score"], reverse=True)
+    return result
+
+
+def rrf_fuse(rank_lists: list, k: int = RRF_K) -> dict:
+    """여러 순위 목록을 Reciprocal Rank Fusion 으로 합칩니다.
+
+    점수를 직접 더하지 않는 이유: 벡터 점수(코사인 0.58~0.71)와 BM25 점수
+    (0~26)는 **척도가 다릅니다.** 정규화해서 더하려면 분포를 가정해야 하고,
+    그 가정이 질의마다 달라집니다. RRF 는 점수를 버리고 **순위만** 씁니다 —
+    가정이 없고 튜닝할 것도 거의 없습니다.
+
+        score(d) = Σ 1 / (k + rank_i(d))
+
+    k 는 상위권의 영향력을 조절합니다. 60 은 원 논문의 값이고 널리 쓰입니다.
+    작게 하면 1위가 독식하고, 크게 하면 순위 차이가 희미해집니다.
+
+    Args:
+        rank_lists: [[key, ...], ...] — 각각 순위 오름차순
+    Returns:
+        {key: 합산 점수}
+
+    한쪽에서만 1위인 것보다, **양쪽이 함께 지목한 것**이 이깁니다.
+    아래에서 a 는 벡터 1위지만 어휘에는 없고, b 는 양쪽 모두 2위입니다:
+
+    >>> s = rrf_fuse([["a", "b"], ["c", "b"]])
+    >>> sorted(s, key=lambda x: -s[x])[0]
+    'b'
+
+    한쪽에만 있는 것도 후보로 남습니다 — 버리지 않습니다:
+
+    >>> sorted(s)
+    ['a', 'b', 'c']
+
+    목록이 하나뿐이면 그 순위가 그대로 유지됩니다 (어휘 축이 꺼진 경우):
+
+    >>> one = rrf_fuse([["a", "b", "c"]])
+    >>> sorted(one, key=lambda x: -one[x])
+    ['a', 'b', 'c']
+
+    빈 입력은 빈 결과입니다:
+
+    >>> rrf_fuse([])
+    {}
+    """
+    scores: dict = {}
+    for lst in rank_lists:
+        for rank, key in enumerate(lst, 1):
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+    return scores
+
+
+def hybrid_search_pages(
+    qc,
+    collection_name: str,
+    vector: list,
+    query_text: str,
+    limit: int,
+    max_chars: int = PAGE_MAX_CHARS,
+    oversample: int = CHUNK_OVERSAMPLE,
+) -> list:
+    """벡터 + 어휘(BM25) 검색을 RRF 로 합쳐 페이지를 반환합니다.
+
+    임베딩은 "비슷한 뜻"을, 어휘 검색은 "그 단어가 있는 곳"을 찾습니다.
+    둘은 서로 다른 것을 놓칩니다. 실측(Q37) — 질문 "워크북 붙여넣기 전 선행
+    확인 작업", 근거는 「수수료율BEP산출」(재무 문서) 안의 운영 세부사항:
+
+        벡터   페이지 20위. 서브쿼리 4개 중 3개는 청크 80위 창에도 못 듦.
+               경쟁이 전부 프로세스 문서라 문서 수준에서 질문에 더 가까웠음
+        BM25   페이지 **1위**. "워크북" 이 코퍼스에서 희귀해 바로 걸림
+
+    LEXICAL_ENABLED 가 꺼져 있으면 vector_search_pages 와 동일하게 동작합니다.
+
+    ※ 어휘 축을 넣어도 벡터를 대체하지는 않습니다. 골든셋 문항은 문서에서
+      생성되어 문서의 어휘를 물려받으므로 어휘 검색에 유리하게 기울어져
+      있습니다 — 그 수치를 근거로 벡터를 줄이면 실제 사용자 질문에서 잃습니다.
+    """
+    pool = max(limit * oversample, limit)
+    hits = qc.query_points(
+        collection_name=collection_name,
+        query=vector,
+        limit=pool,
+        with_payload=True,
+    ).points
+
+    # 청크 키로 합칩니다. 같은 청크를 두 축이 모두 찾으면 그만큼 강해집니다.
+    payload_of: dict = {}
+    vec_order: list = []
+    for h in hits:
+        p = h.payload or {}
+        pid = p.get("page_id", "")
+        if not pid:
+            continue
+        key = (pid, p.get("chunk_index", 0))
+        payload_of.setdefault(key, (p, round(h.score, 4)))
+        vec_order.append(key)
+
+    lex_order: list = []
+    if LEXICAL_ENABLED and query_text:
+        # 어휘 축은 **보조**입니다. 색인 생성이나 검색이 실패해도 벡터 검색은
+        # 그대로 동작해야 합니다 — 보조 기능이 본체를 무너뜨리면 안 됩니다.
+        try:
+            from utils.lexical import lexical_search
+
+            lex_hits = lexical_search(qc, collection_name, query_text, pool)
+        except Exception as exc:
+            print(f"  ⚠️  어휘 검색 실패 — 벡터 검색만 사용합니다: {type(exc).__name__}: {exc}")
+            lex_hits = []
+        for pid, url, ci, _s in lex_hits:
+            if not pid:
+                continue
+            key = (pid, ci)
+            payload_of.setdefault(key, ({"page_id": pid, "source_url": url}, 0.0))
+            lex_order.append(key)
+
+    fused = rrf_fuse([o for o in (vec_order, lex_order) if o])
+    if not fused:
+        return []
+
+    # 페이지 단위로 최고점 집계 — 청크가 아니라 페이지를 돌려주기 때문입니다.
+    page_scores: dict = {}
+    page_hits: dict = {}
+    for (pid, ci), s in fused.items():
+        page_hits.setdefault(pid, []).append((s, ci))
+        if pid not in page_scores or s > page_scores[pid]:
+            page_scores[pid] = s
+
+    anchors = {
+        pid: [ci for _s, ci in sorted(hs, key=lambda x: x[0], reverse=True)]
+        for pid, hs in page_hits.items()
+    }
+    top_pids = sorted(page_scores, key=lambda k: page_scores[k], reverse=True)[:limit]
+    full_pages = fetch_full_pages(qc, collection_name, top_pids, max_chars, anchors)
+
+    result = [
+        {**page, "score": round(page_scores.get(pid, 0.0), 6)} for pid, page in full_pages.items()
+    ]
     result.sort(key=lambda x: x["score"], reverse=True)
     return result
 
