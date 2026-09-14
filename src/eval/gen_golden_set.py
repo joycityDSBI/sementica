@@ -511,16 +511,101 @@ def _warn_once(kind: str, exc: Exception) -> None:
         print(f"\n  ⚠️  {kind} LLM 호출 실패 — 이후 동일 오류는 생략합니다:\n     {exc}\n")
 
 
-def verify_qa(question: str, answer: str, source_text: str) -> tuple[bool, str, str]:
-    """★ 채택 판정 — 근거와 명확성을 한 번의 LLM 호출로 확인합니다.
+# 지시어 + 대상 명사 — "이 제보 문서", "제시된 테이블" 처럼 질문 밖의 문맥을
+# 가리키는 표현입니다. 검색 시스템은 질문만 받으므로 이런 문항은 답할 수 없습니다.
+_DEICTIC = (
+    "이",
+    "그",
+    "해당",
+    "위",
+    "아래",
+    "앞",
+    "제시된",
+    "위의",
+    "앞선",
+    "본",
+    "동",
+)
+_TARGET_NOUN = (
+    "문서",
+    "테이블",
+    "쿼리",
+    "단계",
+    "프로세스",
+    "제보",
+    "표",
+    "그림",
+    "항목",
+    "내용",
+    "자료",
+    "리스트",
+    "목록",
+    "결과",
+    "파일",
+    "워크플로우",
+    "이슈",
+    "사례",
+    "케이스",
+)
+_CONTEXT_DEPENDENT = re.compile(
+    r"(?:^|[\s,.(])(" + "|".join(_DEICTIC) + r")\s*(" + "|".join(_TARGET_NOUN) + r")"
+)
 
-    두 관문을 나눠 호출하면 같은 원문을 두 번 전송하게 되고, 검증이 전체
-    호출의 대부분이라 생성 시간이 배로 늘어납니다.
+
+def is_context_dependent(question: str) -> bool:
+    """질문이 질문 밖의 문맥을 가리키는가 — LLM 없이 결정적으로 판정합니다.
+
+    **LLM 판정자에게 맡길 수 없는 이유**: 판정자는 원문을 보면서 판단합니다.
+    원문을 아는 쪽에서는 "이 제보 문서" 가 전혀 모호하지 않으므로 통과시킵니다.
+    `verify_by_search` 를 걷어냈던 것과 같은 함정입니다 — 판정자가 평가 대상보다
+    많이 알면 그 관문은 작동하지 않습니다.
+
+    실제로 통과해서 평가를 깎은 문항들:
+
+    >>> is_context_dependent("이 제보 문서에서 AI가 판단을 확신하지 못한 이유는 무엇인가요?")
+    True
+    >>> is_context_dependent("이 제보의 AI 판정 카테고리·심각도·신뢰도는 각각 무엇인가요?")
+    True
+    >>> is_context_dependent("제시된 테이블에서 세 번째 열 기준 가장 낮은 값의 행 번호는?")
+    True
+
+    대상을 제대로 특정한 질문은 통과합니다:
+
+    >>> is_context_dependent("점검 진행 프로세스에서 서버 오픈을 담당하는 팀은 어디인가요?")
+    False
+    >>> is_context_dependent("월별 MAU 집계 쿼리의 필터링 기준 범위는 어떻게 되나요?")
+    False
+    >>> is_context_dependent("리포트 자동화 구조에서 DAG 파일에 로직을 두지 않는 이유는?")
+    False
+
+    지시어만 있거나 대상 명사만 있으면 걸리지 않습니다 — 둘이 붙어야 합니다:
+
+    >>> is_context_dependent("이지인이 요청한 데이터는 무엇인가요?")
+    False
+    >>> is_context_dependent("문서 보관 정책은 무엇인가요?")
+    False
+    """
+    return bool(_CONTEXT_DEPENDENT.search(question or ""))
+
+
+def verify_qa(question: str, answer: str, source_text: str) -> tuple[bool, str, str]:
+    """★ 채택 판정 — 근거와 명확성을 확인합니다.
+
+    문맥 의존 판정은 **LLM 앞에서** 결정적으로 먼저 거릅니다
+    (is_context_dependent 참고 — 판정자는 원문을 보고 있어 이 결함을 못 봅니다).
+    걸러내면 LLM 호출도 한 번 아낍니다.
+
+    근거·명확성은 한 번의 LLM 호출로 확인합니다. 두 관문을 나눠 호출하면 같은
+    원문을 두 번 전송하게 되고, 검증이 전체 호출의 대부분이라 생성 시간이
+    배로 늘어납니다.
 
     Returns:
         (채택 여부, 탈락 사유 분류, 상세 사유)
-        분류는 "근거 없음" | "모호함" | "" (채택).
+        분류는 "문맥 의존" | "근거 없음" | "모호함" | "" (채택).
     """
+    if is_context_dependent(question):
+        return False, "문맥 의존", "질문이 질문 밖의 대상을 가리킴"
+
     try:
         d = _judge_json(
             _VERIFY_PROMPT.format(
