@@ -334,12 +334,43 @@ done
 log "━━━━ Semantica 백업 시작 [$TIMESTAMP] ━━━━"
 log "백업 위치: $BACKUP_DIR"
 
-$DO_QDRANT   && backup_qdrant   || true
-$DO_FALKORDB && backup_falkordb || true
-$DO_POSTGRES && backup_postgres || true
+START_TS=$(date +%s)
+FAILED=""
 
-upload_gcs
+# 예전에는 각 단계 뒤에 `|| true` 만 붙어 있어 **실패를 삼키고 항상 "백업 완료"**
+# 라고 보고했습니다. 있다고 믿는 백업이 없는 것이 제일 나쁩니다.
+# 이제 실패한 단계를 모아 메일로 알리고 종료 코드에도 반영합니다.
+run_step() {
+    local name="$1" fn="$2"
+    if "$fn"; then
+        log "✅ ${name} 완료"
+    else
+        log "❌ ${name} 실패"
+        FAILED="${FAILED}${name} 실패"$'
+'
+    fi
+}
+
+$DO_QDRANT   && run_step "Qdrant"     backup_qdrant
+$DO_FALKORDB && run_step "FalkorDB"   backup_falkordb
+$DO_POSTGRES && run_step "PostgreSQL" backup_postgres
+
+run_step "GCS 업로드" upload_gcs
 cleanup_old_backups
 save_summary
 
-log "━━━━ 백업 완료 ━━━━"
+DURATION=$(( $(date +%s) - START_TS ))
+TOTAL_SIZE=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1 || echo "?")
+
+if [[ -n "$FAILED" ]]; then
+    STATUS="partial"
+    log "━━━━ 백업 완료 (실패 있음) ━━━━"
+else
+    STATUS="success"
+    log "━━━━ 백업 완료 ━━━━"
+fi
+
+# 결과 메일 — 성공해도 보냅니다. 메일이 안 오면 cron 자체가 안 돈 것입니다.
+"${ROOT_DIR}/.venv/bin/python" "${ROOT_DIR}/src/ops/notify.py"     --job "백업" --status "$STATUS" --duration "$DURATION"     --stats "크기=${TOTAL_SIZE},위치=${BACKUP_DIR},보존=${RETENTION_DAYS}일"     --errors "$FAILED" 2>/dev/null || true
+
+[[ -z "$FAILED" ]]

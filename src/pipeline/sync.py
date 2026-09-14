@@ -93,6 +93,14 @@ except Exception:
     def log_sync_result(*a, **kw):
         pass
 
+
+try:
+    from notify import notify_job as _notify_job
+except Exception:
+
+    def _notify_job(*a, **kw):
+        return False  # 알림 모듈이 없어도 동기화는 돌아야 합니다
+
     def _upsert_notion_page(*a, **kw):
         pass
 
@@ -1432,6 +1440,24 @@ def main():
         duration_sec=duration_sec,
         status=db_status,
         error_detail=error_sample,
+    )
+
+    # 결과 메일 — 매일 cron 으로 도는 작업이라 이게 유일한 알림 경로입니다.
+    # 성공해도 보냅니다: 메일이 안 오면 cron 자체가 안 돈 것이므로.
+    _notify_job(
+        job="동기화",
+        dept=args.dept,
+        status=db_status,
+        stats={
+            "변경 감지": len(modified_pages),
+            "처리": len(success),
+            "건너뜀": len(skipped),
+            "오류": len(errors),
+            "새 청크": total_v,
+            "새 트리플": total_e,
+        },
+        errors=[f"{e.get('title', e.get('page_id', '?'))}: {e.get('error', '')}" for e in errors],
+        duration_sec=duration_sec,
     )
 
     print(f"\n  {'✅ 동기화 완료' if not errors else f'⚠️  {len(errors)}개 오류 발생'}")

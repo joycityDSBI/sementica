@@ -48,6 +48,14 @@ except Exception:
         pass
 
 
+try:
+    from notify import notify_job as _notify_job
+except Exception:
+
+    def _notify_job(*a, **kw):
+        return False  # 알림 모듈이 없어도 파이프라인은 돌아야 합니다
+
+
 from semantica_helper import (
     _warn_if_output_truncated,
     batch_texts,
@@ -1182,6 +1190,24 @@ def main():
         llm_temp_channel=_channel,
         status=("dry_run" if args.dry_run else ("partial" if _errors else "success")),
         error_detail=(_errors[0].get("error") if _errors else None),
+    )
+    # 결과 메일 — 성공해도 보냅니다. 실패에만 보내면 "메일이 안 왔다" 가
+    # "잘 돌았다" 와 "아예 안 돌았다" 를 모두 뜻하게 되어 구분할 수 없습니다.
+    _notify_job(
+        job="인제스트",
+        dept=args.dept or "legacy",
+        status=("dry_run" if args.dry_run else ("partial" if _errors else "success")),
+        stats={
+            "대상 파일": len(md_files),
+            "저장 페이지": len(stored),
+            "건너뜀": len(skipped),
+            "오류": len(_errors),
+            "청크": total_chunks,
+            "트리플": total_tri,
+            "이벤트": total_ev,
+        },
+        errors=[f"{e.get('file', '?')}: {e.get('error', '')}" for e in _errors],
+        duration_sec=elapsed,
     )
     print(f"\n  결과 저장: {log_path}")
     print(f"\n  {'✅ 인제스천 완료' if stored else '❌ 저장된 페이지 없음'}")
