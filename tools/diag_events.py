@@ -38,6 +38,79 @@ FALKORDB_PORT = int(os.environ.get("FALKORDB_PORT", "6379"))
 POSTGRES_URL = os.environ.get("POSTGRES_URL", "")
 
 
+def check_ledger(q, dept: str, n_ev: int) -> None:
+    """장부(PostgreSQL)와 그래프를 대조합니다.
+
+    그래프만 보면 "원래 이만큼이었다" 와 "만들어졌다가 잃었다" 를 구분할 수
+    없습니다. notion_pages 는 인제스트가 **만들었다고 보고한** 수치라, 그래프와
+    어긋나면 저장 단계에서 잃은 것입니다.
+    """
+    print("\n■ ⑥ 장부(PostgreSQL) 대조")
+    if not POSTGRES_URL:
+        print("    (POSTGRES_URL 없음)")
+        return
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(POSTGRES_URL)
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(SUM(event_count),0), COUNT(*) FILTER (WHERE event_count > 0) "
+                "FROM notion_pages WHERE dept = %s",
+                (dept,),
+            )
+            total_ev, pages = cur.fetchone()
+            print(f"    notion_pages 기준: 이벤트 {total_ev}개 / 이벤트를 만든 페이지 {pages}개")
+            if total_ev and not n_ev:
+                print("    ❌ 장부에는 있는데 그래프에 없습니다 — 인제스트 후 그래프가 지워졌거나,")
+                print("       다른 그래프에 기록됐을 수 있습니다 (--dept / falkordb_graph 확인)")
+            elif n_ev and total_ev and n_ev < total_ev:
+                print(f"    ⚠️  그래프 {n_ev} vs 장부 {total_ev} — {total_ev - n_ev}개가 없습니다")
+                if n_ev == pages:
+                    print("       그래프 이벤트 수가 **페이지 수와 정확히 같습니다**.")
+                    print("       event_id 가 source_url 로만 정해져서 한 페이지의 이벤트가")
+                    print("       모두 같은 ID 로 MERGE 되어 서로를 덮어쓴 결과입니다.")
+
+            # 한 페이지에서 이벤트가 여러 개 나왔는데 그래프에는 몇 개 남았는지
+            cur.execute(
+                "SELECT notion_url, event_count FROM notion_pages "
+                "WHERE dept = %s AND event_count > 1 ORDER BY event_count DESC LIMIT 5",
+                (dept,),
+            )
+            multi = cur.fetchall()
+            if multi:
+                print()
+                print(f"    이벤트를 2개 이상 만든 페이지 (상위 {len(multi)}개):")
+                for url, cnt in multi:
+                    got = q(
+                        "MATCH (e:Event) WHERE e.source_url = $u RETURN count(e)",
+                        {"u": url or ""},
+                    )
+                    n = got[0][0] if got else 0
+                    print(
+                        f"      {'  ' if n >= cnt else '❌'} 장부 {cnt}개 → 그래프 {n}개  "
+                        f"{(url or '')[-44:]}"
+                    )
+
+            cur.execute(
+                "SELECT to_char(ts,'MM-DD HH24:MI'), mode, pages_stored, events, "
+                "triplets, status FROM ingest_log WHERE dept = %s "
+                "ORDER BY ts DESC LIMIT 5",
+                (dept,),
+            )
+            rows = cur.fetchall()
+            if rows:
+                print("\n    최근 인제스트:")
+                for r in rows:
+                    print(
+                        f"      {r[0]} {r[1]!s:8} 페이지 {r[2]} / 이벤트 {r[3]} / "
+                        f"트리플 {r[4]} / {r[5]}"
+                    )
+        conn.close()
+    except Exception as exc:
+        print(f"    ⚠️  조회 실패: {type(exc).__name__}: {exc}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="이벤트 노드 실태 점검")
     ap.add_argument("--dept", default="strategic")
@@ -158,46 +231,7 @@ def main() -> int:
             print(f"      {row[1]} | {row[2][:40]:42} | scope={row[3]}({row[4]})")
             print(f"        {row[5][:90]}")
 
-    # ── ⑥ 장부 대조 ─────────────────────────────────────────────────────
-    print("\n■ ⑥ 장부(PostgreSQL) 대조")
-    if not POSTGRES_URL:
-        print("    (POSTGRES_URL 없음)")
-        return 0
-    try:
-        import psycopg2
-
-        conn = psycopg2.connect(POSTGRES_URL)
-        with conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT COALESCE(SUM(event_count),0), COUNT(*) FILTER (WHERE event_count > 0) "
-                "FROM notion_pages WHERE dept = %s",
-                (args.dept,),
-            )
-            total_ev, pages = cur.fetchone()
-            print(f"    notion_pages 기준: 이벤트 {total_ev}개 / 페이지 {pages}개")
-            if total_ev and not n_ev:
-                print("    ❌ 장부에는 있는데 그래프에 없습니다 — 인제스트 후 그래프가 지워졌거나,")
-                print("       다른 그래프에 기록됐을 수 있습니다 (--dept / falkordb_graph 확인)")
-            elif n_ev and total_ev and abs(n_ev - total_ev) > max(5, total_ev * 0.1):
-                print(f"    ⚠️  그래프 {n_ev} vs 장부 {total_ev} — 차이가 큽니다")
-
-            cur.execute(
-                "SELECT to_char(ts,'MM-DD HH24:MI'), mode, pages_processed, events_created, "
-                "triplets_created, status FROM ingest_log WHERE dept = %s "
-                "ORDER BY ts DESC LIMIT 5",
-                (args.dept,),
-            )
-            rows = cur.fetchall()
-            if rows:
-                print("\n    최근 인제스트:")
-                for r in rows:
-                    print(
-                        f"      {r[0]} {r[1]:8} 페이지 {r[2]} / 이벤트 {r[3]} / "
-                        f"트리플 {r[4]} / {r[5]}"
-                    )
-        conn.close()
-    except Exception as exc:
-        print(f"    ⚠️  조회 실패: {type(exc).__name__}: {exc}")
+    check_ledger(q, args.dept, n_ev)
     return 0
 
 
