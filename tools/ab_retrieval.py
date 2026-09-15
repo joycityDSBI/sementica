@@ -31,6 +31,18 @@
    씁니다. 여기서는 문서 채널만 보므로, 타임라인이 긴 문항에서는 실제보다
    많이 들어가는 것으로 나옵니다. 설정 간 *비교*에는 영향이 없습니다.
 
+⚠️ **"문서포함률" 과 "근거생존률" 은 다릅니다.**
+   문서가 컨텍스트에 들어갔다고 답이 살아 있는 것은 아닙니다. 문서당 상한
+   (doc_cap)으로 자르면 문서는 그대로 "포함" 으로 세어지지만 정작 답이 있는
+   부분은 잘려나갈 수 있습니다. 이 구분이 없으면 **상한을 조일수록 지표가
+   좋아 보입니다** — 실제로는 내용을 버리면서요.
+
+   근거생존률은 정답에서 뽑은 식별자(테이블 경로 등)가 전달된 본문에 실제로
+   남아 있는지로 판정합니다. 문장형 정답은 원문과 글자가 달라 판정할 수 없어
+   분모에서 제외합니다 (_answer_key 참고).
+
+   **두 지표가 같이 올라야 진짜 개선입니다.**
+
 ⚠️ **관계 카테고리는 이 지표로 판단하지 마세요.**
    관계 문항의 근거는 그래프 트리플이고 source_url 은 벡터 문서를 가리킵니다.
    실제로 관계 10문항 중 8건이 벡터 recall 실패로 잡히지만 평가에서는 모두
@@ -46,6 +58,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -66,6 +79,38 @@ LOCATION = os.environ.get("VERTEX_AI_LOCATION", "us-east5")
 ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 EMBED_MODEL = "text-multilingual-embedding-002"
+
+
+def _norm_txt(s: str) -> str:
+    """공백·대소문자를 지운 비교용 형태. 줄바꿈·들여쓰기 차이를 넘습니다."""
+    return re.sub(r"\s+", "", (s or "").lower())
+
+
+def _answer_key(q: dict) -> str:
+    """정답이 컨텍스트에 남아 있는지 볼 때 쓸 **검색 가능한 조각**.
+
+    정답 전체를 찾으면 안 됩니다 — 골든셋 정답은 문장으로 쓰여 있어 원문과
+    글자가 일치하지 않는 경우가 많습니다. 대신 정답 안에서 **원문에 그대로
+    있을 법한 가장 긴 토큰**(테이블 경로·식별자·숫자)을 고릅니다.
+
+    >>> _answer_key({"answer": "f_user_map"})
+    'f_user_map'
+    >>> _answer_key({"answer": "data-science-division-216308.MetaData.roas_kpi"})
+    'data-science-division-216308.metadata.roas_kpi'
+
+    그런 토큰이 없으면 빈 문자열 — 이 문항은 생존률 집계에서 빠집니다.
+    억지로 판정하느니 세지 않는 편이 낫습니다:
+
+    >>> _answer_key({"answer": "운영팀이 담당합니다"})
+    ''
+    """
+    ans = (q.get("answer") or "").strip()
+    # 식별자처럼 생긴 토큰: 영숫자 + . _ - 가 섞이고 8자 이상
+    cands = re.findall(r"[A-Za-z0-9_.\-]{8,}", ans)
+    if not cands:
+        return ""
+    return _norm_txt(max(cands, key=len))
+
 
 # 비교할 설정 — (라벨, oversample, coverage_boost, dedupe_threshold, doc_cap)
 # dedupe 1.0 = 비활성화, doc_cap 0 = 문서당 상한 없음(현행)
@@ -166,7 +211,9 @@ def main() -> int:
     for i, q in enumerate(questions, 1):
         subs, _ = search_queries(q["question"], _complete)
         vecs = [_embed_text(sq) for sq in subs]
-        cache.append({"q": q, "subs": subs, "vecs": vecs, "by_over": {}})
+        cache.append(
+            {"q": q, "subs": subs, "vecs": vecs, "by_over": {}, "gold_key": _answer_key(q)}
+        )
         print(f"    [{i}/{len(questions)}] {q['id']}", end="\r", flush=True)
     print(" " * 40, end="\r")
 
@@ -188,19 +235,24 @@ def main() -> int:
     n_vec = sum(1 for it in cache if it["q"].get("category") in VECTOR_CATS)
     n_rel = len(cache) - n_vec
     print(f"\n  설정별 근거 포함률 — 벡터 의존 {n_vec}문항 / 관계 {n_rel}문항\n")
-    print(f"  {'설정':<26} {'벡터recall':>10} {'전체':>7} {'평균순위':>12} {'평균투입':>8}")
+    print("  설정                       문서포함률   근거생존률     전체     평균투입")
     print("  " + "-" * 68)
+
+    # 정답에서 식별자를 뽑을 수 있는 문항 수 — 생존률의 분모
+    n_keyed = sum(1 for it in cache if it["gold_key"])
 
     results: list = []
     for label, over, boost, dedup, doc_cap in CONFIGS:
         hits = 0
         vec_hits = 0
+        ans_hits = 0
         ranks: list = []
         used_counts: list = []
         misses: list = []
 
         for item in cache:
             gold = item["q"]["source_url"]
+            gold_key = item["gold_key"]
             is_vec = item["q"].get("category") in VECTOR_CATS
             per_sub = item["by_over"][over]
 
@@ -210,29 +262,38 @@ def main() -> int:
 
             # 예산 채우기 — evaluate.py 의 문서 채널만 재현 (docstring 참고)
             #
-            # doc_cap 이 있으면 문서 하나가 가져가는 양을 그만큼으로 제한합니다.
-            # ⚠️ 여기서는 **길이만** 줄이고 어느 부분이 잘리는지는 보지 않습니다.
-            #   실제 파이프라인은 앵커 청크 중심으로 창을 잡으므로, 자른 뒤에도
-            #   근거가 남을 확률이 이 측정보다 높습니다. 즉 doc_cap 의 손해는
-            #   여기서 **과대평가**됩니다 — 이득이 보이면 실제로는 더 큽니다.
+            # **두 가지를 따로 셉니다.** 문서가 들어갔다고 근거가 살아 있는 것은
+            # 아니기 때문입니다. doc_cap 으로 자르면 문서는 그대로 "포함" 으로
+            # 세어지지만 정작 답이 있는 부분은 잘려나갈 수 있습니다.
+            #
+            #   found      근거 문서가 컨텍스트에 들어갔는가   (문서 포함률)
+            #   answered   그 안에 정답 문자열이 남아 있는가   (근거 생존률)
+            #
+            # 이 구분이 없으면 상한을 조일수록 "더 많은 문서가 들어갔다" 는
+            # 이유로 지표가 좋아 보입니다 — 실제로는 내용을 버리면서요.
             total, used = 0, 0
             found = False
+            answered = False
             for j, d in enumerate(merged[:MAX_CONTEXT_DOCS]):
-                body = len(d.get("content", ""))
+                content = d.get("content", "")
                 if doc_cap:
-                    body = min(body, doc_cap)
-                block = body + len(d.get("title", "")) + 20
+                    content = content[:doc_cap]
+                block = len(content) + len(d.get("title", "")) + 20
                 if j and total + block > budget:
                     break
                 total += block
                 used += 1
                 if d.get("source_url") == gold:
                     found = True
+                if gold_key and gold_key in _norm_txt(content):
+                    answered = True
             used_counts.append(used)
 
             rank = next((k + 1 for k, d in enumerate(merged) if d.get("source_url") == gold), None)
             if rank:
                 ranks.append(rank)
+            if answered:
+                ans_hits += 1
             if found:
                 hits += 1
                 if is_vec:
@@ -243,13 +304,12 @@ def main() -> int:
 
         recall = hits / len(cache) if cache else 0.0
         vec_recall = vec_hits / n_vec if n_vec else 0.0
-        avg_rank = sum(ranks) / len(ranks) if ranks else 0
+        # 생존률은 정답에서 식별자를 뽑을 수 있었던 문항만 분모로 씁니다
+        # (_answer_key 참고 — 문장형 정답은 원문과 글자가 달라 판정 불가).
+        ans_rate = ans_hits / n_keyed if n_keyed else 0.0
         avg_used = sum(used_counts) / len(used_counts) if used_counts else 0
         results.append((label, vec_recall, misses))
-        # 평균순위 옆의 (n) 은 근거를 찾은 문항 수입니다. n 이 작을수록 평균이
-        # 좋아 보이므로 (못 찾은 문항이 평균에서 빠지므로) 반드시 같이 봐야 합니다.
-        rank_cell = f"{avg_rank:.1f} ({len(ranks)})"
-        print(f"  {label:<26} {vec_recall:>9.1%} {recall:>7.1%} {rank_cell:>12} {avg_used:>8.1f}")
+        print(f"  {label:<24} {vec_recall:>9.1%} {ans_rate:>10.1%} {recall:>7.1%} {avg_used:>8.1f}")
 
     # ── 3. 기준 대비 차이 ─────────────────────────────────────────────────
     base_label, base_recall, base_misses = results[0]
