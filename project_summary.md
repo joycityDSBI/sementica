@@ -1424,9 +1424,21 @@ docker exec -i <pg> psql -U sementica -d sementica_ops -c '\d notion_pages'
 > `[]`(근거 없음, 확정) 과 파싱 실패(모름) 를 구분해야 합니다. 예외를 삼키고
 > `[]` 를 돌려주면 "트리플이 없는 문서" 로 굳어집니다.
 
-**경로 주의.** `deploy/*.service` 와 `deploy/logrotate-sementica` 는
-`/home/seongin` 이 하드코딩돼 있는데 라이브 서버 계정은 `devadmin` 입니다.
-설치 전에 경로를 고쳐야 합니다.
+**systemd 유닛은 `deploy/install.sh` 로 설치합니다.** 유닛 파일에
+`User=seongin` / `/home/seongin/sementica` 가 박혀 있어 그대로 복사하면 다른
+계정의 서버에서 기동에 실패합니다. 스크립트가 레포 위치와 **레포 디렉터리의
+소유자**를 읽어 채웁니다 (`sudo` 로 돌므로 `whoami` 는 쓸 수 없습니다).
+
+```bash
+bash deploy/install.sh                        # 현재 설치 상태
+bash deploy/install.sh --dry-run ops          # 설치될 내용 (root 불필요)
+sudo bash deploy/install.sh ops rest logrotate
+sudo systemctl enable --now sementica-ops
+```
+
+> 이전 직후 `sementica-ops.service` 가 **설치조차 되지 않아** 8080 이 아무것도
+> 받지 않고 있었습니다(2026-09-15 확인). `ss -tlnp` 에 포트가 없으면 바인딩
+> 문제가 아니라 서비스가 없는 것입니다.
 
 ---
 
@@ -1563,6 +1575,7 @@ Connection 예시는 포트가 22 로 적혀 있으나 실제는 **50022** 입�
 | 88 | A/B 지표 정정 — 근거생존률 | ✅ | 기존 지표는 `source_url` 일치만 봐서 **잘림을 측정하지 않았음**. 문서 상한을 조일수록 무조건 좋아지는 착시. 지표를 문서포함률·근거생존률로 분리, 2026-09-15 |
 | 89 | 문서당 길이 상한 (`doc_cap`) | ⛔ | 포함률 100% 인 설정이 생존률은 기준보다 낮음(64.3% vs 71.4%) — **적용하지 않음**, 2026-09-15 |
 | 90 | `COVERAGE_BOOST=0` 검토 | 🔜 | 두 지표가 함께 상승한 유일한 설정(94.1→97.1 / 71.4→78.6)이나 **생존률 분모 14문항에서 1문항 차이**. 판정 규칙을 넓혀 분모를 키운 뒤 재측정 |
+| 92 | systemd 유닛 경로 하드코딩 | ✅ | `deploy/install.sh` — 레포 위치·소유 계정을 설치 시점에 치환. 이전 후 `sementica-ops` 가 설치조차 안 돼 8080 이 죽어 있던 것이 계기, 2026-09-15 |
 | 91 | Q69 랭킹 개선 | 🔜 | 근거가 페이지 순위 14위. 예산·상한으로는 대가가 더 큼 — 랭킹 자체를 다뤄야 함 |
 
 > **Cortex Analyst YAML 모델**은 대상에서 제외되었습니다 — Cortex에 Analytics Agent를 직접 생성하고
@@ -1615,7 +1628,8 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | FalkorDB `delete_graph()` 미지원 | `select_graph().delete()` 로 대체, `--reset` 묵음 실패 가능 |
 | 대시보드 벡터 청크 수치 | PostgreSQL SUM이므로 Qdrant 실제 벡터 수와 다를 수 있음 |
 | 스크립트 실행 권한 | 파일시스템 noexec 마운트 시 `bash script.sh` 로 우회 |
-| FalkorDB 시각화 | 공식 UI 없음, `redis-cli` 또는 커스텀 웹앱으로 조회 |
+| FalkorDB 웹 UI 는 **3000** | `6379` 는 Redis 프로토콜 포트라 브라우저로 열면 연결이 끊깁니다. UI 는 `falkordb-browser` 컨테이너(3000) |
+| **Ops 대시보드에 인증 없음** | `/api/batch/run` 의 `confirm` 필드는 오조작 방지지 인증이 아닙니다. 유닛이 `127.0.0.1` 에만 바인딩하는 이유이며, 접속은 SSH 터널로 하세요 |
 | Snowflake 계정 | `SEONGIN-us-central1.gcp` |
 | **트리플 추출 재현성 45.9%** | 온도 0 을 적용해도 재인제스트마다 엔티티 이름이 달라집니다. 관계 질문의 답이 회차마다 바뀔 수 있습니다 (4-2 ③ 참고) |
 | **anthropic SDK 버전 의존** | 1.x 는 `temperature` 명명 인자가 없습니다. `utils/llm.create_message` 가 흡수하지만, SDK 를 바꿀 때는 `tools/probe_llm.py` 로 먼저 확인하세요 |
@@ -1625,7 +1639,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | 골든셋 재생성 시 총점 비교 불가 | 문항이 바뀌면 난이도 구성이 바뀝니다. `eval_run_log.golden_hash` 가 같은 회차끼리만 비교하세요 |
 | **A/B 근거생존률 분모 14문항** | 정답에서 식별자를 뽑을 수 있는 문항만 셉니다. `"운영팀이 담당합니다"` 같은 문장형 정답은 원문과 글자가 달라 판정 불가라 제외했습니다. **1문항이 7.1%p** 이므로 한 칸 차이로 파라미터를 바꾸지 마세요 |
 | 코퍼스가 Notion 을 따라 변합니다 | 2026-09-15 에 46페이지가 원본에서 사라졌습니다. 골든셋의 근거 문서가 없어지면 점수가 떨어지는데, 이는 시스템 회귀가 아닙니다. 점수를 읽기 전에 `tools/stats.py` 로 페이지 수를 먼저 보세요 |
-| 배포 파일의 경로 하드코딩 | `deploy/*.service` · `deploy/logrotate-sementica` 가 `/home/seongin` 을 가정합니다. 라이브 서버 계정은 `devadmin` 이라 설치 전 수정이 필요합니다 |
+| ~~배포 파일의 경로 하드코딩~~ | 해소 — `deploy/install.sh` 가 레포 위치와 소유 계정을 읽어 치환합니다 (2026-09-15) |
 
 ---
 
@@ -1644,6 +1658,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | 8766 | TCP | REST API 서버 (`rest_api.py`) | ngrok(내부), 개발자 IP |
 | 6333 | TCP | Qdrant 벡터 DB (HTTP REST + 대시보드) | 개발자 IP |
 | 6379 | TCP | FalkorDB (Redis 프로토콜) | 개발자 IP |
+| 3000 | TCP | FalkorDB Browser (그래프 웹 UI) | 개발자 IP |
 | 4040 | TCP | ngrok 로컬 관리 UI | localhost only |
 
 > `6333` (Qdrant 대시보드: `http://<vm-ip>:6333/dashboard`) 및  
@@ -1669,6 +1684,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-15 | **배포 유닛 설치 스크립트** (`deploy/install.sh`) — 이전 후 8080 이 죽어 있어 확인해보니 `sementica-ops.service` 가 **설치조차 안 돼** 있었습니다. 유닛 파일이 `User=seongin`·`/home/seongin` 을 박아두고 있어 `devadmin` 서버에서는 그대로 쓸 수 없었던 것. 손으로 고치면 다음 서버에서 반복되므로 설치 시점 치환으로 바꿨습니다. 계정은 `whoami`(=root) 가 아니라 **레포 소유자**를 읽습니다. 함께 정리: `6379` 는 대시보드가 아니라 Redis 포트(UI 는 3000), Ops 대시보드는 **인증이 없어** 루프백 바인딩이 필수 |
 | 2026-09-15 | **A/B 도구가 잘못된 것을 재고 있었습니다** — 근거 판정이 `source_url` 일치뿐이라 **얼마나 잘려서 들어왔는지를 보지 않았습니다.** 문서당 상한을 조일수록 더 많은 문서가 예산에 들어와 지표가 무조건 좋아졌고, 상한 4000 이 "recall 100%" 로 보였습니다. **문서포함률 / 근거생존률**로 분리하니 그 설정의 생존률은 기준보다 **낮았습니다**(64.3% vs 71.4%) — 상한은 폐기. 유일하게 둘 다 올린 것은 `COVERAGE_BOOST=0` 이나, 분모 14문항에서 **1문항 차이**라 아직 채택하지 않았습니다 |
 | 2026-09-15 | **골든셋 v3 재생성** — Notion 에서 **46페이지가 사라져** v2 의 근거 문서가 없어짐. 페이지당 청크·트리플은 그대로(5.0 / 7.0)라 추출 실패가 아니라 **구성 변화**. dev 기준선 **0.833**, v2 의 0.967 과 비교 불가 |
 | 2026-09-15 | **서버 이전 (개발 → 라이브)** — 재인제스트 방식. **구 서버에서는 증상이 없던** 결함 5종이 한꺼번에 드러났습니다: 스키마 파일에 `route`·`content_hash` 누락(운영 DB 에만 `ALTER` 를 치고 파일에 반영 안 함), Docker 단일파일 바인드 마운트가 `git pull` 후에도 옛 inode 를 봄, `semantica` 가 쓰지도 않는 NER 때문에 `gensim` 을 끌어와 설치 실패, 키 파일이 1바이트로 깨져 있음 |
