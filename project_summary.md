@@ -1611,6 +1611,8 @@ Connection 예시는 포트가 22 로 적혀 있으나 실제는 **50022** 입�
 | 89 | 문서당 길이 상한 (`doc_cap`) | ⛔ | 포함률 100% 인 설정이 생존률은 기준보다 낮음(64.3% vs 71.4%) — **적용하지 않음**, 2026-09-15 |
 | 90 | `COVERAGE_BOOST=0` 검토 | 🔜 | 두 지표가 함께 상승한 유일한 설정(94.1→97.1 / 71.4→78.6)이나 **생존률 분모 14문항에서 1문항 차이**. 판정 규칙을 넓혀 분모를 키운 뒤 재측정 |
 | 93 | 웹 의존성 미선언 | ✅ | `fastapi`·`pydantic`·`starlette`·`uvicorn` 이 `requirements.txt` 에 **처음부터 없었습니다.** 구 서버엔 손으로 깔려 있어 안 드러났고, 새 `.venv` 에서 Ops 대시보드가 재시작 루프에 빠짐. `tools/check_deps.py` 로 검출, 2026-09-15 |
+| 96 | MCP 서버 인증 | ⏸ | **보류 (2026-09-15, 사용자 결정).** `server.py` 에 인증 코드가 없어 8765 에 닿는 누구나 벡터·그래프·이벤트를 전부 조회할 수 있습니다. REST(8766)에는 Bearer 가 있으나 MCP 는 같은 데이터를 인증 없이 돌려줍니다. 당분간 **방화벽 `sourceRanges` 가 유일한 방어선**입니다. 붙일 때는 REST 와 같은 방식(`.env` 토큰 + `Authorization`)이 자연스럽습니다 |
+| 97 | Ops 대시보드 외부 노출 | ✅ | `OPS_HOST` 로 바인딩 분리, 코드 기본값 `127.0.0.1`. 현재 `0.0.0.0` 으로 열고 방화벽을 개발자 IP 로 제한 — 노출 시 기동 로그에 경고, 2026-09-15 |
 | 94 | `requirements.lock.txt` 미커밋 | 🔜 | `requirements.txt` 머리말이 이 파일로 설치하라고 안내하는데 레포에 없습니다. 라이브 서버에서 `pin_requirements.py --write` 후 커밋 필요 |
 | 92 | systemd 유닛 경로 하드코딩 | ✅ | `deploy/install.sh` — 레포 위치·소유 계정을 설치 시점에 치환. 이전 후 `sementica-ops` 가 설치조차 안 돼 8080 이 죽어 있던 것이 계기, 2026-09-15 |
 | 91 | Q69 랭킹 개선 | 🔜 | 근거가 페이지 순위 14위. 예산·상한으로는 대가가 더 큼 — 랭킹 자체를 다뤄야 함 |
@@ -1668,7 +1670,8 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | 대시보드 벡터 청크 수치 | PostgreSQL SUM이므로 Qdrant 실제 벡터 수와 다를 수 있음 |
 | 스크립트 실행 권한 | 파일시스템 noexec 마운트 시 `bash script.sh` 로 우회 |
 | FalkorDB 웹 UI 는 **3000** | `6379` 는 Redis 프로토콜 포트라 브라우저로 열면 연결이 끊깁니다. UI 는 `falkordb-browser` 컨테이너(3000) |
-| **Ops 대시보드에 인증 없음** | `/api/batch/run` 의 `confirm` 필드는 오조작 방지지 인증이 아닙니다. 기본 바인딩이 `127.0.0.1` 인 이유입니다. `OPS_HOST=0.0.0.0` 으로 노출할 수 있으나 그때는 **방화벽이 유일한 방어선**이며, 대상 IP 를 좁혀야 합니다 |
+| **인증 없이 열린 포트 4종** | `8765`(MCP) · `8080`(Ops) · `6333`(Qdrant) · `6379`(FalkorDB, `requirepass` 없음). 넷 다 **방화벽이 유일한 방어선**이므로 `sourceRanges` 를 좁게 유지해야 합니다. 토큰이 걸린 것은 `8766`(REST) 뿐입니다 — Snowflake 연동 때문에 REST 만 챙기다 생긴 비대칭입니다 |
+| **Ops 대시보드에 인증 없음** | `/api/batch/run` 의 `confirm` 필드는 오조작 방지지 인증이 아닙니다. 기본 바인딩이 `127.0.0.1` 인 이유입니다. `OPS_HOST=0.0.0.0` 으로 노출할 수 있으나 그때는 대상 IP 를 반드시 좁혀야 합니다 |
 | Snowflake 계정 | `SEONGIN-us-central1.gcp` |
 | **트리플 추출 재현성 45.9%** | 온도 0 을 적용해도 재인제스트마다 엔티티 이름이 달라집니다. 관계 질문의 답이 회차마다 바뀔 수 있습니다 (4-2 ③ 참고) |
 | **anthropic SDK 버전 의존** | 1.x 는 `temperature` 명명 인자가 없습니다. `utils/llm.create_message` 가 흡수하지만, SDK 를 바꿀 때는 `tools/probe_llm.py` 로 먼저 확인하세요 |
@@ -1693,7 +1696,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | 50022 | TCP | SSH 접속 | 개발자 IP |
 | 50022 | TCP | **Airflow 작업 실행** (`run_job.sh` 강제 명령) | Airflow 워커 IP **만** |
 | 8080 | TCP | 웹 운영 대시보드 (`web_app.py`) | **개발자 IP 만** — 인증이 없어 방화벽이 유일한 방어선. 기본은 루프백이며 `OPS_HOST=0.0.0.0` 일 때만 필요 |
-| 8765 | TCP | MCP 서버 (`server.py`) | Claude Desktop / Cursor (개발자 IP) |
+| 8765 | TCP | MCP 서버 (`server.py`) | **개발자 IP 만** — 인증 없음(96번 보류). 닿으면 전 코퍼스 조회 가능 |
 | 443 | TCP | **HTTPS (nginx)** — Snowflake UDF 가 호출 | 공개 인터넷 |
 | 80 | TCP | HTTP → HTTPS 리다이렉트 + ACME 챌린지 | 공개 인터넷 |
 | 6333 | TCP | Qdrant 벡터 DB (HTTP REST + 대시보드) | 개발자 IP |
