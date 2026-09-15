@@ -895,15 +895,24 @@ python tools/debug_html_blocks.py --page-id 3c7ea67a568180b4b288fab957019624
 [`deploy/README.md`](deploy/README.md) 참고.
 
 ```bash
-cd ~/sementica && git pull
+# git pull 은 레포 소유 계정으로 — root 로 받으면 새 파일이 root 소유가 되어
+# 이후 서비스(devadmin)가 건드리지 못합니다.
+su - devadmin -c 'cd ~/sementica && git pull'
 
-sudo systemctl restart sementica-mcp      # MCP 서버 (8765)
-sudo systemctl restart sementica-rest     # REST API (8766)
-sudo systemctl restart sementica-ops      # 웹 대시보드 (8080)
+sudo systemctl restart sementica-mcp@strategic   # MCP 서버 (8765)
+sudo systemctl restart sementica-rest            # REST API (8766)
+sudo systemctl restart sementica-ops             # 웹 대시보드 (8080)
 
 systemctl status sementica-rest --no-pager | head -8
 curl -s localhost:8766/rest/health; echo
+curl -s localhost:8080/api/depts; echo
 ```
+
+> ⚠️ **`active (running)` 만 보고 정상이라 판단하지 마세요.** 기동 직후 죽는
+> 프로세스는 `Restart=` 가 다시 띄우므로 status 가 늘 "방금 시작됨" 으로
+> 보입니다. `Scheduled restart` 줄이 있는지, `since` 값이 계속 갱신되는지,
+> 그리고 **위 `curl` 이 실제로 응답하는지**를 함께 보세요 (2026-09-15 에
+> 의존성 누락으로 Ops 가 이 상태였습니다).
 
 ngrok 은 별도입니다. REST 가 systemd 로 떠 있으면 스크립트가 REST 기동을
 건너뛰고 터널만 엽니다:
@@ -1556,6 +1565,7 @@ Connection 예시는 포트가 22 로 적혀 있으나 실제는 **50022** 입�
 | 62 | FOLLOWED_BY 건너뛰기 엣지 | ✅ | 증분 유지를 걷어내고 `rebuild_followed_by()` 로 전량 재구축. 삽입 순서·동시성과 무관, 2026-09-11 |
 | 63 | graph_search 임의 노드 선택 | ✅ | `CONTAINS` + `LIMIT 5` 의 첫 줄을 쓰던 것 — ORDER BY 가 없어 실행마다 다른 노드를 잡았음. 완전일치 > 접두 > 부분 순위화, 2026-09-14 |
 | 64 | 용어집 표기 차이 | ✅ | 등록 표현 350개 중 241개가 정확일치에서 깨짐(`평균 동접`≠`평균동접`). 정규화 폴백 + 순서 의존 제거, 2026-09-14 |
+| 95 | 라이브 서버 서비스 기동 | ✅ | MCP(`sementica-mcp@strategic`, 8765) · REST(8766, Bearer) · Ops(8080, 루프백) 전부 systemd 로 가동. 유닛 이름이 레포 템플릿과 일치하게 정리됨, 2026-09-15 |
 | 65 | REST API systemd 등록 | ✅ | `nohup` 으로만 떠 있어 셸이 닫히면 죽고 재부팅 후 안 올라옴. Snowflake UDF 가 호출하므로 죽으면 UDF 쪽에서만 에러, 2026-09-14 |
 | 66 | 골든셋 dev/holdout 분할 | ✅ | `tools/split_golden_set.py` — 출처 문서 단위 분할. 점수가 일반화되는지 재는 수단, 2026-09-14 |
 | 67 | 홀드아웃 기준선 측정 | ✅ | dev 0.956 / holdout 0.944, **차이 +0.011 ± 0.042** — 과적합 검출 안 됨(유의 임계 0.08). 45/45 문항, 출처 문서 겹침 0, 2026-09-14 |

@@ -19,12 +19,15 @@ sudo systemctl enable --now sementica-ops
 
 ## 지금 도는 것
 
+라이브 서버(`dh123io-ld01`, 계정 `devadmin`) 기준입니다 — 2026-09-15 이전 완료.
+
 | 프로세스 | 관리 방식 | 포트 | 비고 |
 |---|---|---|---|
-| MCP 서버 | systemd `sementica-mcp.service` | 8765 | `src/mcp/server.py --dept strategic` |
-| REST API | systemd `sementica-rest.service` | 8766 | Snowflake UDF 가 호출 |
-| Ops 대시보드 | systemd `sementica-ops.service` | 8080 | **127.0.0.1 바인딩** — 아래 참고 |
+| MCP 서버 | systemd `sementica-mcp@strategic` | 8765 | 템플릿 유닛 |
+| REST API | systemd `sementica-rest` | 8766 | Snowflake UDF 가 호출, Bearer 인증 |
+| Ops 대시보드 | systemd `sementica-ops` | 8080 | **127.0.0.1 바인딩** — 아래 참고 |
 | FalkorDB Browser | docker `falkordb-browser` | 3000 | 그래프 웹 UI |
+| Qdrant / FalkorDB / PostgreSQL | docker compose | 6333 / 6379 / 5433 | |
 
 > ⚠️ **6379 는 대시보드가 아닙니다.** Redis 프로토콜(RESP) 포트라 브라우저로
 > 열면 연결이 끊깁니다. FalkorDB 웹 UI 는 **3000** 입니다.
@@ -45,30 +48,40 @@ ssh -N -L 8080:127.0.0.1:8080 -L 3000:127.0.0.1:3000 -p 50022 devadmin@<서버IP
 사내망에 직접 열어야 한다면 nginx 앞단에 인증을 붙이고 방화벽을 개발자 IP 로
 제한하세요. `--host` 만 바꾸는 것으로는 무인증 파괴 엔드포인트가 그대로 열립니다.
 
-## 정리해야 할 것
+## 기동 확인 — `active (running)` 을 믿지 마세요
 
-**REST API 가 systemd 밖에 있습니다.** `nohup python src/mcp/rest_api.py &` 로
-떠 있어서 셸이 닫히면 같이 죽고, 재부팅 후에도 올라오지 않습니다. Snowflake UDF
-가 이 API 를 호출하므로 죽으면 **UDF 쪽에서만** 에러가 나고 서버에는 흔적이
-남지 않습니다. 2026-09-11 실제로 죽은 채로 방치됐습니다.
+기동 직후 죽는 프로세스는 `Restart=` 가 다시 띄우므로 `systemctl status` 가
+**늘 "방금 시작됨"** 으로 보입니다. 2026-09-15 에 Ops 대시보드가 정확히 그
+상태였습니다 — `active (running) since ... 103ms ago` 인데 실제로는 의존성이
+없어 안내만 찍고 죽기를 반복하고 있었습니다.
 
-→ `sementica-rest.service` 를 만들어 두었습니다. 설치:
+세 가지를 함께 보세요:
 
 ```bash
-# .venv 에 의존성이 있는지 먼저 확인 (아래 "인터프리터" 참고)
-cd ~/sementica && .venv/bin/python -c "import starlette, uvicorn; print('ok')"
-
-sudo bash deploy/install.sh rest
-sudo systemctl enable --now sementica-rest
-systemctl status sementica-rest --no-pager
-curl -s localhost:8766/rest/health; echo
+systemctl status sementica-ops --no-pager -l | head -20   # Scheduled restart 줄이 있는가
+curl -s localhost:8080/api/depts; echo                     # {"depts":["strategic"]}
+curl -s localhost:8766/rest/health; echo                   # {"status":"ok",...}
+ss -tlnp | grep -E ':(8765|8766|8080)'                     # 실제로 LISTEN 하는가
 ```
 
-**포트를 잡고 있는 유령 프로세스에 주의하세요.** `nohup ... &` 로 띄운 프로세스는
-셸의 job 이 끊겨도(`[1]- Terminated` 메시지) 살아남을 수 있습니다. 실제로
-2026-09-11 에 09:21 에 뜬 pyenv 프로세스가 8766 을 계속 잡고 있어, 새로 등록한
-systemd 서비스가 바인딩에 실패하며 10초마다 재시작을 반복했습니다
-(`[Errno 98] address already in use`, exit 3). 정리 순서:
+MCP 는 `streamable-http` 라 health 엔드포인트가 없습니다. 8765 가 LISTEN 되고
+`Application startup complete` 가 찍히면 정상입니다.
+
+## 겪은 문제들 (해결됨)
+
+**의존성이 선언되지 않았습니다** (2026-09-15). `fastapi`·`pydantic`·
+`starlette`·`uvicorn` 이 `requirements.txt` 에 처음부터 없었습니다. 구 서버에는
+손으로 깔려 있어 드러나지 않다가, 새 `.venv` 에서 Ops 가 재시작 루프에
+빠졌습니다. `python tools/check_deps.py` 가 같은 종류를 미리 잡습니다.
+
+**REST API 가 systemd 밖에 있었습니다** (~2026-09-14). `nohup` 으로만 떠 있어
+셸이 닫히면 죽고 재부팅 후 안 올라왔습니다. Snowflake UDF 가 호출하므로 죽으면
+**UDF 쪽에서만** 에러가 나고 서버에는 흔적이 남지 않습니다.
+
+**포트를 잡고 있는 유령 프로세스.** `nohup ... &` 프로세스는 셸 job 이 끊겨도
+(`[1]- Terminated`) 살아남습니다. 2026-09-11 에 pyenv 프로세스가 8766 을 계속
+잡고 있어 새 systemd 서비스가 `[Errno 98] address already in use` 로 10초마다
+재시작을 반복했습니다. systemd 로 옮긴 지금도 수동 실행 뒤에는 확인하세요:
 
 ```bash
 sudo systemctl stop sementica-rest    # 먼저 재시작을 끈다 (안 그러면 경합)
@@ -78,27 +91,24 @@ sleep 2 && sudo ss -lptn 'sport = :8766'   # 비었는지 확인
 sudo systemctl start sementica-rest
 ```
 
-**인터프리터가 서로 다릅니다.** MCP 는 `.venv/bin/python`, REST 는
-`~/.pyenv/versions/3.11.9/bin/python` 으로 돌고 있었습니다. 두 프로세스가 다른
-site-packages 를 보므로, anthropic 버전 차이나 `mcp` 패키지 섀도잉 같은 문제가
-한쪽에만 나타납니다 — 고쳐놓고 다 고쳤다고 믿기 딱 좋은 구조입니다.
-`sementica-rest.service` 는 `.venv` 를 씁니다. 의존성이 없으면 기동에 실패하니
-위 확인 명령을 먼저 돌리고, 없으면 설치하세요:
+**인터프리터가 서로 달랐습니다.** MCP 는 `.venv`, REST 는 pyenv 3.11.9 로
+돌았습니다. 서로 다른 site-packages 를 보므로 anthropic 버전 차이나 `mcp` 패키지
+섀도잉 같은 문제가 한쪽에만 나타납니다 — 고쳐놓고 다 고쳤다고 믿기 딱 좋은
+구조입니다. 세 유닛 모두 `.venv` 를 씁니다.
+
+**유닛 이름이 레포와 달랐습니다.** 구 서버에는 고정 이름
+`sementica-mcp.service` 가 설치돼 있었고 레포에는 템플릿만 있었습니다. 라이브
+서버는 템플릿(`sementica-mcp@strategic`)으로 통일했으므로 레포와 일치합니다.
+
+## `git pull` 은 레포 소유 계정으로
+
+root 로 받으면 새 파일이 root 소유가 되어, 이후 `devadmin` 으로 도는 서비스가
+그 파일을 건드리지 못합니다. 이전 과정에서 키 파일이 root 소유로 남아 한 번
+겪었습니다.
 
 ```bash
-.venv/bin/pip install -r requirements.txt
+su - devadmin -c 'cd ~/sementica && git pull'
 ```
-
-**유닛 이름이 레포와 다릅니다.** 레포에는 템플릿 `sementica-mcp@.service` 가
-있는데 실제로는 고정 이름 `sementica-mcp.service` 가 설치돼 있습니다. 실제
-배포본을 확인하려면:
-
-```bash
-systemctl cat sementica-mcp
-```
-
-내용이 레포와 다르면 레포 쪽을 맞춰주세요. 유닛 파일이 현실과 어긋나 있으면
-다음에 서버를 새로 세울 때 조용히 틀립니다.
 
 ## ngrok
 
