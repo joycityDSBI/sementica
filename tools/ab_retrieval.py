@@ -67,23 +67,31 @@ ANTHROPIC_REGION = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 EMBED_MODEL = "text-multilingual-embedding-002"
 
-# 비교할 설정 — (라벨, oversample, coverage_boost, dedupe_threshold)
-# dedupe 1.0 = 비활성화
+# 비교할 설정 — (라벨, oversample, coverage_boost, dedupe_threshold, doc_cap)
+# dedupe 1.0 = 비활성화, doc_cap 0 = 문서당 상한 없음(현행)
 #
 # oversample 은 **후보 청크 풀**만 넓힙니다. 반환 페이지 수는 --limit 이
-# 정하므로, 값을 키워도 추가 비용은 Qdrant top-k 하나뿐입니다. 어디서
-# 포화되는지 보려고 12·16 까지 넣었습니다.
+# 정하므로, 값을 키워도 추가 비용은 Qdrant top-k 하나뿐입니다.
+#
+# ── doc_cap: 문서 하나가 예산을 독식하지 못하게 하는 상한 ──────────────────
+# 실측(2026-09-15 Q69): 컨텍스트 51,122자에 문서가 **6건**만 들어갔고 근거는
+# 19위라 기회조차 없었습니다. 16,012자짜리 문서 하나가 60,000 예산의 27% 를
+# 먹었기 때문입니다. MAX_CONTEXT_DOCS 는 25 인데 실제로는 6건이었습니다.
+#
+# 긴 문서를 자르면 **그 문서가 근거인 문항**이 나빠질 수 있습니다. 그래서
+# 어느 쪽이 큰지 재는 것입니다 — 자를수록 더 많은 문서가 들어오지만,
+# 자른 문서의 근거가 창 밖으로 밀릴 수 있습니다.
 CONFIGS = [
-    ("기준 (현행 = 8)", 8, 0.20, 1.0),
-    ("oversample 1", 1, 0.20, 1.0),
-    ("oversample 2", 2, 0.20, 1.0),
-    ("oversample 4", 4, 0.20, 1.0),
-    ("oversample 12", 12, 0.20, 1.0),
-    ("oversample 16", 16, 0.20, 1.0),
-    ("boost 0.0", 8, 0.00, 1.0),
-    ("boost 0.10", 8, 0.10, 1.0),
-    ("dedupe 0.85", 8, 0.20, 0.85),
-    ("dedupe 0.85 + boost 0.10", 8, 0.10, 0.85),
+    ("기준 (현행)", 8, 0.20, 1.0, 0),
+    ("oversample 4", 4, 0.20, 1.0, 0),
+    ("oversample 12", 12, 0.20, 1.0, 0),
+    ("boost 0.0", 8, 0.00, 1.0, 0),
+    ("boost 0.10", 8, 0.10, 1.0, 0),
+    ("문서 상한 12000", 8, 0.20, 1.0, 12000),
+    ("문서 상한 8000", 8, 0.20, 1.0, 8000),
+    ("문서 상한 6000", 8, 0.20, 1.0, 6000),
+    ("문서 상한 4000", 8, 0.20, 1.0, 4000),
+    ("상한 8000 + boost 0.10", 8, 0.10, 1.0, 8000),
 ]
 
 
@@ -184,7 +192,7 @@ def main() -> int:
     print("  " + "-" * 68)
 
     results: list = []
-    for label, over, boost, dedup in CONFIGS:
+    for label, over, boost, dedup, doc_cap in CONFIGS:
         hits = 0
         vec_hits = 0
         ranks: list = []
@@ -201,10 +209,19 @@ def main() -> int:
                 merged = dedupe_documents(merged, threshold=dedup)
 
             # 예산 채우기 — evaluate.py 의 문서 채널만 재현 (docstring 참고)
+            #
+            # doc_cap 이 있으면 문서 하나가 가져가는 양을 그만큼으로 제한합니다.
+            # ⚠️ 여기서는 **길이만** 줄이고 어느 부분이 잘리는지는 보지 않습니다.
+            #   실제 파이프라인은 앵커 청크 중심으로 창을 잡으므로, 자른 뒤에도
+            #   근거가 남을 확률이 이 측정보다 높습니다. 즉 doc_cap 의 손해는
+            #   여기서 **과대평가**됩니다 — 이득이 보이면 실제로는 더 큽니다.
             total, used = 0, 0
             found = False
             for j, d in enumerate(merged[:MAX_CONTEXT_DOCS]):
-                block = len(d.get("content", "")) + len(d.get("title", "")) + 20
+                body = len(d.get("content", ""))
+                if doc_cap:
+                    body = min(body, doc_cap)
+                block = body + len(d.get("title", "")) + 20
                 if j and total + block > budget:
                     break
                 total += block
