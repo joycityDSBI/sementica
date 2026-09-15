@@ -2204,12 +2204,22 @@ if __name__ == "__main__":
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Semantica 웹 운영 대시보드")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8080)
+    # 기본은 루프백입니다. 이 대시보드에는 인증이 없고 파괴적 배치
+    # (`/api/batch/run`)를 돌릴 수 있어, 기본값이 외부 공개이면 안 됩니다.
+    # 노출하려면 .env 에 OPS_HOST=0.0.0.0 을 두고 **방화벽으로 접근 대상을
+    # 제한**하세요 — 방화벽이 유일한 방어선이 됩니다.
+    parser.add_argument("--host", default=os.environ.get("OPS_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("OPS_PORT", "8080")))
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
 
     print(f"\n🌐  Semantica Ops Dashboard — http://{args.host}:{args.port}\n")
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        # 로그에 남겨둡니다. 나중에 방화벽 범위가 넓어져도 서버 쪽에는
+        # 아무 흔적이 없으면, 열려 있다는 사실 자체를 잊게 됩니다.
+        print(f"   ⚠️  {args.host} 로 바인딩 — 이 대시보드는 인증이 없습니다.")
+        print("      /api/batch/run 의 confirm 필드는 오조작 방지지 인증이 아닙니다.")
+        print("      방화벽 접근 대상이 의도한 범위인지 확인하세요.\n")
     uvicorn.run(
         "web_app:app" if args.reload else app,
         host=args.host,

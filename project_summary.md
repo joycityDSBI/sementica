@@ -1644,6 +1644,10 @@ POSTGRES_URL=postgresql://user:pass@host:5432/dbname
 SNOWFLAKE_REST_TOKEN=                # 미설정 시 인증 없음
 SNOWFLAKE_REST_PORT=8766
 
+# Ops 대시보드 (선택)
+OPS_HOST=127.0.0.1                   # 기본값. 0.0.0.0 으로 두면 외부 노출됩니다
+OPS_PORT=8080
+
 # 검색 튜닝 (선택 — 미설정 시 코드 기본값)
 PAGE_MAX_CHARS=16000                 # 페이지 본문 전달 한도. 초과 시 앵커 윈도우
 CONTEXT_MAX_CHARS=60000              # 평가 컨텍스트 총량 상한
@@ -1664,7 +1668,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | 대시보드 벡터 청크 수치 | PostgreSQL SUM이므로 Qdrant 실제 벡터 수와 다를 수 있음 |
 | 스크립트 실행 권한 | 파일시스템 noexec 마운트 시 `bash script.sh` 로 우회 |
 | FalkorDB 웹 UI 는 **3000** | `6379` 는 Redis 프로토콜 포트라 브라우저로 열면 연결이 끊깁니다. UI 는 `falkordb-browser` 컨테이너(3000) |
-| **Ops 대시보드에 인증 없음** | `/api/batch/run` 의 `confirm` 필드는 오조작 방지지 인증이 아닙니다. 유닛이 `127.0.0.1` 에만 바인딩하는 이유이며, 접속은 SSH 터널로 하세요 |
+| **Ops 대시보드에 인증 없음** | `/api/batch/run` 의 `confirm` 필드는 오조작 방지지 인증이 아닙니다. 기본 바인딩이 `127.0.0.1` 인 이유입니다. `OPS_HOST=0.0.0.0` 으로 노출할 수 있으나 그때는 **방화벽이 유일한 방어선**이며, 대상 IP 를 좁혀야 합니다 |
 | Snowflake 계정 | `SEONGIN-us-central1.gcp` |
 | **트리플 추출 재현성 45.9%** | 온도 0 을 적용해도 재인제스트마다 엔티티 이름이 달라집니다. 관계 질문의 답이 회차마다 바뀔 수 있습니다 (4-2 ③ 참고) |
 | **anthropic SDK 버전 의존** | 1.x 는 `temperature` 명명 인자가 없습니다. `utils/llm.create_message` 가 흡수하지만, SDK 를 바꿀 때는 `tools/probe_llm.py` 로 먼저 확인하세요 |
@@ -1688,7 +1692,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 |------|---------|------|---------|
 | 50022 | TCP | SSH 접속 | 개발자 IP |
 | 50022 | TCP | **Airflow 작업 실행** (`run_job.sh` 강제 명령) | Airflow 워커 IP **만** |
-| 8080 | TCP | 웹 운영 대시보드 (`web_app.py`) | 개발자 IP |
+| 8080 | TCP | 웹 운영 대시보드 (`web_app.py`) | **개발자 IP 만** — 인증이 없어 방화벽이 유일한 방어선. 기본은 루프백이며 `OPS_HOST=0.0.0.0` 일 때만 필요 |
 | 8765 | TCP | MCP 서버 (`server.py`) | Claude Desktop / Cursor (개발자 IP) |
 | 443 | TCP | **HTTPS (nginx)** — Snowflake UDF 가 호출 | 공개 인터넷 |
 | 80 | TCP | HTTP → HTTPS 리다이렉트 + ACME 챌린지 | 공개 인터넷 |
@@ -1719,6 +1723,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-15 | **Ops 대시보드 바인딩을 설정으로 분리** — 유닛에 `--host 127.0.0.1` 을 박아두면 바꿀 때마다 root 로 `/etc/systemd/system` 을 고쳐야 합니다. `.env` 의 `OPS_HOST` 로 옮기고 코드 기본값도 `0.0.0.0` → `127.0.0.1` 로 바꿨습니다(기본값이 외부 공개이면 안 됩니다). 노출 시 기동 로그에 경고를 남깁니다 — 나중에 방화벽 범위가 넓어져도 서버 쪽에 흔적이 없으면 **열려 있다는 사실 자체를 잊게 됩니다** |
 | 2026-09-15 | **ngrok 제거 → nginx + 고정 도메인.** 걷어낸 이유는 URL 이 **다섯 곳에 박혀 있었다는 것**입니다 — 네트워크 규칙 1 + UDF 3 + Cortex 프로시저 1. 재시작마다 전부 다시 만들어야 했고 빠뜨리면 그 경로만 조용히 죽었습니다. 이제 호스트는 네트워크 규칙과 `semantica_base_url` 시크릿 **두 곳**뿐이고, UDF 본문에는 URL 이 없습니다 — 도메인이 바뀌어도 UDF 재생성이 필요 없습니다. REST 는 `127.0.0.1` 바인딩으로 바꿨습니다(nginx 를 세워도 8766 이 열려 있으면 **평문 HTTP 우회로**가 남아 Bearer 토큰이 그대로 지나갑니다). 함께 발견: `05_cortex_agent.sql` 에 `SECRETS` 절이 없어 `Authorization` 을 한 번도 보내지 않았고, 서버 토큰이 켜진 지금 **이 프로시저만 401** 입니다. `start_with_ngrok.sh` 는 삭제 — systemd 시대에 `pkill -f rest_api.py` 로 관리 중인 프로세스를 죽입니다 |
 | 2026-09-15 | **웹 의존성이 선언된 적이 없었습니다** — `web_app.py` 는 `fastapi`·`pydantic` 을, `rest_api.py` 는 `starlette` 를 처음부터 import 하는데 `requirements.txt` 에 넷 다 없었습니다. 구 서버엔 손으로 깔려 있어 드러나지 않다가, 새 `.venv` 에서 Ops 대시보드가 `pip install fastapi uvicorn` 만 찍고 죽는 **재시작 루프**에 빠졌습니다. 그 와중에도 `systemctl status` 는 **`active (running)`** 이라고 나옵니다 — 방금 재시작된 순간을 보여주니까요. `tools/check_deps.py` 로 같은 종류를 미리 잡습니다(설치 없이 소스만 읽음) |
 | 2026-09-15 | **배포 유닛 설치 스크립트** (`deploy/install.sh`) — 이전 후 8080 이 죽어 있어 확인해보니 `sementica-ops.service` 가 **설치조차 안 돼** 있었습니다. 유닛 파일이 `User=seongin`·`/home/seongin` 을 박아두고 있어 `devadmin` 서버에서는 그대로 쓸 수 없었던 것. 손으로 고치면 다음 서버에서 반복되므로 설치 시점 치환으로 바꿨습니다. 계정은 `whoami`(=root) 가 아니라 **레포 소유자**를 읽습니다. 함께 정리: `6379` 는 대시보드가 아니라 Redis 포트(UI 는 3000), Ops 대시보드는 **인증이 없어** 루프백 바인딩이 필수 |

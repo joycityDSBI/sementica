@@ -8,7 +8,15 @@ Type=simple
 User=seongin
 WorkingDirectory=/home/seongin/sementica
 EnvironmentFile=/home/seongin/sementica/.env
-ExecStart=/home/seongin/sementica/.venv/bin/python src/ops/web_app.py --host 127.0.0.1 --port 8080
+# 바인딩 주소는 --host 로 박지 않고 .env 의 OPS_HOST 로 정합니다.
+# 유닛에 박아두면 바꿀 때마다 root 로 /etc/systemd/system 을 고쳐야 합니다.
+#
+#   (미설정)          127.0.0.1  — 기본. SSH 터널로만 접근
+#   OPS_HOST=0.0.0.0             — 외부 노출. **방화벽이 유일한 방어선입니다**
+#
+# 이 대시보드에는 인증이 없습니다. /api/batch/run 의 confirm 필드는 오조작
+# 방지지 인증이 아니므로, 노출한다면 접근 IP 를 반드시 좁히세요.
+ExecStart=/home/seongin/sementica/.venv/bin/python src/ops/web_app.py
 Restart=on-failure
 RestartSec=5
 # systemd 아래에서는 stdout 이 블록 버퍼링됩니다. 그대로 두면 print()
