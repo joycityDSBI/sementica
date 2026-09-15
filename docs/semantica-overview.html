@@ -675,8 +675,8 @@ a:focus-visible { outline: 2px solid var(--accent); border-radius: 2px; }
       <div class="vf-step">
         <div class="vf-dot d-accent">③</div>
         <div class="vf-body">
-          <div class="vf-title">③ Python UDF → ngrok → REST API</div>
-          <div class="vf-desc">Snowflake Python UDF가 External Network Access를 통해 ngrok HTTPS 터널로 GCP VM의 REST API 서버(port 8766)를 호출합니다.</div>
+          <div class="vf-title">③ Python UDF → HTTPS → REST API</div>
+          <div class="vf-desc">Snowflake Python UDF가 External Network Access를 통해 고정 도메인의 HTTPS 엔드포인트(nginx)로 GCP VM의 REST API 서버를 호출합니다.</div>
         </div>
       </div>
 
@@ -745,9 +745,9 @@ a:focus-visible { outline: 2px solid var(--accent); border-radius: 2px; }
         <div class="card-desc">수집 이력·동기화 상태·HTML 첨부 여부 관리. 웹 대시보드(port 8080) 기반.</div>
       </div>
       <div class="card c-accent">
-        <div class="card-name">GCP VM + ngrok</div>
+        <div class="card-name">GCP VM + nginx</div>
         <div class="card-role">인프라</div>
-        <div class="card-desc">GCP VM에서 모든 서비스 실행. ngrok HTTPS 터널로 Snowflake에 외부 노출.</div>
+        <div class="card-desc">GCP VM에서 모든 서비스 실행. nginx가 443에서 TLS를 끝내고 Snowflake에 외부 노출.</div>
       </div>
     </div>
   </section>

@@ -110,15 +110,43 @@ root 로 받으면 새 파일이 root 소유가 되어, 이후 `devadmin` 으로
 su - devadmin -c 'cd ~/sementica && git pull'
 ```
 
-## ngrok
+## HTTPS 노출 (nginx)
 
-Snowflake 가 외부에서 REST API 에 접근하려면 HTTPS 터널이 필요합니다.
-`scripts/start_with_ngrok.sh` 가 REST + ngrok 을 함께 띄웁니다. REST 를 systemd
-로 옮긴 뒤에는 이 스크립트의 REST 기동 부분이 중복되므로, ngrok 만 따로 띄우는
-쪽이 맞습니다.
+Snowflake UDF 가 공개 인터넷에서 REST API 를 호출합니다. **ngrok 은 2026-09-15
+에 제거했습니다** — 재시작마다 URL 이 바뀌어 Snowflake 쪽 네트워크 규칙과 UDF
+3개 + 프로시저 1개를 매번 다시 만들어야 했습니다. 고정 도메인 + nginx 로
+대체합니다.
 
-ngrok URL 은 재시작마다 바뀌므로 `snowflake/01_network_access.sql` 의
-`ALLOWED_NETWORK_RULES` 도 함께 갱신해야 합니다.
+```
+[인터넷] ──443──> [VM nginx] ──> 127.0.0.1:8766 (sementica-rest)
+```
+
+```bash
+sudo apt install nginx
+sudo bash deploy/install.sh --domain semantica.example.com nginx
+sudo nginx -t && sudo systemctl reload nginx
+
+# 인증서 — 사내 CA 로 받았다면 conf 의 ssl_certificate 두 줄을 그 경로로
+sudo certbot --nginx -d semantica.example.com
+```
+
+REST 유닛은 이제 `--host 127.0.0.1` 입니다. **8766 인바운드를 방화벽에서
+닫으세요** — nginx 를 세워도 8766 이 외부에 열려 있으면 평문 HTTP 우회로가
+남고 Bearer 토큰이 그대로 지나갑니다.
+
+```bash
+ss -tlnp | grep :8766      # 127.0.0.1:8766 이어야 합니다
+```
+
+**Snowflake 쪽**은 호스트를 두 곳에만 둡니다 (`01_network_access.sql`):
+
+| 위치 | 바꿀 때 |
+|---|---|
+| `NETWORK RULE` 의 `VALUE_LIST` | `CREATE OR REPLACE NETWORK RULE ...` |
+| `semantica_base_url` 시크릿 | `ALTER SECRET ... SET SECRET_STRING = '...'` |
+
+UDF 본문에는 URL 이 없습니다 — 시크릿에서 읽으므로 **도메인이 바뀌어도 UDF 를
+다시 만들 필요가 없습니다.**
 
 ## 백업
 

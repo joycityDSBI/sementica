@@ -51,6 +51,8 @@ CREATE OR REPLACE PROCEDURE sementica_agent(question VARCHAR)
   RUNTIME_VERSION = '3.11'
   HANDLER = 'run'
   EXTERNAL_ACCESS_INTEGRATIONS = (semantica_external_access)
+  SECRETS = ('rest_token' = DATAHUB.DATAHUB.semantica_rest_token,
+             'base_url'   = DATAHUB.DATAHUB.semantica_base_url)
   PACKAGES = ('snowflake-snowpark-python', 'requests')
 AS $$
 import _snowflake
@@ -58,11 +60,26 @@ import json
 import requests
 
 # ── 상수 ────────────────────────────────────────────────────────
-SEMANTICA_BASE      = 'https://agility-unadvised-constrain.ngrok-free.dev'
 SEMANTIC_MODEL_FILE = '@DATAHUB.DATAHUB.semantica_stage/YOUR_MODEL.yaml'  # ← 실제 경로로 변경
 CLASSIFY_MODEL      = 'claude-3-5-haiku'
 SYNTHESIS_MODEL     = 'claude-3-5-sonnet'
-HEADERS             = {'ngrok-skip-browser-warning': '1'}
+
+
+# ── 엔드포인트·인증 ─────────────────────────────────────────────
+# 2026-09-15 수정. 이 프로시저에는 SECRETS 절이 없어서 토큰을 읽지 못했고,
+# Authorization 을 한 번도 보내지 않았습니다. 서버에서 토큰을 켜는 순간
+# **이 프로시저만 조용히 401** 이 됩니다 — 02 의 UDF 3개는 토큰을 보내므로
+# 정상이라, 증상이 한쪽에만 나타나 원인을 찾기 어려운 구조였습니다.
+def _base():
+    return (_snowflake.get_generic_secret_string('base_url') or '').rstrip('/')
+
+
+def _headers():
+    h = {}
+    tok = (_snowflake.get_generic_secret_string('rest_token') or '').strip()
+    if tok and not tok.startswith('CHANGE_ME'):
+        h['Authorization'] = 'Bearer ' + tok
+    return h
 
 
 # ── 1단계: 질문 분류 ─────────────────────────────────────────────
@@ -135,12 +152,20 @@ def call_semantica(question: str) -> dict:
     """Semantica REST API를 통해 온톨로지 지식 검색."""
     try:
         resp = requests.post(
-            f'{SEMANTICA_BASE}/rest/hybrid',
+            f'{_base()}/rest/hybrid',
             json={'query': question, 'limit': 5},
-            headers=HEADERS,
+            headers=_headers(),
             timeout=30,
         )
-        resp.raise_for_status()
+        # raise_for_status 는 본문을 버립니다. REST API 는 실패 시
+        # {"error": "..."} 를 함께 보내므로 그것을 살려서 돌려줍니다 —
+        # 401 인지 Qdrant 장애인지 구분이 되어야 합니다.
+        if resp.status_code >= 400:
+            try:
+                return {'error': resp.json().get('error', resp.text[:300]),
+                        'status': resp.status_code}
+            except Exception:
+                return {'error': resp.text[:300], 'status': resp.status_code}
         return resp.json()
     except Exception as e:
         return {'error': str(e)}

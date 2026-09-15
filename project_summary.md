@@ -32,9 +32,9 @@ Notion 문서 → 전처리·임베딩 → Qdrant(벡터) + FalkorDB(그래프)
 │         │                    │                    │         │
 │         ▼                    ▼                    ▼         │
 │  ┌──────────────┐    ┌───────────────┐   ┌─────────────┐   │
-│  │  Qdrant      │    │  FalkorDB     │   │   ngrok     │   │
-│  │  (port 6333) │    │  (port 6379)  │   │   HTTPS     │   │
-│  │  벡터 768dim │    │  그래프 DB    │   │   터널      │   │
+│  │  Qdrant      │    │  FalkorDB     │   │   nginx     │   │
+│  │  (port 6333) │    │  (port 6379)  │   │   443 TLS   │   │
+│  │  벡터 768dim │    │  그래프 DB    │   │   종료      │   │
 │  └──────────────┘    └───────────────┘   └──────┬──────┘   │
 └─────────────────────────────────────────────────┼──────────┘
                                                   │ HTTPS
@@ -59,7 +59,7 @@ Notion 문서 → 전처리·임베딩 → Qdrant(벡터) + FalkorDB(그래프)
 | 그래프 DB | FalkorDB | Docker, port 6379, graph: `strategic_kg` |
 | MCP 서버 | FastMCP 4.0.0 | Streamable HTTP, port 8765 |
 | REST 서버 | Starlette + uvicorn | port 8766, `src/mcp/rest_api.py` |
-| HTTPS | ngrok | `agility-unadvised-constrain.ngrok-free.dev` (무료 플랜) |
+| HTTPS | nginx | 443 → 127.0.0.1:8766 리버스 프록시, 고정 도메인 (2026-09-15) |
 | 운영 DB | PostgreSQL | notion_pages, sync_log, mcp_request_log 테이블 |
 | 소스 | Notion API | 전략사업본부 연동 페이지 |
 | Snowflake | us-central1.gcp | Python UDF + External Network Access |
@@ -775,7 +775,7 @@ Snowflake Cortex (모 모델/오케스트레이터)
     │
     └─ sementica_* Python UDF: Semantica REST API 호출
            │  External Network Access (HTTPS)
-           │  ngrok HTTPS 터널
+           │  nginx (443 TLS 종료)
            └─▶ Semantica REST API (port 8766)
                     ├─ Qdrant (벡터 검색)
                     └─ FalkorDB (그래프 검색)
@@ -813,7 +813,7 @@ SELECT SNOWFLAKE.CORTEX.COMPLETE(
 
 ### 6-4. 설계 결정: External Function → Python UDF
 
-Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 반드시 사용해야 합니다. 범용 HTTPS 엔드포인트 직접 연결이 불가능하므로, **External Network Access + Python UDF** 방식을 채택했습니다. API Gateway 구축 없이 ngrok HTTPS URL을 직접 호출할 수 있습니다.
+Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 반드시 사용해야 합니다. 범용 HTTPS 엔드포인트 직접 연결이 불가능하므로, **External Network Access + Python UDF** 방식을 채택했습니다. API Gateway 구축 없이 고정 도메인의 HTTPS 엔드포인트를 직접 호출합니다.
 
 ---
 
@@ -823,7 +823,6 @@ Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 �
 
 | 스크립트 | 용도 |
 |---------|------|
-| `scripts/start_with_ngrok.sh` | REST API + ngrok 동시 시작 |
 | `scripts/backup.sh` | 백업 — PostgreSQL · Notion 캐시 · systemd 유닛 · 골든셋 → 로컬 + GCS |
 | `scripts/run_job.sh` | SSH 강제 명령 — Airflow 가 호출할 수 있는 작업 허용목록 |
 | `scripts/create_indexes.py` | Qdrant 인덱스 생성 |
@@ -914,15 +913,12 @@ curl -s localhost:8080/api/depts; echo
 > 그리고 **위 `curl` 이 실제로 응답하는지**를 함께 보세요 (2026-09-15 에
 > 의존성 누락으로 Ops 가 이 상태였습니다).
 
-ngrok 은 별도입니다. REST 가 systemd 로 떠 있으면 스크립트가 REST 기동을
-건너뛰고 터널만 엽니다:
+HTTPS 는 nginx 가 담당합니다 (7-4 참고). 코드를 배포해도 nginx 는 건드릴 일이
+없고, 설정을 바꿨을 때만:
 
 ```bash
-bash scripts/start_with_ngrok.sh
+sudo nginx -t && sudo systemctl reload nginx
 ```
-
-> ⚠️ **`./scripts/start_with_ngrok.sh` Permission denied 발생 시**:
-> `bash scripts/start_with_ngrok.sh` 으로 실행 (파일시스템 noexec 마운트 우회)
 
 #### REST API 가 systemd 밖에 있던 문제 (2026-09-14)
 
@@ -980,34 +976,56 @@ WHERE cnt > 1
 RETURN subj, obj, rel, url, cnt ORDER BY cnt DESC LIMIT 20
 ```
 
-### 7-4. ngrok 상태 확인 및 재시작
+### 7-4. HTTPS 노출 — nginx (2026-09-15, ngrok 대체)
 
-```bash
-# 현재 ngrok 터널 URL 확인 (ngrok 로컬 API)
-curl http://localhost:4040/api/tunnels
+Snowflake UDF 가 공개 인터넷에서 REST API 를 호출합니다. ngrok 으로 우회하던
+것을 걷어내고 고정 도메인 + nginx 로 대체했습니다.
 
-# URL만 추출
-curl -s http://localhost:4040/api/tunnels | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-for t in d['tunnels']:
-    print(t['public_url'])
-"
-
-# ngrok 프로세스 확인
-ps aux | grep ngrok
-
-# ngrok 재시작
-pkill -f ngrok; sleep 1
-nohup ngrok http 8766 > logs/ngrok.log 2>&1 &
-sleep 2
-
-# 새 URL 확인 후 Snowflake UDF에 반영
-curl http://localhost:4040/api/tunnels
+```
+[인터넷] --443--> [VM nginx] --> 127.0.0.1:8766 (sementica-rest)
 ```
 
-> ⚠️ **ngrok 무료 플랜**: 재시작 시 URL 변경됨.  
-> URL 변경 후 `snowflake/01_network_access.sql` (Network Rule) 및 `snowflake/02_python_udfs.sql` (UDF 엔드포인트)를 새 URL로 재생성해야 함.
+```bash
+sudo apt install nginx
+sudo bash deploy/install.sh --domain <도메인> nginx
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d <도메인>        # 사내 CA 면 conf 의 경로만 교체
+```
+
+**REST 는 이제 `127.0.0.1` 에만 바인딩합니다.** nginx 를 세워도 8766 이 외부에
+열려 있으면 **평문 HTTP 우회로**가 남아 Bearer 토큰이 그대로 지나갑니다.
+방화벽에서 8766 인바운드를 닫으세요.
+
+```bash
+ss -tlnp | grep :8766      # 127.0.0.1:8766 이어야 합니다
+```
+
+#### ngrok 을 걷어낸 이유
+
+URL 이 재시작마다 바뀌는데, 그 URL 이 **다섯 곳에 박혀 있었습니다** —
+네트워크 규칙 1 + UDF 3 + Cortex 프로시저 1. 한 번 바뀔 때마다 전부 다시
+만들어야 했고, 빠뜨리면 그 경로만 조용히 죽었습니다.
+
+이제 호스트는 **두 곳**뿐입니다.
+
+| 위치 | 바꾸는 법 |
+|---|---|
+| `NETWORK RULE` 의 `VALUE_LIST` | `CREATE OR REPLACE NETWORK RULE ...` |
+| `semantica_base_url` 시크릿 | `ALTER SECRET ... SET SECRET_STRING = 'https://...'` |
+
+UDF 본문은 `_snowflake.get_generic_secret_string('base_url')` 로 읽으므로
+**도메인이 바뀌어도 UDF 를 다시 만들 필요가 없습니다.** 비밀이 아닌 값을
+시크릿에 넣은 것은, Python UDF 가 외부 설정을 읽을 통로가 `SECRETS` 뿐이기
+때문입니다.
+
+> **함께 고친 것**: `05_cortex_agent.sql` 에는 `SECRETS` 절이 아예 없어
+> 토큰을 읽지 못했고 `Authorization` 을 한 번도 보내지 않았습니다. 서버에서
+> 토큰을 켜는 순간 **이 프로시저만** 401 이 됩니다 — UDF 3개는 정상이라
+> 한쪽에만 증상이 나타나는 구조였습니다.
+
+> ⚠️ `scripts/start_with_ngrok.sh` 는 삭제했습니다. REST 를 systemd 로 옮긴
+> 뒤에는 이 스크립트가 `pkill -f "rest_api.py"` 로 **systemd 가 관리하는
+> 프로세스를 죽이고** `nohup` 으로 다시 띄웁니다.
 
 ### 7-5. 검색 품질 평가 (골든셋)
 
@@ -1506,7 +1524,7 @@ Connection 예시는 포트가 22 로 적혀 있으나 실제는 **50022** 입�
 | 3 | 증분 동기화 (신규 페이지 포함) | ✅ | `sync.py`, PostgreSQL per-page 비교 |
 | 4 | MCP 서버 (Claude Desktop 연동) | ✅ | port 8765 |
 | 5 | REST API 서버 | ✅ | port 8766, `rest_api.py` |
-| 6 | ngrok HTTPS 터널 | ✅ | `start_with_ngrok.sh` |
+| 6 | ~~ngrok HTTPS 터널~~ | ❌ | **제거** (2026-09-15) — URL 이 다섯 곳에 박혀 재시작마다 전부 재생성해야 했음. nginx + 고정 도메인으로 대체
 | 7 | Snowflake External Network Access | ✅ | `01_network_access.sql` |
 | 8 | Snowflake Python UDF | ✅ | `02_python_udfs.sql`, 테스트 완료 |
 | 9 | Parent Document Retrieval | ✅ | `server.py` `_fetch_full_pages()`, 2026-09-03 |
@@ -1573,7 +1591,7 @@ Connection 예시는 포트가 22 로 적혀 있으나 실제는 **50022** 입�
 | 69 | LLM 결과 캐싱 | 🔜 | content_hash 기반 triplets 캐시 → --reset 속도 대폭 단축 |
 | 70 | 용어집 등록 필요 | 🔜 | ① "데사실" → 데이터사이언스실 ② `RU`↔`DRU` 상호 동의어 모순 해소 (`conflicts()` 로 확인) ③ 사람이 확인한 중복(`데브옵스`/`데브옵스팀` 등) |
 | 71 | ~~EntityDeduplicator (그래프 중복 병합)~~ | ❌ | **하지 않기로 결정** (2026-09-14). 실측 768개 노드에서 문자열 유사도 후보 4건이 전부 오탐. DB 객체 이름은 한 토큰이 곧 다른 객체라 자동 병합이 그래프를 망가뜨림. 확실한 중복은 조회 단계에서 합치고(63번), 나머지는 용어집 등록(70번) |
-| 72 | HTTPS 고정 URL (ngrok 유료 or 도메인) | 🔜 | 프로덕션 시 필요 |
+| 72 | HTTPS 고정 URL | 🔜 | nginx 설정·UDF 정리 완료 (2026-09-15). **도메인 발급 + 인증서 + 방화벽 443** 이 남음 |
 | 77 | 작업 결과 메일 알림 | ⏸ | 코드 완료(`src/ops/notify.py`), **SMTP 설정 대기**. 사내 릴레이(61.43.45.137:25)가 자체 서명 인증서라 STARTTLS 검증 실패. `SMTP_CA_FILE`(권장) 또는 `SMTP_TLS_VERIFY=0`(차선) 중 선택 필요 — `SMTP_TLS=0` 은 비밀번호가 평문으로 나가므로 금지 |
 | 78 | 의존성 버전 고정 | ✅ | `tools/pin_requirements.py` 로 현재 버전을 상한으로 고정 + `requirements.lock.txt`, 2026-09-15 |
 | 79 | 백업 이원화 정리 | ✅ | `backup_to_gcs.sh` 를 `backup.sh` 로 합침. 합치기 전에는 cron 이 `backup.sh` 만 돌려 **Notion 캐시와 systemd 유닛이 백업되지 않았습니다**. GCS 업로드가 오류를 숨기고 원인을 추측해 적던 것도 수정, 2026-09-15 |
@@ -1642,8 +1660,6 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 
 | 항목 | 내용 |
 |------|------|
-| ngrok 무료 플랜 | 재시작 시 URL 변경 → Snowflake UDF 재생성 필요 |
-| HTTPS 미설정 | 현재 ngrok으로 우회 중, 프로덕션 시 고정 HTTPS 필요 |
 | FalkorDB `delete_graph()` 미지원 | `select_graph().delete()` 로 대체, `--reset` 묵음 실패 가능 |
 | 대시보드 벡터 청크 수치 | PostgreSQL SUM이므로 Qdrant 실제 벡터 수와 다를 수 있음 |
 | 스크립트 실행 권한 | 파일시스템 noexec 마운트 시 `bash script.sh` 로 우회 |
@@ -1674,11 +1690,11 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | 50022 | TCP | **Airflow 작업 실행** (`run_job.sh` 강제 명령) | Airflow 워커 IP **만** |
 | 8080 | TCP | 웹 운영 대시보드 (`web_app.py`) | 개발자 IP |
 | 8765 | TCP | MCP 서버 (`server.py`) | Claude Desktop / Cursor (개발자 IP) |
-| 8766 | TCP | REST API 서버 (`rest_api.py`) | ngrok(내부), 개발자 IP |
+| 443 | TCP | **HTTPS (nginx)** — Snowflake UDF 가 호출 | 공개 인터넷 |
+| 80 | TCP | HTTP → HTTPS 리다이렉트 + ACME 챌린지 | 공개 인터넷 |
 | 6333 | TCP | Qdrant 벡터 DB (HTTP REST + 대시보드) | 개발자 IP |
 | 6379 | TCP | FalkorDB (Redis 프로토콜) | 개발자 IP |
 | 3000 | TCP | FalkorDB Browser (그래프 웹 UI) | 개발자 IP |
-| 4040 | TCP | ngrok 로컬 관리 UI | localhost only |
 
 > `6333` (Qdrant 대시보드: `http://<vm-ip>:6333/dashboard`) 및  
 > `6379` (FalkorDB, redis-cli 접속)는 개발자 IP에서 직접 접근 필요.
@@ -1694,7 +1710,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | 443 | TCP | `api.notion.com` | Notion API 페이지 수집 |
 | 443 | TCP | `us-east5-aiplatform.googleapis.com` | Vertex AI 임베딩 |
 | 443 | TCP | Anthropic / Claude API 엔드포인트 | LLM 트리플 추출 |
-| 443 | TCP | `ngrok.com`, `*.ngrok-free.dev` | ngrok HTTPS 터널 |
+| 443 | TCP | Let's Encrypt (`acme-v02.api.letsencrypt.org`) | 인증서 발급·갱신 (사내 CA 면 불필요) |
 | 443 | TCP | Snowflake (us-central1.gcp) | 쿼리 결과 수신 (Snowflake → Semantica 방향은 아웃바운드 불필요) |
 
 ---
@@ -1703,6 +1719,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-15 | **ngrok 제거 → nginx + 고정 도메인.** 걷어낸 이유는 URL 이 **다섯 곳에 박혀 있었다는 것**입니다 — 네트워크 규칙 1 + UDF 3 + Cortex 프로시저 1. 재시작마다 전부 다시 만들어야 했고 빠뜨리면 그 경로만 조용히 죽었습니다. 이제 호스트는 네트워크 규칙과 `semantica_base_url` 시크릿 **두 곳**뿐이고, UDF 본문에는 URL 이 없습니다 — 도메인이 바뀌어도 UDF 재생성이 필요 없습니다. REST 는 `127.0.0.1` 바인딩으로 바꿨습니다(nginx 를 세워도 8766 이 열려 있으면 **평문 HTTP 우회로**가 남아 Bearer 토큰이 그대로 지나갑니다). 함께 발견: `05_cortex_agent.sql` 에 `SECRETS` 절이 없어 `Authorization` 을 한 번도 보내지 않았고, 서버 토큰이 켜진 지금 **이 프로시저만 401** 입니다. `start_with_ngrok.sh` 는 삭제 — systemd 시대에 `pkill -f rest_api.py` 로 관리 중인 프로세스를 죽입니다 |
 | 2026-09-15 | **웹 의존성이 선언된 적이 없었습니다** — `web_app.py` 는 `fastapi`·`pydantic` 을, `rest_api.py` 는 `starlette` 를 처음부터 import 하는데 `requirements.txt` 에 넷 다 없었습니다. 구 서버엔 손으로 깔려 있어 드러나지 않다가, 새 `.venv` 에서 Ops 대시보드가 `pip install fastapi uvicorn` 만 찍고 죽는 **재시작 루프**에 빠졌습니다. 그 와중에도 `systemctl status` 는 **`active (running)`** 이라고 나옵니다 — 방금 재시작된 순간을 보여주니까요. `tools/check_deps.py` 로 같은 종류를 미리 잡습니다(설치 없이 소스만 읽음) |
 | 2026-09-15 | **배포 유닛 설치 스크립트** (`deploy/install.sh`) — 이전 후 8080 이 죽어 있어 확인해보니 `sementica-ops.service` 가 **설치조차 안 돼** 있었습니다. 유닛 파일이 `User=seongin`·`/home/seongin` 을 박아두고 있어 `devadmin` 서버에서는 그대로 쓸 수 없었던 것. 손으로 고치면 다음 서버에서 반복되므로 설치 시점 치환으로 바꿨습니다. 계정은 `whoami`(=root) 가 아니라 **레포 소유자**를 읽습니다. 함께 정리: `6379` 는 대시보드가 아니라 Redis 포트(UI 는 3000), Ops 대시보드는 **인증이 없어** 루프백 바인딩이 필수 |
 | 2026-09-15 | **A/B 도구가 잘못된 것을 재고 있었습니다** — 근거 판정이 `source_url` 일치뿐이라 **얼마나 잘려서 들어왔는지를 보지 않았습니다.** 문서당 상한을 조일수록 더 많은 문서가 예산에 들어와 지표가 무조건 좋아졌고, 상한 4000 이 "recall 100%" 로 보였습니다. **문서포함률 / 근거생존률**로 분리하니 그 설정의 생존률은 기준보다 **낮았습니다**(64.3% vs 71.4%) — 상한은 폐기. 유일하게 둘 다 올린 것은 `COVERAGE_BOOST=0` 이나, 분모 14문항에서 **1문항 차이**라 아직 채택하지 않았습니다 |

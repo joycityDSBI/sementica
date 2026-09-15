@@ -31,9 +31,15 @@ User=seongin
 WorkingDirectory=/home/seongin/sementica
 EnvironmentFile=/home/seongin/sementica/.env
 
+# 127.0.0.1 바인딩 — nginx 가 443 에서 TLS 를 끝내고 여기로 넘깁니다
+# (deploy/nginx-sementica.conf). 2026-09-15 이전까지는 0.0.0.0 이었는데,
+# 그때는 ngrok 이 로컬 포트를 터널링하는 구조라 외부 바인딩이 필요 없었는데도
+# 열려 있었습니다. nginx 를 세운 뒤에도 열어두면 **평문 HTTP 우회로**가 남아,
+# Bearer 토큰이 그대로 지나갈 수 있습니다. 방화벽에서 8766 인바운드도 닫으세요.
 ExecStart=/home/seongin/sementica/.venv/bin/python \
     src/mcp/rest_api.py \
     --dept strategic \
+    --host 127.0.0.1 \
     --port 8766
 
 Restart=always

@@ -34,6 +34,11 @@ declare -A UNITS=(
 LOGROTATE_SRC=logrotate-sementica
 LOGROTATE_DST=/etc/logrotate.d/sementica
 
+# nginx 는 도메인까지 필요하므로 --domain 을 함께 받습니다.
+NGINX_SRC=nginx-sementica.conf
+NGINX_DST=/etc/nginx/conf.d/sementica.conf
+DOMAIN=""
+
 info()  { printf '  %s\n' "$*"; }
 warn()  { printf '  ⚠️  %s\n' "$*" >&2; }
 die()   { printf '  ❌ %s\n' "$*" >&2; exit 1; }
@@ -44,13 +49,15 @@ usage() {
   사용법: sudo bash deploy/install.sh [--dry-run] <유닛...>
 
     ops        Ops 대시보드 (8080, 127.0.0.1 바인딩)
-    rest       REST API     (8766, Snowflake UDF 가 호출)
+    rest       REST API     (8766, 127.0.0.1 바인딩 — nginx 경유)
     mcp        MCP 템플릿   (sementica-mcp@<부서>)
     logrotate  cron 로그 회전 (/etc/logrotate.d/sementica)
+    nginx      HTTPS 종료   (/etc/nginx/conf.d/sementica.conf, --domain 필요)
 
   예:
     sudo bash deploy/install.sh ops
     sudo bash deploy/install.sh --dry-run ops rest logrotate
+    sudo bash deploy/install.sh --domain semantica.example.com nginx
 
 EOF
 }
@@ -78,6 +85,12 @@ show_state() {
     local lr="—"
     [[ -f "$LOGROTATE_DST" ]] && lr="설치됨"
     printf '  %-28s %-12s %s\n' "logrotate.d/sementica" "$lr" "—"
+    local ng="—" ngstate="—"
+    if [[ -f "$NGINX_DST" ]]; then
+        ng="설치됨"
+        ngstate="$(systemctl is-active nginx 2>/dev/null || true)"
+    fi
+    printf '  %-28s %-12s %s\n' "nginx.conf.d/sementica" "$ng" "$ngstate"
     echo
 }
 
@@ -99,6 +112,7 @@ render() {
     sed -e "s|/home/seongin/sementica|$ROOT|g" \
         -e "s|^User=seongin$|User=$OWNER|" \
         -e "s|^\(\s*create 0640 \)seongin seongin$|\1$OWNER $OWNER|" \
+        -e "s|<SEMANTICA_HOST>|${DOMAIN}|g" \
         "$src"
 }
 
@@ -150,6 +164,15 @@ install_target() {
         install_file "$LOGROTATE_SRC" "$ROOT/deploy/$LOGROTATE_SRC" "$LOGROTATE_DST"
         return
     fi
+    if [[ "$key" == nginx ]]; then
+        # 도메인이 비면 server_name 이 빈 채로 설치되어 nginx 가 모든 요청을
+        # 이 블록으로 받습니다. 조용히 틀리느니 여기서 멈춥니다.
+        [[ -n "$DOMAIN" ]] || die "nginx 는 --domain <도메인> 이 필요합니다"
+        [[ -d /etc/nginx/conf.d ]] \
+            || die "/etc/nginx/conf.d 가 없습니다 — nginx 를 먼저 설치하세요"
+        install_file "$NGINX_SRC" "$ROOT/deploy/$NGINX_SRC" "$NGINX_DST"
+        return
+    fi
     local unit="${UNITS[$key]:-}"
     [[ -n "$unit" ]] || die "알 수 없는 유닛: $key"
     install_file "$unit" "$ROOT/deploy/$unit" "$SYSTEMD_DIR/$unit"
@@ -160,11 +183,20 @@ targets=()
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
+        --domain=*) DOMAIN="${arg#--domain=}" ;;
+        --domain) want_domain=1 ;;
         -h|--help) usage; exit 0 ;;
-        ops|rest|mcp|logrotate) targets+=("$arg") ;;
-        *) usage; die "알 수 없는 인자: $arg" ;;
+        ops|rest|mcp|logrotate|nginx) targets+=("$arg") ;;
+        *)
+            if [[ "${want_domain:-0}" == 1 ]]; then
+                DOMAIN="$arg"; want_domain=0
+            else
+                usage; die "알 수 없는 인자: $arg"
+            fi
+            ;;
     esac
 done
+[[ "${want_domain:-0}" == 1 ]] && die "--domain 뒤에 도메인이 없습니다"
 
 show_state
 
@@ -200,10 +232,26 @@ for t in "${targets[@]}"; do
     case "$t" in
         mcp)       printf '    sudo systemctl enable --now sementica-mcp@strategic\n' ;;
         logrotate) printf '    sudo logrotate -d %s   # 점검 (회전 없음)\n' "$LOGROTATE_DST" ;;
+        nginx)     printf '    sudo nginx -t && sudo systemctl reload nginx   # 문법 검사 후 반영\n' ;;
         *)         printf '    sudo systemctl enable --now %s\n' "${UNITS[$t]%.service}" ;;
     esac
 done
 echo
+
+# REST 를 루프백으로 옮겼으면 8766 인바운드를 닫아야 합니다. 안 닫으면
+# nginx 를 세워두고도 평문 HTTP 우회로가 그대로 남습니다.
+for t in "${targets[@]}"; do
+    if [[ "$t" == nginx ]]; then
+        cat <<EOF
+  ⚠️  8766 인바운드를 방화벽에서 **닫으세요.** nginx 를 세워도 8766 이
+      외부에 열려 있으면 평문 HTTP 우회로가 남고, Bearer 토큰이 그대로
+      지나갈 수 있습니다. 확인:
+
+          ss -tlnp | grep :8766      # 127.0.0.1:8766 이어야 합니다
+
+EOF
+    fi
+done
 
 # Ops 대시보드는 인증이 없습니다. 유닛이 127.0.0.1 에만 바인딩하는 이유가
 # 그것이고, 방화벽으로 열면 그 대역 누구나 /api/batch/run 을 칠 수 있습니다.

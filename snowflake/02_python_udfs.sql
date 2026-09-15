@@ -29,25 +29,41 @@ USE SCHEMA   DATAHUB;
 
 
 -- ================================================================
--- 1) 인증 시크릿
+-- 1) 시크릿 — 인증 토큰 + 베이스 URL
 -- ================================================================
--- ngrok URL 은 공개 인터넷에 열려 있습니다. 서버(.env)의
+-- 엔드포인트는 공개 인터넷에 열려 있습니다. 서버(.env)의
 -- SNOWFLAKE_REST_TOKEN 과 **같은 값**을 넣으세요.
 --
 -- 순서가 중요합니다. UDF 는 토큰이 CHANGE_ME 로 시작하면 Authorization 을
 -- 보내지 않고, 서버도 토큰이 비어 있으면 인증을 요구하지 않습니다. 따라서
 --   ① 이 파일을 그대로 배포 (placeholder 상태 — 기존처럼 무인증으로 동작)
 --   ② 실제 토큰으로 SECRET 교체
---   ③ 서버 .env 에 같은 값 설정 후 rest_api.py 재시작
+--   ③ 서버 .env 에 같은 값 설정 후 systemctl restart sementica-rest
 -- 순서로 무중단 전환이 됩니다. ②③ 을 거꾸로 하면 그 사이 모든 UDF 가 401 입니다.
 CREATE OR REPLACE SECRET DATAHUB.DATAHUB.semantica_rest_token
   TYPE          = GENERIC_STRING
   SECRET_STRING = 'CHANGE_ME_서버_env_의_SNOWFLAKE_REST_TOKEN_과_동일하게';
 
+-- 베이스 URL 도 시크릿으로 둡니다. 비밀이어서가 아니라, Python UDF 가 외부
+-- 설정을 읽을 통로가 SECRETS 뿐이기 때문입니다.
+--
+-- 이렇게 두면 **도메인이 바뀌어도 UDF 를 다시 만들 필요가 없습니다.**
+-- ngrok 시절에는 재시작마다 URL 이 바뀌어 UDF 3개와 05 의 프로시저까지
+-- 매번 다시 만들어야 했습니다. 바꿀 때는:
+--   ALTER SECRET DATAHUB.DATAHUB.semantica_base_url
+--     SET SECRET_STRING = 'https://새도메인';
+--   그리고 01_network_access.sql 의 NETWORK RULE 도 함께.
+CREATE OR REPLACE SECRET DATAHUB.DATAHUB.semantica_base_url
+  TYPE          = GENERIC_STRING
+  SECRET_STRING = 'https://<SEMANTICA_HOST>';
+
 -- 생성 확인 (아래 ALTER 가 실패하면 여기부터 다시 보세요)
-SHOW SECRETS LIKE 'semantica_rest_token' IN SCHEMA DATAHUB.DATAHUB;
+SHOW SECRETS LIKE 'semantica_%' IN SCHEMA DATAHUB.DATAHUB;
 
 -- UDF 가 시크릿을 읽을 수 있도록 integration 에 등록.
+--
+-- ⚠️ SET 은 **덮어씁니다.** 둘을 한 번에 적어야 합니다 — 하나만 적으면 다른
+--    하나가 목록에서 빠지고, 그 시크릿을 쓰는 UDF 가 전부 실패합니다.
 --
 -- ⚠️ 시크릿 이름은 **반드시 DB.SCHEMA 까지 붙인 전체 경로**여야 합니다.
 --    EXTERNAL ACCESS INTEGRATION 은 계정 레벨 객체라 USE SCHEMA 컨텍스트가
@@ -55,7 +71,8 @@ SHOW SECRETS LIKE 'semantica_rest_token' IN SCHEMA DATAHUB.DATAHUB;
 --      SQL compilation error:
 --      Secret 'SEMANTICA_REST_TOKEN' does not exist or operation not authorized.
 ALTER EXTERNAL ACCESS INTEGRATION semantica_external_access
-  SET ALLOWED_AUTHENTICATION_SECRETS = (DATAHUB.DATAHUB.semantica_rest_token);
+  SET ALLOWED_AUTHENTICATION_SECRETS = (DATAHUB.DATAHUB.semantica_rest_token,
+                                        DATAHUB.DATAHUB.semantica_base_url);
 
 -- 반영 확인 — ALLOWED_AUTHENTICATION_SECRETS 에 위 이름이 보여야 합니다.
 DESC INTEGRATION semantica_external_access;
@@ -72,12 +89,20 @@ CREATE OR REPLACE FUNCTION sementica_search(query VARCHAR, lim NUMBER)
   RUNTIME_VERSION = '3.11'
   HANDLER = 'run'
   EXTERNAL_ACCESS_INTEGRATIONS = (semantica_external_access)
-  SECRETS = ('rest_token' = DATAHUB.DATAHUB.semantica_rest_token)
+  SECRETS = ('rest_token' = DATAHUB.DATAHUB.semantica_rest_token,
+             'base_url'   = DATAHUB.DATAHUB.semantica_base_url)
   PACKAGES = ('requests')
 AS $$
 import requests
 
-_BASE = 'https://agility-unadvised-constrain.ngrok-free.dev'
+def _base():
+    """베이스 URL 을 시크릿에서 읽습니다 — UDF 본문에 박지 않습니다.
+
+    ngrok 시절에는 URL 이 재시작마다 바뀌어 UDF 3개와 프로시저 1개를 매번
+    다시 만들어야 했습니다. 시크릿으로 두면 ALTER SECRET 한 줄이면 됩니다.
+    """
+    import _snowflake
+    return (_snowflake.get_generic_secret_string('base_url') or '').rstrip('/')
 
 
 def _headers():
@@ -86,7 +111,7 @@ def _headers():
     이 헤더가 없으면 서버에서 토큰을 켜는 순간 모든 UDF 가 401 이 됩니다.
     그래서 아무도 토큰을 켜지 못하고 공개 URL 이 무인증으로 남아 있었습니다.
     """
-    h = {'ngrok-skip-browser-warning': '1'}
+    h = {}
     try:
         import _snowflake
         tok = (_snowflake.get_generic_secret_string('rest_token') or '').strip()
@@ -114,7 +139,7 @@ def _result(resp):
 
 def run(query: str, lim: float) -> dict:
     resp = requests.post(
-        f'{_BASE}/rest/search',
+        f'{_base()}/rest/search',
         json={'query': query, 'limit': int(lim)},
         headers=_headers(),
         timeout=30,
@@ -140,16 +165,24 @@ CREATE OR REPLACE FUNCTION sementica_events(
   RUNTIME_VERSION = '3.11'
   HANDLER = 'run'
   EXTERNAL_ACCESS_INTEGRATIONS = (semantica_external_access)
-  SECRETS = ('rest_token' = DATAHUB.DATAHUB.semantica_rest_token)
+  SECRETS = ('rest_token' = DATAHUB.DATAHUB.semantica_rest_token,
+             'base_url'   = DATAHUB.DATAHUB.semantica_base_url)
   PACKAGES = ('requests')
 AS $$
 import requests
 
-_BASE = 'https://agility-unadvised-constrain.ngrok-free.dev'
+def _base():
+    """베이스 URL 을 시크릿에서 읽습니다 — UDF 본문에 박지 않습니다.
+
+    ngrok 시절에는 URL 이 재시작마다 바뀌어 UDF 3개와 프로시저 1개를 매번
+    다시 만들어야 했습니다. 시크릿으로 두면 ALTER SECRET 한 줄이면 됩니다.
+    """
+    import _snowflake
+    return (_snowflake.get_generic_secret_string('base_url') or '').rstrip('/')
 
 
 def _headers():
-    h = {'ngrok-skip-browser-warning': '1'}
+    h = {}
     try:
         import _snowflake
         tok = (_snowflake.get_generic_secret_string('rest_token') or '').strip()
@@ -172,7 +205,7 @@ def _result(resp):
 
 def run(game: str, event_type: str, from_date: str, to_date: str, lim: float) -> dict:
     resp = requests.post(
-        f'{_BASE}/rest/events',
+        f'{_base()}/rest/events',
         json={
             'game':       game,
             'event_type': event_type or '',
@@ -199,16 +232,24 @@ CREATE OR REPLACE FUNCTION sementica_hybrid(query VARCHAR, lim NUMBER)
   RUNTIME_VERSION = '3.11'
   HANDLER = 'run'
   EXTERNAL_ACCESS_INTEGRATIONS = (semantica_external_access)
-  SECRETS = ('rest_token' = DATAHUB.DATAHUB.semantica_rest_token)
+  SECRETS = ('rest_token' = DATAHUB.DATAHUB.semantica_rest_token,
+             'base_url'   = DATAHUB.DATAHUB.semantica_base_url)
   PACKAGES = ('requests')
 AS $$
 import requests
 
-_BASE = 'https://agility-unadvised-constrain.ngrok-free.dev'
+def _base():
+    """베이스 URL 을 시크릿에서 읽습니다 — UDF 본문에 박지 않습니다.
+
+    ngrok 시절에는 URL 이 재시작마다 바뀌어 UDF 3개와 프로시저 1개를 매번
+    다시 만들어야 했습니다. 시크릿으로 두면 ALTER SECRET 한 줄이면 됩니다.
+    """
+    import _snowflake
+    return (_snowflake.get_generic_secret_string('base_url') or '').rstrip('/')
 
 
 def _headers():
-    h = {'ngrok-skip-browser-warning': '1'}
+    h = {}
     try:
         import _snowflake
         tok = (_snowflake.get_generic_secret_string('rest_token') or '').strip()
@@ -231,7 +272,7 @@ def _result(resp):
 
 def run(query: str, lim: float) -> dict:
     resp = requests.post(
-        f'{_BASE}/rest/hybrid',
+        f'{_base()}/rest/hybrid',
         json={'query': query, 'limit': int(lim)},
         headers=_headers(),
         timeout=30,

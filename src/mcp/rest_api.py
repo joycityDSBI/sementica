@@ -90,7 +90,7 @@ def _deny() -> JSONResponse:
 
 
 # ─── 입력 상한 ────────────────────────────────────────────────────────────────
-# 이 API 는 ngrok 터널로 외부에 노출됩니다. limit 을 그대로 넘기면
+# 이 API 는 공개 도메인으로 외부에 노출됩니다. limit 을 그대로 넘기면
 # {"limit": 100000} 한 번에 Qdrant 를 100000 페이지 스크롤하고 수백 MB 를
 # 조립하다 프로세스가 죽습니다.
 MAX_LIMIT = int(os.environ.get("REST_MAX_LIMIT", "50"))
@@ -371,7 +371,7 @@ if __name__ == "__main__":
     print(f"   Snowflake: POST {base}/snowflake/{{search|events|hybrid}}")
     if not _REST_TOKEN:
         print("   ⚠️  SNOWFLAKE_REST_TOKEN 미설정 — 이 API 는 인증 없이 열립니다.")
-        print("      ngrok 으로 노출한다면 반드시 토큰을 설정하세요")
+        print("      외부 도메인으로 노출한다면 반드시 토큰을 설정하세요")
         print("      (.env 와 snowflake/01_network_access.sql 의 SECRET 을 같은 값으로).")
     print(
         f"   인증: {'Bearer 토큰 활성화' if _REST_TOKEN else '없음 (SNOWFLAKE_REST_TOKEN 미설정)'}"
