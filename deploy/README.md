@@ -118,15 +118,51 @@ sudo systemctl start sementica-rest
 `sementica-mcp.service` 가 설치돼 있었고 레포에는 템플릿만 있었습니다. 라이브
 서버는 템플릿(`sementica-mcp@strategic`)으로 통일했으므로 레포와 일치합니다.
 
-## `git pull` 은 레포 소유 계정으로
+## 레포 작업은 반드시 `devadmin` 으로
 
-root 로 받으면 새 파일이 root 소유가 되어, 이후 `devadmin` 으로 도는 서비스가
-그 파일을 건드리지 못합니다. 이전 과정에서 키 파일이 root 소유로 남아 한 번
-겪었습니다.
+root 로 `git pull` 을 돌리면 새 객체가 root 소유로 생깁니다. 그다음부터
+devadmin 의 pull 이 이렇게 실패합니다:
+
+```
+error: insufficient permission for adding an object to repository database .git/objects
+fatal: failed to write object
+```
+
+**root 가 필요한 것은 두 가지뿐입니다** — `systemctl` 과 `/etc` 아래 설치.
+나머지(`git`·`pip`·`python`)는 전부 devadmin 으로 하세요.
 
 ```bash
-su - devadmin -c 'cd ~/sementica && git pull'
+# devadmin 셸에서
+cd ~/sementica && git pull
+.venv/bin/pip install -r requirements.txt
+
+# root 가 필요할 때만
+sudo bash deploy/install.sh ops
+sudo systemctl restart sementica-ops
 ```
+
+### root 셸에 머물러 있는지 확인
+
+PuTTY 로 devadmin 으로 접속해도 `sudo su` / `sudo -i` 를 한 번 치면 그 셸은
+계속 root 입니다. `sudo su`(대시 없음)는 작업 디렉터리를 유지해서 프롬프트만
+`root@` 로 바뀌므로 알아채기 어렵습니다.
+
+```bash
+whoami           # root 면 올라와 있는 것
+echo $SUDO_USER  # devadmin 이면 sudo 로 올라온 상태
+exit             # devadmin 으로 복귀
+```
+
+### 이미 오염됐다면
+
+```bash
+sudo chown -R devadmin:devadmin /home/devadmin/sementica
+find /home/devadmin/sementica -not -uid "$(id -u devadmin)" | head   # 비어야 정상
+```
+
+`install.sh` 가 이 검사를 먼저 돌립니다. 레포가 오염된 상태로 설치하면
+**`User=root` 짜리 유닛이 조용히 써지기** 때문입니다 — 설치 스크립트는 레포
+디렉터리의 소유자를 서비스 계정으로 삼습니다.
 
 ## HTTPS 노출 (nginx)
 

@@ -102,6 +102,25 @@ preflight() {
         || die ".venv/bin/python 이 없습니다 — python3 -m venv .venv 부터 하세요"
     [[ -f "$ROOT/.env" ]] \
         || die ".env 가 없습니다 (EnvironmentFile 로 참조하므로 없으면 기동 실패)"
+    # 레포를 root 로 만졌으면(git pull 을 sudo 로 돌리는 등) 일부 파일이 root
+    # 소유로 남습니다. 그 상태에서 OWNER 를 읽으면 `User=root` 짜리 유닛이
+    # 조용히 써지고, 서비스가 root 로 돌게 됩니다. 멈추는 편이 낫습니다.
+    #
+    # .git/objects 가 특히 잘 오염됩니다 — 그러면 devadmin 의 git pull 이
+    # "insufficient permission for adding an object" 로 실패합니다.
+    # 이름이 아니라 UID 로 비교합니다. `find -user <이름>` 은 이름에 특수문자가
+    # 있으면 "invalid user name" 으로 죽는데, 그때 2>/dev/null 과 맞물리면
+    # **검사가 통과한 것처럼 보입니다** — 검출기가 조용히 꺼지는 최악의 형태입니다.
+    local owner_uid strays
+    owner_uid="$(id -u "$OWNER" 2>/dev/null || true)"
+    [[ -n "$owner_uid" ]] || die "계정 '$OWNER' 의 UID 를 읽지 못했습니다"
+    strays="$(find "$ROOT" -not -uid "$owner_uid" -printf '%u %p\n' 2>/dev/null | head -5)"
+    if [[ -n "$strays" ]]; then
+        warn "레포에 '$OWNER' 소유가 아닌 파일이 있습니다 (앞 5개):"
+        printf '%s\n' "$strays" | sed 's/^/      /'
+        die "chown -R $OWNER:$OWNER $ROOT 로 정리한 뒤 다시 실행하세요"
+    fi
+
     id "$OWNER" >/dev/null 2>&1 \
         || die "계정 '$OWNER' 가 없습니다 (레포 소유자를 읽었습니다)"
 }
