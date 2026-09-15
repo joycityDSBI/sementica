@@ -49,18 +49,24 @@ DEFAULT_ARGS = {
 }
 
 
-def cmd(*parts: str) -> str:
-    """VM 에서 실행할 셸 명령을 만듭니다.
+def job(name: str) -> str:
+    """작업 이름 하나로 VM 에서 실행할 명령을 만듭니다.
 
-    `cd` 를 항상 붙이는 이유: 스크립트들이 상대 경로로 .env 와 data/ 를 찾고,
-    `set -o pipefail` 은 파이프 중간 실패를 놓치지 않기 위해서입니다.
+    명령 문자열을 DAG 쪽에서 조립하지 않는 이유가 둘입니다.
 
-    >>> cmd("echo hi").endswith("echo hi")
-    True
-    >>> "set -euo pipefail" in cmd("x")
-    True
+    ① **작업 정의가 한곳에** 있어야 합니다. 명령이 DAG 에 흩어져 있으면
+       스크립트 경로나 인자가 바뀌었을 때 DAG 이 옛 명령을 계속 씁니다.
+
+    ② **SSH 강제 명령**과 맞물립니다. Airflow 서버에서 이 VM 으로 SSH 를
+       열 때, 그 키를 `run_job.sh` 에 묶어두면 **허용된 작업만** 실행됩니다.
+       방화벽으로 접속 주소를 좁히는 것과 별개로, 접속한 뒤에 무엇을 할 수
+       있는지도 좁혀야 합니다 — Airflow 서버가 털렸을 때 그 키로 VM 에서
+       임의 명령이 돌아가는 상황을 막습니다.
+
+    >>> job("sync")
+    '/home/seongin/sementica/scripts/run_job.sh sync'
     """
-    return f"set -euo pipefail; cd {ROOT} && " + " ".join(parts)
+    return f"{ROOT}/scripts/run_job.sh {name}"
 
 
 def run(task_id: str, command: str, **kwargs):
@@ -95,32 +101,31 @@ def run(task_id: str, command: str, **kwargs):
 
 def sync_command() -> str:
     """Notion 증분 동기화. content_hash 비교라 **재시도해도 안전합니다.**"""
-    return cmd(VENV, f"{ROOT}/src/pipeline/sync.py", "--dept", DEPT)
+    return job("sync")
 
 
 def backup_command() -> str:
     """Qdrant·FalkorDB·PostgreSQL·Notion 캐시·설정 파일."""
-    return cmd("bash", f"{ROOT}/scripts/backup.sh")
+    return job("backup")
 
 
 def glossary_snapshot_command() -> str:
     """용어집 스냅샷 갱신.
 
     ⚠️ 운영 VM 은 catalog.joycityplay.com 에 접근하지 못합니다(방화벽).
-    이 작업은 **용어집 API 에 닿는 호스트**에서 실행돼야 합니다. VM 에서
-    돌리면 실패하고, 그러면 기존 스냅샷이 그대로 쓰입니다(동작은 계속됨).
+    VM 에서 돌리면 실패하고, 그러면 기존 스냅샷이 그대로 쓰입니다(동작은 계속).
 
-    회사 Airflow 워커가 API 에 닿는다면 여기서 받아 VM 으로 밀어 넣는 쪽이
-    맞습니다 — 그때는 이 명령 대신 두 단계(받기 → 전송)로 나누세요.
+    회사 Airflow 워커가 API 에 닿는다면 워커에서 받아 VM 으로 밀어 넣는
+    2단계로 나누는 쪽이 맞습니다 — 네트워크 구성을 확인한 뒤에 정하세요.
     """
-    return cmd(VENV, f"{ROOT}/tools/fetch_glossary_snapshot.py")
+    return job("glossary")
 
 
-def eval_command(golden: str) -> str:
-    """골든셋 평가.
+def eval_command() -> str:
+    """dev 골든셋 평가.
 
-    ⚠️ **holdout 은 여기에 넣지 마세요.** 정기적으로 돌리면 그 순간
-    holdout 이 dev 가 되고, 일반화를 잴 수단이 사라집니다. holdout 은 큰
-    변경 뒤에 사람이 한 번 돌리는 것입니다 (project_summary 7-5 참고).
+    ⚠️ **holdout 은 실행할 수 없습니다** — run_job.sh 의 허용 목록에 없습니다.
+    정기적으로 돌리면 그 순간 holdout 이 dev 가 되고, 일반화를 잴 수단이
+    사라집니다. 사람이 큰 변경 뒤에 한 번 돌리는 것입니다.
     """
-    return cmd(VENV, f"{ROOT}/src/eval/evaluate.py", "--dept", DEPT, "--golden", golden)
+    return job("eval-dev")

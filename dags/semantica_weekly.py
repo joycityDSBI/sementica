@@ -20,7 +20,6 @@ from airflow import DAG
 from semantica_common import (
     DEFAULT_ARGS,
     DEPT,
-    ROOT,
     eval_command,
     glossary_snapshot_command,
     run,
@@ -51,7 +50,7 @@ with DAG(
     # dev 골든셋만 — holdout 은 사람이 돌립니다 (모듈 docstring 참고).
     evaluate = run(
         "evaluate_dev",
-        eval_command(f"{ROOT}/data/eval/golden_v2_dev.json"),
+        eval_command(),
         retries=0,  # LLM 비용이 드는 작업이라 자동 재시도하지 않습니다
         trigger_rule="all_done",  # 용어집 갱신이 실패해도 평가는 진행
         doc_md=(

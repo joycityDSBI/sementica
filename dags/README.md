@@ -64,6 +64,70 @@ airflow connections add semantica_vm \
 
 ssh 모드는 `apache-airflow-providers-ssh` 가 필요합니다.
 
+## 방화벽과 접근 범위
+
+Airflow 서버가 별도에 있으면 **이 VM 의 22 번을 그 서버에서만** 열어야 합니다.
+
+```bash
+# GCP 예시 — 소스 범위를 Airflow egress IP 로 좁힙니다
+gcloud compute firewall-rules create allow-ssh-from-airflow     --direction=INGRESS --action=ALLOW --rules=tcp:22     --source-ranges=<AIRFLOW_EGRESS_IP>/32     --target-tags=semantica
+```
+
+먼저 확인할 것: **그 egress IP 가 고정인가.** Cloud Composer 나 K8s 워커는
+IP 가 바뀔 수 있습니다. Cloud NAT 로 고정돼 있는지 Airflow 운영 쪽에 물어보세요.
+바뀌는 구성이면 화이트리스트가 주기적으로 깨집니다.
+
+### 접속한 뒤에 무엇을 할 수 있는가
+
+방화벽은 **누가 접속하는지**만 좁힙니다. Airflow 서버가 털리면 그 키로 VM 에서
+임의 명령을 실행할 수 있게 되는데, 그건 별개로 막아야 합니다.
+
+`scripts/run_job.sh` 가 **허용된 작업 이름만** 실행합니다. DAG 도 명령 문자열이
+아니라 작업 이름을 보냅니다:
+
+```
+/home/seongin/sementica/scripts/run_job.sh sync
+```
+
+SSH 키를 이 스크립트에 묶어두세요:
+
+```
+# ~/.ssh/authorized_keys (VM)
+command="/home/seongin/sementica/scripts/run_job.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... airflow@corp
+```
+
+이 키로 접속하면 무엇을 보내든 `run_job.sh` 가 실행되고, 원래 명령은
+`SSH_ORIGINAL_COMMAND` 로 전달됩니다. 목록에 없으면 거부하고 syslog 에
+남깁니다 — 키가 유출되면 그 로그가 첫 단서입니다.
+
+```bash
+# 허용 목록 확인
+bash scripts/run_job.sh --list
+
+# 거부 동작 확인
+bash scripts/run_job.sh "cat .env"      # ❌ exit 2
+```
+
+`case` 문의 정확 일치라 `sync; cat .env` 나 `sync$(id)` 같은 주입도 막힙니다.
+
+### 권장 사항
+
+- **전용 키**를 쓰세요. 사람이 쓰는 키와 같은 것을 주면 범위 제한이 무의미합니다.
+- **전용 계정**도 고려할 만합니다. `seongin` 으로 붙으면 그 계정이 가진 모든
+  권한(sudo 포함)이 열려 있는 셈입니다 — 강제 명령이 그걸 막지만, 계정이
+  분리돼 있으면 한 겹 더 안전합니다.
+- `run_job.sh` 에 작업을 추가할 때는 **자동 실행에 올려도 되는 것인지** 먼저
+  따져보세요. `--reset` 과 holdout 평가를 뺀 이유가 파일 안에 적혀 있습니다.
+
+### SSH 없이 가는 길
+
+- **Airflow 워커를 이 VM 에 두기** — 워커가 브로커로 **나가는** 연결만 쓰므로
+  인바운드를 열 필요가 없습니다. 방화벽 관점에서는 가장 깔끔하지만, 회사
+  Airflow 가 외부 워커 추가를 허용해야 합니다.
+- **REST API 에 트리거 엔드포인트 추가** — 이미 8766 이 열려 있습니다. 다만
+  비동기 작업 상태 관리를 새로 만들어야 하고, 그만큼 공격 표면이 늡니다.
+  SSH 쪽이 단순합니다.
+
 ## 왜 이렇게 했는가
 
 **`max_active_runs=1`** — 두 sync 가 같은 그래프에 동시에 쓰면 상태가 깨집니다.
