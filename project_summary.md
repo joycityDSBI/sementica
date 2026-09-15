@@ -841,6 +841,7 @@ Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 �
 | `tools/check_extraction_stability.py` | 트리플 추출 재현성 측정 (같은 문서 2회 추출 비교) |
 | `tools/ab_retrieval.py` | 검색 파라미터 A/B — LLM 생성·채점 없이 검색 단계만 결정적으로 측정 |
 | `tools/check_schema_drift.py` | 코드의 `INSERT` 와 `schema/*.sql` 대조 — **DB 없이** 돌아가므로 CI 가능 |
+| `tools/check_deps.py` | 코드가 import 하는데 `requirements.txt` 에 없는 패키지 — **설치 없이** 소스만 읽음 |
 | `tools/pin_requirements.py` | 설치된 버전을 상한으로 고정 + `requirements.lock.txt` 생성 |
 | `tools/diag_events.py` | 이벤트 장부(PostgreSQL) vs 그래프(FalkorDB) 대조 |
 | `tools/rank_probe.py` | 특정 문항의 근거가 **청크 순위 / 페이지 순위** 어디에 있는지 |
@@ -1402,11 +1403,17 @@ docker exec -i <pg> psql -U sementica -d sementica_ops -c '\d notion_pages'
 | `Failed building wheel for gensim` | `semantica` 패키지가 **쓰지도 않는** NER/RE 때문에 끌어옴. 구 서버엔 휠이 캐시돼 있어 몰랐음 |
 | `service-account-key.json not found` | gitignore 대상이라 clone 에 없음. 게다가 `scp` 로 받은 파일이 **1바이트 · root 소유**로 남아 있었음 |
 | `python: not found` | 시스템에 `python3` 만 있음. 모든 명령을 `.venv/bin/python` 으로 |
+| Ops 대시보드가 `active (running)` 인데 응답 없음 | `fastapi`·`uvicorn`·`pydantic`·`starlette` 가 `requirements.txt` 에 **처음부터 없었음**. 앱이 안내만 찍고 종료 → `Restart=on-failure` 가 다시 띄우는 루프. 방금 재시작된 순간이라 상태는 `running` 으로 보임 |
+| `sementica-ops.service` 없음 | 유닛을 설치한 적이 없고, 설치했어도 `User=seongin` 이라 실패했을 것 |
 
-> **교훈: 스키마 드리프트는 평소에 드러나지 않습니다.** 드러나는 시점이 하필
+> **교훈: 드리프트는 평소에 드러나지 않습니다.** 드러나는 시점이 하필
 > 서버를 옮기거나 장애에서 복구할 때라, 제일 급할 때 발목을 잡습니다.
-> `tools/check_schema_drift.py` 가 DB 없이 코드의 `INSERT` 와 스키마 파일을
-> 대조합니다 — CI 에 넣을 수 있습니다.
+> 두 검출기가 **DB·설치 없이 소스만 읽고** 대조하므로 CI 에 넣을 수 있습니다:
+>
+> ```bash
+> python tools/check_schema_drift.py    # 코드의 INSERT  vs schema/*.sql
+> python tools/check_deps.py            # 코드의 import  vs requirements.txt
+> ```
 >
 > `CREATE TABLE IF NOT EXISTS` 는 테이블이 있으면 **아무것도 하지 않습니다.**
 > 컬럼을 추가할 때는 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 도 함께 넣으세요.
@@ -1575,6 +1582,8 @@ Connection 예시는 포트가 22 로 적혀 있으나 실제는 **50022** 입�
 | 88 | A/B 지표 정정 — 근거생존률 | ✅ | 기존 지표는 `source_url` 일치만 봐서 **잘림을 측정하지 않았음**. 문서 상한을 조일수록 무조건 좋아지는 착시. 지표를 문서포함률·근거생존률로 분리, 2026-09-15 |
 | 89 | 문서당 길이 상한 (`doc_cap`) | ⛔ | 포함률 100% 인 설정이 생존률은 기준보다 낮음(64.3% vs 71.4%) — **적용하지 않음**, 2026-09-15 |
 | 90 | `COVERAGE_BOOST=0` 검토 | 🔜 | 두 지표가 함께 상승한 유일한 설정(94.1→97.1 / 71.4→78.6)이나 **생존률 분모 14문항에서 1문항 차이**. 판정 규칙을 넓혀 분모를 키운 뒤 재측정 |
+| 93 | 웹 의존성 미선언 | ✅ | `fastapi`·`pydantic`·`starlette`·`uvicorn` 이 `requirements.txt` 에 **처음부터 없었습니다.** 구 서버엔 손으로 깔려 있어 안 드러났고, 새 `.venv` 에서 Ops 대시보드가 재시작 루프에 빠짐. `tools/check_deps.py` 로 검출, 2026-09-15 |
+| 94 | `requirements.lock.txt` 미커밋 | 🔜 | `requirements.txt` 머리말이 이 파일로 설치하라고 안내하는데 레포에 없습니다. 라이브 서버에서 `pin_requirements.py --write` 후 커밋 필요 |
 | 92 | systemd 유닛 경로 하드코딩 | ✅ | `deploy/install.sh` — 레포 위치·소유 계정을 설치 시점에 치환. 이전 후 `sementica-ops` 가 설치조차 안 돼 8080 이 죽어 있던 것이 계기, 2026-09-15 |
 | 91 | Q69 랭킹 개선 | 🔜 | 근거가 페이지 순위 14위. 예산·상한으로는 대가가 더 큼 — 랭킹 자체를 다뤄야 함 |
 
@@ -1684,6 +1693,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-15 | **웹 의존성이 선언된 적이 없었습니다** — `web_app.py` 는 `fastapi`·`pydantic` 을, `rest_api.py` 는 `starlette` 를 처음부터 import 하는데 `requirements.txt` 에 넷 다 없었습니다. 구 서버엔 손으로 깔려 있어 드러나지 않다가, 새 `.venv` 에서 Ops 대시보드가 `pip install fastapi uvicorn` 만 찍고 죽는 **재시작 루프**에 빠졌습니다. 그 와중에도 `systemctl status` 는 **`active (running)`** 이라고 나옵니다 — 방금 재시작된 순간을 보여주니까요. `tools/check_deps.py` 로 같은 종류를 미리 잡습니다(설치 없이 소스만 읽음) |
 | 2026-09-15 | **배포 유닛 설치 스크립트** (`deploy/install.sh`) — 이전 후 8080 이 죽어 있어 확인해보니 `sementica-ops.service` 가 **설치조차 안 돼** 있었습니다. 유닛 파일이 `User=seongin`·`/home/seongin` 을 박아두고 있어 `devadmin` 서버에서는 그대로 쓸 수 없었던 것. 손으로 고치면 다음 서버에서 반복되므로 설치 시점 치환으로 바꿨습니다. 계정은 `whoami`(=root) 가 아니라 **레포 소유자**를 읽습니다. 함께 정리: `6379` 는 대시보드가 아니라 Redis 포트(UI 는 3000), Ops 대시보드는 **인증이 없어** 루프백 바인딩이 필수 |
 | 2026-09-15 | **A/B 도구가 잘못된 것을 재고 있었습니다** — 근거 판정이 `source_url` 일치뿐이라 **얼마나 잘려서 들어왔는지를 보지 않았습니다.** 문서당 상한을 조일수록 더 많은 문서가 예산에 들어와 지표가 무조건 좋아졌고, 상한 4000 이 "recall 100%" 로 보였습니다. **문서포함률 / 근거생존률**로 분리하니 그 설정의 생존률은 기준보다 **낮았습니다**(64.3% vs 71.4%) — 상한은 폐기. 유일하게 둘 다 올린 것은 `COVERAGE_BOOST=0` 이나, 분모 14문항에서 **1문항 차이**라 아직 채택하지 않았습니다 |
 | 2026-09-15 | **골든셋 v3 재생성** — Notion 에서 **46페이지가 사라져** v2 의 근거 문서가 없어짐. 페이지당 청크·트리플은 그대로(5.0 / 7.0)라 추출 실패가 아니라 **구성 변화**. dev 기준선 **0.833**, v2 의 0.967 과 비교 불가 |

@@ -35,6 +35,19 @@ fastmcp>=4.0.0,<5.0.0
 # 에서 gensim 휠 빌드가 실패해 **서버 이전 시 설치가 막혔습니다.** 쓰지도 않는
 # 기능의 의존성 때문에 설치가 안 되는 상태였습니다.
 
+# ── 웹 서비스 (REST API · Ops 대시보드) ───────────────────────────────────────
+# 2026-09-15 추가. 이 넷은 처음부터 필요했는데 목록에 없었습니다 — 구 서버에는
+# 손으로 깔려 있어서 드러나지 않았고, 라이브 서버에서 .venv 를 새로 만들자
+# sementica-ops 가 "pip install fastapi uvicorn" 만 찍고 죽는 재시작 루프에
+# 빠졌습니다. `systemctl status` 는 그 와중에도 active (running) 이라 나옵니다.
+#
+# fastapi 가 starlette·pydantic 을 끌어오지만 **직접 import 하므로 직접 적습니다.**
+# 전이 의존성에 기대면 fastapi 가 그것들을 떼는 날 조용히 깨집니다.
+fastapi>=0.110.0                  # src/ops/web_app.py
+pydantic>=2.0.0                   # web_app.py 의 요청 모델
+starlette>=0.36.0                 # src/mcp/rest_api.py
+uvicorn>=0.27.0                   # 둘 다 이걸로 뜹니다
+
 # ── 운영 로그 (PostgreSQL) ────────────────────────────────────────────────────
 psycopg2-binary>=2.9.0
 
