@@ -1,5 +1,18 @@
 #!/bin/bash
 # Semantica 자동 동기화 + 백업 Cron 등록 스크립트
+#
+# ⚠️ 2026-09-15: 주기 실행은 **Airflow 로 옮겼습니다** (dags/ 참고).
+#    cron 은 Airflow 배선이 끝날 때까지의 임시 경로입니다.
+#    둘을 동시에 켜지 마세요 — 같은 시각에 sync 가 두 번 돌면 같은 그래프에
+#    동시에 쓰게 되고, 그건 조용히 상태를 깨뜨립니다.
+#
+#    Airflow 로 옮긴 이유는 **순서** 입니다. cron 의 "2시 sync / 3시 backup" 은
+#    sync 가 1시간 안에 끝난다는 시계 기반 가정이고, 길어지면 백업이 동기화
+#    중인 상태를 뜹니다. 둘 다 "성공" 으로 끝나 알림에도 안 잡힙니다.
+#
+#    Airflow 로 전환한 뒤에는 기존 항목을 지우세요:
+#      crontab -l > ~/crontab.bak        # 먼저 백업
+#      crontab -l | grep -v sementica | crontab -
 # 사용법:
 #   bash setup_cron.sh [--dept strategic] [--hour 2] [--search "프로세스"]
 #   bash setup_cron.sh --backup-only   # 백업 cron만 등록
