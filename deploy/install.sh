@@ -199,10 +199,16 @@ check_tls() {
     # ⑤ 만료일. 자동 갱신이 없으므로 사람이 챙겨야 합니다.
     local until
     until="$(openssl x509 -noout -enddate -in "$TLS_CERT" 2>/dev/null | cut -d= -f2)"
-    info "인증서 만료: ${until:-확인 실패}"
     if ! openssl x509 -checkend $((30*24*3600)) -noout -in "$TLS_CERT" >/dev/null 2>&1; then
         warn "30일 안에 만료됩니다 — 갱신 일정을 잡으세요 (자동 갱신 없음)."
     fi
+
+    # 통과한 것을 **명시적으로** 찍습니다. 침묵을 통과로 읽게 두면, 검사가
+    # 조용히 꺼졌을 때(파일 경로 오타 등)와 구분되지 않습니다.
+    info "인증서 점검"
+    printf '      키 암호 없음 · 인증서/키 짝 일치 · 인증서 %s개(체인 포함)\n' "$n"
+    printf '      SAN: %s\n' "${names:-확인 실패}"
+    printf '      만료: %s\n' "${until:-확인 실패}"
 }
 
 install_file() {
@@ -231,8 +237,11 @@ install_file() {
     # diff 대신 렌더 결과에서 직접 뽑습니다. 줄바꿈(CRLF)이 섞인 체크아웃에서는
     # diff 가 파일 전체를 변경으로 잡아 출력이 환경마다 달라집니다.
     if (( DRY_RUN )) && [[ ! -f "$dst" ]]; then
-        info "$name — 계정·경로가 들어간 줄:"
-        grep -nE '^(User|WorkingDirectory|EnvironmentFile|ExecStart)=|create 0640|^/.*\*\.log' "$tmp" \
+        info "$name — 치환된 값이 들어간 줄:"
+        # systemd 유닛과 nginx 설정은 확인할 지시자가 다릅니다. 한쪽 패턴만
+        # 두면 다른 쪽에서 "(해당 줄 없음)" 이 뜨고, 그러면 dry-run 이
+        # 경로만 찍는 것과 같아집니다.
+        grep -nE '^(User|WorkingDirectory|EnvironmentFile|ExecStart)=|create 0640|^/.*\*\.log|^\s*(server_name|listen|ssl_certificate|ssl_certificate_key|proxy_pass)\s' "$tmp" \
             | sed 's/^/      /' || info "      (해당 줄 없음)"
     fi
 
