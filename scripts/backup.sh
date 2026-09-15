@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Semantica 백업 스크립트
-# 대상: Qdrant (벡터 DB) + FalkorDB (그래프 DB) + PostgreSQL (운영 로그)
+# 대상: Qdrant(벡터) + FalkorDB(그래프) + PostgreSQL(운영 로그)
+#       + Notion 페이지 캐시(.md) + 설정 파일(유닛·cron·departments.yaml)
+#
+# 2026-09-15: backup_to_gcs.sh 를 이 파일로 합쳤습니다. 두 스크립트가
+# 서로 다른 것을 백업하는데 cron 은 이 파일만 돌려서, **Notion 캐시와
+# 설정 파일은 백업되지 않고 있었습니다.** 백업이 둘로 갈려 있으면 어느
+# 쪽이 도는지에 따라 빠지는 것이 달라집니다 — 있다고 믿는데 없는 것이
+# 최악이라, 하나로 합쳤습니다.
 #
 # 사용법:
 #   bash scripts/backup.sh                  # 전체 백업
 #   bash scripts/backup.sh --qdrant-only    # Qdrant 만
 #   bash scripts/backup.sh --falkordb-only  # FalkorDB 만
 #   bash scripts/backup.sh --postgres-only  # PostgreSQL 만
+#   bash scripts/backup.sh --files-only     # Notion 캐시 + 설정 파일만
 #   bash scripts/backup.sh --restore        # 복구 가이드 출력
 #
 # 설치 (cron):
@@ -225,6 +233,79 @@ backup_postgres() {
     fi
 }
 
+# ── Notion 페이지 캐시 (.md) ─────────────────────────────────────────────────
+# backup_to_gcs.sh 에 있던 단계를 여기로 합쳤습니다. 백업 스크립트가 둘로
+# 갈려 있는 동안 cron 은 이 파일만 돌렸고, 그래서 **Notion 캐시와 설정 파일은
+# 백업되지 않고 있었습니다.** 어느 쪽이 도는지에 따라 빠지는 것이 달라지는
+# 구조는 백업에서 특히 위험합니다 — 있다고 믿는데 없는 것이 최악입니다.
+#
+# .md 는 Notion 에서 다시 받을 수 있지만, 재수집은 수백 페이지 × API 호출이고
+# 그 시점의 Notion 상태에 의존합니다. "그때 무엇으로 인제스트했는가" 를
+# 재현하려면 캐시 자체가 있어야 합니다.
+backup_notion_cache() {
+    log "Notion 페이지 캐시 백업..."
+    local data_dir="$ROOT_DIR/data"
+    local dest="$BACKUP_DIR/notion_pages"
+    local found=0
+
+    if [[ ! -d "$data_dir" ]]; then
+        warn "data/ 없음 — 건너뜀"
+        return 0
+    fi
+
+    for pages_dir in "$data_dir"/*/notion_pages; do
+        [[ -d "$pages_dir" ]] || continue
+        local dept
+        dept=$(basename "$(dirname "$pages_dir")")
+        mkdir -p "$dest/$dept"
+        if cp -r "$pages_dir/." "$dest/$dept/"; then
+            local n
+            n=$(find "$dest/$dept" -name '*.md' | wc -l)
+            log "  본부 ${dept}: ${n}개"
+            found=$((found + 1))
+        else
+            err "본부 ${dept} 복사 실패"
+            return 1
+        fi
+    done
+
+    if [[ $found -eq 0 ]]; then
+        warn "notion_pages 디렉토리를 찾지 못했습니다"
+        return 0
+    fi
+    ok "Notion 캐시 백업 완료 (본부 ${found}개)"
+}
+
+# ── 설정 파일 ────────────────────────────────────────────────────────────────
+# 서버를 새로 세울 때 필요한 것들입니다. 특히 systemd 유닛은 레포의 것과
+# 실제 배포본이 어긋나 있을 수 있어(deploy/README.md 참고), **도는 쪽**을
+# 남겨두는 것이 중요합니다.
+#
+# .env 는 값을 빼고 키 목록만 남깁니다. 백업에 자격증명을 넣으면 백업 자체가
+# 유출 경로가 됩니다. 대신 "무엇이 설정돼 있었는지" 는 알 수 있어야 복구할 때
+# 빠진 항목을 찾을 수 있습니다.
+backup_config() {
+    log "설정 파일 백업..."
+    local dest="$BACKUP_DIR/config"
+    mkdir -p "$dest"
+
+    if [[ -f "$ENV_FILE" ]]; then
+        grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | sed 's/=.*/=<REDACTED>/'             > "$dest/env_keys_only.txt" || true
+        log "  .env: 키 목록만 (값 제외)"
+    fi
+
+    local copied=0
+    for f in         "$ROOT_DIR/config/departments.yaml"         "$ROOT_DIR/config/glossary_snapshot.json"         "$ROOT_DIR/requirements.txt"         "$ROOT_DIR/requirements.lock.txt"         /etc/systemd/system/sementica-mcp.service         /etc/systemd/system/sementica-rest.service         /etc/systemd/system/sementica-ops.service; do
+        [[ -f "$f" ]] || continue
+        cp "$f" "$dest/" && copied=$((copied + 1))
+    done
+
+    # 실제로 도는 cron — setup_cron.sh 가 만든 것과 다를 수 있습니다
+    crontab -l > "$dest/crontab.txt" 2>/dev/null || true
+
+    ok "설정 파일 백업 완료 (${copied}개 + crontab)"
+}
+
 # ── GCS 업로드 ────────────────────────────────────────────────────────────────
 upload_gcs() {
     if [[ -z "$GCS_BUCKET" ]]; then
@@ -233,11 +314,15 @@ upload_gcs() {
     fi
 
     log "GCS 업로드 시작: $GCS_BUCKET/sementica/$TIMESTAMP/"
-    if gsutil -m cp -r "$BACKUP_DIR/" "$GCS_BUCKET/sementica/$TIMESTAMP/" 2>/dev/null; then
+    # 2>/dev/null 로 오류를 숨기고 원인을 추측해 적던 것을 고쳤습니다.
+    # ("gsutil 미설치 또는 권한 없음" — 실제 원인은 그 둘이 아닐 수도 있습니다)
+    # 이제 실제 오류를 그대로 보여주고, 실패를 실패로 보고합니다.
+    if gsutil -m cp -r "$BACKUP_DIR/" "$GCS_BUCKET/sementica/$TIMESTAMP/"; then
         ok "GCS 업로드 완료"
-    else
-        warn "GCS 업로드 실패 (gsutil 미설치 또는 권한 없음)"
+        return 0
     fi
+    err "GCS 업로드 실패 — 로컬 백업은 $BACKUP_DIR 에 남아 있습니다"
+    return 1
 }
 
 # ── 오래된 로컬 백업 정리 ────────────────────────────────────────────────────
@@ -313,6 +398,37 @@ show_restore_guide() {
   BACKUP=data/backups/20260831_030000/postgres/ops_log_20260831_030000.sql.gz
   gunzip -c $BACKUP | psql $POSTGRES_URL
 
+■ Notion 페이지 캐시 복구
+  BACKUP=data/backups/20260831_030000/notion_pages
+  cp -r $BACKUP/strategic/. data/strategic/notion_pages/
+
+  ※ Notion 에서 다시 받을 수도 있지만(notion_fetch.py), 재수집은 수백 페이지
+    × API 호출이고 **그 시점의 Notion 상태**를 받아옵니다. "그때 무엇으로
+    인제스트했는가" 를 재현하려면 이 캐시가 있어야 합니다.
+
+■ 설정 파일 복구
+  BACKUP=data/backups/20260831_030000/config
+  ls $BACKUP
+    departments.yaml  glossary_snapshot.json  requirements.txt
+    requirements.lock.txt  sementica-*.service  crontab.txt
+    env_keys_only.txt          ← 키 목록만. 값은 별도로 복구해야 합니다
+
+  # systemd 유닛 (실제로 돌던 것 — 레포와 다를 수 있습니다)
+  sudo cp $BACKUP/sementica-*.service /etc/systemd/system/
+  sudo systemctl daemon-reload
+
+  # cron
+  crontab $BACKUP/crontab.txt
+
+  # .env 는 값이 없습니다. env_keys_only.txt 로 **무엇이 필요한지** 확인하고
+  # 각 자격증명은 원래 발급처에서 다시 받으세요. 백업에 자격증명을 넣으면
+  # 백업 자체가 유출 경로가 됩니다.
+
+■ 전체 복구 순서
+  ① 설정 파일 → ② Notion 캐시 → ③ Qdrant / FalkorDB / PostgreSQL
+  ③ 대신 ②에서 재인제스트해도 되지만, 시간이 오래 걸리고 LLM 추출이
+  재현되지 않아(실측 일치율 45.9%) 그래프가 이전과 달라집니다.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 GUIDE
 }
@@ -321,12 +437,14 @@ GUIDE
 DO_QDRANT=true
 DO_FALKORDB=true
 DO_POSTGRES=true
+DO_FILES=true      # Notion 캐시 + 설정 파일
 
 for arg in "$@"; do
     case "$arg" in
-        --qdrant-only)   DO_FALKORDB=false; DO_POSTGRES=false ;;
-        --falkordb-only) DO_QDRANT=false;   DO_POSTGRES=false ;;
-        --postgres-only) DO_QDRANT=false;   DO_FALKORDB=false ;;
+        --qdrant-only)   DO_FALKORDB=false; DO_POSTGRES=false; DO_FILES=false ;;
+        --falkordb-only) DO_QDRANT=false;   DO_POSTGRES=false; DO_FILES=false ;;
+        --postgres-only) DO_QDRANT=false;   DO_FALKORDB=false; DO_FILES=false ;;
+        --files-only)    DO_QDRANT=false;   DO_FALKORDB=false; DO_POSTGRES=false ;;
         --restore)       show_restore_guide; exit 0 ;;
     esac
 done
@@ -351,9 +469,14 @@ run_step() {
     fi
 }
 
-$DO_QDRANT   && run_step "Qdrant"     backup_qdrant
-$DO_FALKORDB && run_step "FalkorDB"   backup_falkordb
-$DO_POSTGRES && run_step "PostgreSQL" backup_postgres
+# `$FLAG && run_step ...` 도 동작은 합니다 — `set -e` 는 `&&` 앞에서 실패한
+# 명령에는 발동하지 않기 때문입니다(실측 확인). 다만 그 사실을 알아야 읽히는
+# 코드보다, 조건문이라고 바로 보이는 쪽이 낫습니다.
+if $DO_QDRANT;   then run_step "Qdrant"      backup_qdrant;       fi
+if $DO_FALKORDB; then run_step "FalkorDB"    backup_falkordb;     fi
+if $DO_POSTGRES; then run_step "PostgreSQL"  backup_postgres;     fi
+if $DO_FILES;    then run_step "Notion 캐시" backup_notion_cache; fi
+if $DO_FILES;    then run_step "설정 파일"   backup_config;       fi
 
 run_step "GCS 업로드" upload_gcs
 cleanup_old_backups

@@ -76,6 +76,50 @@ Snowflake 가 외부에서 REST API 에 접근하려면 HTTPS 터널이 필요�
 ngrok URL 은 재시작마다 바뀌므로 `snowflake/01_network_access.sql` 의
 `ALLOWED_NETWORK_RULES` 도 함께 갱신해야 합니다.
 
+## 백업
+
+`scripts/backup.sh` 하나가 전부를 담당합니다 (2026-09-15 에 `backup_to_gcs.sh`
+를 합쳤습니다).
+
+| 대상 | 비고 |
+|---|---|
+| Qdrant | 컬렉션 스냅샷 |
+| FalkorDB | dump.rdb |
+| PostgreSQL | 운영 로그 덤프 |
+| Notion 페이지 캐시 | 재수집보다 빠르고, **그때의 Notion 상태**를 재현합니다 |
+| 설정 파일 | systemd 유닛·crontab·departments.yaml·requirements·용어집 스냅샷 |
+
+```bash
+bash scripts/backup.sh              # 전체
+bash scripts/backup.sh --files-only # 캐시 + 설정만
+bash scripts/backup.sh --restore    # 복구 절차 출력
+```
+
+**합치기 전에는 무엇이 빠지고 있었나** — 백업 스크립트가 둘이었고 cron 은
+`backup.sh` 만 돌렸습니다. 그래서 PostgreSQL 은 백업됐지만 **Notion 캐시와
+systemd 유닛은 백업되지 않았습니다.** 유닛 파일이 레포와 어긋나 있을 수 있는
+상황이라(위 참고) 서버가 날아가면 복원할 정본이 없었습니다.
+
+`.env` 는 **값을 빼고 키 목록만** 남깁니다. 백업에 자격증명을 넣으면 백업
+자체가 유출 경로가 됩니다. 복구할 때는 `env_keys_only.txt` 로 무엇이 필요한지
+확인하고 각 자격증명은 원래 발급처에서 다시 받으세요.
+
+## 로그 로테이션
+
+cron 로그(`data/logs/*.log`)는 로테이션이 없으면 무한히 커집니다.
+
+```bash
+sudo cp deploy/logrotate-sementica /etc/logrotate.d/sementica
+sudo logrotate -d /etc/logrotate.d/sementica    # 점검 (회전 없음)
+```
+
+systemd 로 옮긴 MCP·REST·Ops 는 **journald 가 관리하므로 대상이 아닙니다.**
+journald 용량이 걱정되면 `/etc/systemd/journald.conf` 의 `SystemMaxUse=` 를
+보세요 — logrotate 와는 다른 체계입니다.
+
+⚠️ 설정 파일의 경로가 `/home/seongin/` 으로 박혀 있습니다. 다른 계정에
+설치하면 경로도 함께 바꿔야 합니다.
+
 ## 주기 실행
 
 `setup_cron.sh` 가 `sync.py` 를 crontab 에 등록합니다.
