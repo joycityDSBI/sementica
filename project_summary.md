@@ -985,26 +985,35 @@ Snowflake UDF 가 공개 인터넷에서 REST API 를 호출합니다. ngrok 으
 [인터넷] --443--> [VM nginx] --> 127.0.0.1:8766 (sementica-rest)
 ```
 
+도메인은 `ontology.joycityplay.com`, 인증서는 **GlobalSign 와일드카드
+(`*.joycityplay.com`)** 입니다. 공인 CA 라 Snowflake 가 신뢰하고 certbot 이
+필요 없습니다.
+
 ```bash
-# ① 도메인 발급 + DNS A 레코드 → 공인 IP
-# ② 방화벽 80 개방 (HTTP-01 검증용)
-sudo apt install nginx
-sudo bash deploy/install.sh --domain <도메인> nginx   # ③ 443 은 주석 상태
+sudo mkdir -p /etc/ssl/sementica
+sudo cp server.crt /etc/ssl/sementica/fullchain.crt   # 리프+체인 이어붙인 것
+sudo cp server.key /etc/ssl/sementica/privkey.key
+sudo chmod 600 /etc/ssl/sementica/privkey.key
+
+sudo bash deploy/install.sh --domain ontology.joycityplay.com --with-tls nginx
 sudo nginx -t && sudo systemctl reload nginx
-sudo certbot certonly --webroot -w /var/www/html -d <도메인>   # ④
-# ⑤ 443 블록 주석 해제 후 reload   ⑥ 방화벽 443 개방 / 8766 차단
 ```
 
-**인증서가 없으면 nginx 가 기동에 실패합니다.** 그래서 설정 파일은 443 블록을
-주석 상태로 배포하고 발급 뒤에 푸는 2단계입니다.
+`--with-tls` 없이 설치하면 80 만 뜹니다 — **인증서가 준비되기 전에 443 을
+켜면 nginx 가 기동하지 않기** 때문입니다. `install.sh` 가 켜기 전에 다섯 가지를
+확인합니다: 키 암호 여부 · 인증서와 키의 짝 · 체인 포함 · SAN 일치 · 만료 임박.
 
-두 가지 전제가 있습니다:
+> **리프만 넣으면 브라우저는 통과하는데 Snowflake 만 실패합니다.** 브라우저는
+> 중간 CA 를 캐시하고 있어서요. 원인을 찾기 가장 어려운 형태라 별도로 셉니다.
 
-- **공인 CA 인증서여야 합니다.** Snowflake 는 표준 TLS 검증을 하므로 사내 CA·
-  자체 서명은 신뢰하지 않고, UDF 런타임에 CA 를 추가할 방법도 없습니다.
-- **공인 접근 경로가 필요합니다.** VM 은 사설 IP(`10.123.20.3`)입니다 —
-  ngrok 이 해주던 일이 이것이었습니다. 공인 IP·GCP HTTPS LB·사내 리버스 프록시
-  중 하나를 먼저 정해야 인증서 검증부터 통과합니다.
+> **키에 암호가 걸려 있으면 안 됩니다** — nginx 는 부팅 시 암호를 물을 수
+> 없습니다. `password.txt` 는 서버에 올리지 마세요.
+
+**남은 전제**: VM 은 사설 IP(`10.123.20.3`)입니다. ngrok 이 해주던 일이
+이것이었습니다 — 공인 IP·GCP HTTPS LB·사내 리버스 프록시 중 하나가 있어야
+Snowflake 가 닿고, DNS A 레코드가 그 주소를 가리켜야 합니다.
+
+**갱신**: 와일드카드는 자동 갱신이 없습니다. 만료일을 캘린더에 잡으세요.
 
 **REST 는 이제 `127.0.0.1` 에만 바인딩합니다.** nginx 를 세워도 8766 이 외부에
 열려 있으면 **평문 HTTP 우회로**가 남아 Bearer 토큰이 그대로 지나갑니다.
@@ -1605,7 +1614,7 @@ Connection 예시는 포트가 22 로 적혀 있으나 실제는 **50022** 입�
 | 69 | LLM 결과 캐싱 | 🔜 | content_hash 기반 triplets 캐시 → --reset 속도 대폭 단축 |
 | 70 | 용어집 등록 필요 | 🔜 | ① "데사실" → 데이터사이언스실 ② `RU`↔`DRU` 상호 동의어 모순 해소 (`conflicts()` 로 확인) ③ 사람이 확인한 중복(`데브옵스`/`데브옵스팀` 등) |
 | 71 | ~~EntityDeduplicator (그래프 중복 병합)~~ | ❌ | **하지 않기로 결정** (2026-09-14). 실측 768개 노드에서 문자열 유사도 후보 4건이 전부 오탐. DB 객체 이름은 한 토큰이 곧 다른 객체라 자동 병합이 그래프를 망가뜨림. 확실한 중복은 조회 단계에서 합치고(63번), 나머지는 용어집 등록(70번) |
-| 72 | HTTPS 고정 URL | 🔜 | nginx 설정·UDF 정리 완료 (2026-09-15). **도메인 발급 + 인증서 + 방화벽 443** 이 남음 |
+| 72 | HTTPS 고정 URL | 🔜 | 도메인 `ontology.joycityplay.com` 신청·GlobalSign 와일드카드 인증서 확보. nginx 설정·UDF 정리 완료. **남은 것: 공인 접근 경로(사설 IP), DNS A 레코드, 방화벽 443/80, 8766 차단**, 2026-09-15 |
 | 77 | 작업 결과 메일 알림 | ⏸ | 코드 완료(`src/ops/notify.py`), **SMTP 설정 대기**. 사내 릴레이(61.43.45.137:25)가 자체 서명 인증서라 STARTTLS 검증 실패. `SMTP_CA_FILE`(권장) 또는 `SMTP_TLS_VERIFY=0`(차선) 중 선택 필요 — `SMTP_TLS=0` 은 비밀번호가 평문으로 나가므로 금지 |
 | 78 | 의존성 버전 고정 | ✅ | `tools/pin_requirements.py` 로 현재 버전을 상한으로 고정 + `requirements.lock.txt`, 2026-09-15 |
 | 79 | 백업 이원화 정리 | ✅ | `backup_to_gcs.sh` 를 `backup.sh` 로 합침. 합치기 전에는 cron 이 `backup.sh` 만 돌려 **Notion 캐시와 systemd 유닛이 백업되지 않았습니다**. GCS 업로드가 오류를 숨기고 원인을 추측해 적던 것도 수정, 2026-09-15 |
@@ -1731,7 +1740,6 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | 443 | TCP | `api.notion.com` | Notion API 페이지 수집 |
 | 443 | TCP | `us-east5-aiplatform.googleapis.com` | Vertex AI 임베딩 |
 | 443 | TCP | Anthropic / Claude API 엔드포인트 | LLM 트리플 추출 |
-| 443 | TCP | Let's Encrypt (`acme-v02.api.letsencrypt.org`) | 인증서 발급·갱신 (사내 CA 면 불필요) |
 | 443 | TCP | Snowflake (us-central1.gcp) | 쿼리 결과 수신 (Snowflake → Semantica 방향은 아웃바운드 불필요) |
 
 ---
@@ -1740,6 +1748,7 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-15 | **TLS 를 와일드카드 인증서 방식으로** — `ontology.joycityplay.com` + GlobalSign `*.joycityplay.com`. 공인 CA 라 Snowflake 가 신뢰하고 certbot 이 필요 없지만, **자동 갱신도 없으므로** 만료일을 사람이 챙겨야 합니다. `install.sh --with-tls` 가 443 을 켜기 전에 다섯 가지를 확인합니다 — 키 암호 여부·짝 일치·체인 포함·SAN·만료 임박. 이 중 **체인 누락이 가장 위험합니다**: 리프만 넣으면 브라우저는 중간 CA 를 캐시하고 있어 통과하는데 **Snowflake 만 실패**해서, 원인을 찾기 가장 어려운 형태가 됩니다 |
 | 2026-09-15 | **Ops 대시보드 바인딩을 설정으로 분리** — 유닛에 `--host 127.0.0.1` 을 박아두면 바꿀 때마다 root 로 `/etc/systemd/system` 을 고쳐야 합니다. `.env` 의 `OPS_HOST` 로 옮기고 코드 기본값도 `0.0.0.0` → `127.0.0.1` 로 바꿨습니다(기본값이 외부 공개이면 안 됩니다). 노출 시 기동 로그에 경고를 남깁니다 — 나중에 방화벽 범위가 넓어져도 서버 쪽에 흔적이 없으면 **열려 있다는 사실 자체를 잊게 됩니다** |
 | 2026-09-15 | **ngrok 제거 → nginx + 고정 도메인.** 걷어낸 이유는 URL 이 **다섯 곳에 박혀 있었다는 것**입니다 — 네트워크 규칙 1 + UDF 3 + Cortex 프로시저 1. 재시작마다 전부 다시 만들어야 했고 빠뜨리면 그 경로만 조용히 죽었습니다. 이제 호스트는 네트워크 규칙과 `semantica_base_url` 시크릿 **두 곳**뿐이고, UDF 본문에는 URL 이 없습니다 — 도메인이 바뀌어도 UDF 재생성이 필요 없습니다. REST 는 `127.0.0.1` 바인딩으로 바꿨습니다(nginx 를 세워도 8766 이 열려 있으면 **평문 HTTP 우회로**가 남아 Bearer 토큰이 그대로 지나갑니다). 함께 발견: `05_cortex_agent.sql` 에 `SECRETS` 절이 없어 `Authorization` 을 한 번도 보내지 않았고, 서버 토큰이 켜진 지금 **이 프로시저만 401** 입니다. `start_with_ngrok.sh` 는 삭제 — systemd 시대에 `pkill -f rest_api.py` 로 관리 중인 프로세스를 죽입니다 |
 | 2026-09-15 | **웹 의존성이 선언된 적이 없었습니다** — `web_app.py` 는 `fastapi`·`pydantic` 을, `rest_api.py` 는 `starlette` 를 처음부터 import 하는데 `requirements.txt` 에 넷 다 없었습니다. 구 서버엔 손으로 깔려 있어 드러나지 않다가, 새 `.venv` 에서 Ops 대시보드가 `pip install fastapi uvicorn` 만 찍고 죽는 **재시작 루프**에 빠졌습니다. 그 와중에도 `systemctl status` 는 **`active (running)`** 이라고 나옵니다 — 방금 재시작된 순간을 보여주니까요. `tools/check_deps.py` 로 같은 종류를 미리 잡습니다(설치 없이 소스만 읽음) |

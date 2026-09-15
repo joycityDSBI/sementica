@@ -39,6 +39,12 @@ NGINX_SRC=nginx-sementica.conf
 NGINX_DST=/etc/nginx/conf.d/sementica.conf
 DOMAIN=""
 
+# 인증서 경로. 와일드카드(*.joycityplay.com)를 쓰므로 certbot 경로가 아닙니다.
+# --with-tls 를 줄 때만 443 블록이 열립니다.
+TLS_ENABLE=0
+TLS_CERT=/etc/ssl/sementica/fullchain.crt
+TLS_KEY=/etc/ssl/sementica/privkey.key
+
 info()  { printf '  %s\n' "$*"; }
 warn()  { printf '  ⚠️  %s\n' "$*" >&2; }
 die()   { printf '  ❌ %s\n' "$*" >&2; exit 1; }
@@ -46,18 +52,26 @@ die()   { printf '  ❌ %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'EOF'
 
-  사용법: sudo bash deploy/install.sh [--dry-run] <유닛...>
+  사용법: sudo bash deploy/install.sh [옵션] <유닛...>
 
-    ops        Ops 대시보드 (8080, 127.0.0.1 바인딩)
+    ops        Ops 대시보드 (8080, 바인딩은 .env 의 OPS_HOST)
     rest       REST API     (8766, 127.0.0.1 바인딩 — nginx 경유)
     mcp        MCP 템플릿   (sementica-mcp@<부서>)
     logrotate  cron 로그 회전 (/etc/logrotate.d/sementica)
     nginx      HTTPS 종료   (/etc/nginx/conf.d/sementica.conf, --domain 필요)
 
+  옵션:
+    --dry-run              쓰지 않고 내용만 출력
+    --domain <fqdn>        nginx 의 server_name
+    --with-tls             443 블록을 켭니다 (인증서를 먼저 확인합니다)
+    --tls-cert <path>      기본 /etc/ssl/sementica/fullchain.crt
+    --tls-key  <path>      기본 /etc/ssl/sementica/privkey.key
+
   예:
     sudo bash deploy/install.sh ops
     sudo bash deploy/install.sh --dry-run ops rest logrotate
-    sudo bash deploy/install.sh --domain semantica.example.com nginx
+    sudo bash deploy/install.sh --domain ontology.joycityplay.com nginx
+    sudo bash deploy/install.sh --domain ontology.joycityplay.com --with-tls nginx
 
 EOF
 }
@@ -128,11 +142,67 @@ preflight() {
 # ── 치환 ─────────────────────────────────────────────────────────────────────
 render() {
     local src="$1"
+    # --with-tls 일 때만 TLS-BLOCK 안쪽의 주석을 한 겹 벗깁니다.
+    # `//!` 로 범위 경계선(>>> / <<<)은 건드리지 않습니다.
+    local tls_sed='b'
+    (( TLS_ENABLE )) && tls_sed='/^# >>> TLS-BLOCK/,/^# <<< TLS-BLOCK/{//!s/^#//}'
     sed -e "s|/home/seongin/sementica|$ROOT|g" \
         -e "s|^User=seongin$|User=$OWNER|" \
         -e "s|^\(\s*create 0640 \)seongin seongin$|\1$OWNER $OWNER|" \
         -e "s|<SEMANTICA_HOST>|${DOMAIN}|g" \
+        -e "s|<TLS_CERT>|${TLS_CERT}|g" \
+        -e "s|<TLS_KEY>|${TLS_KEY}|g" \
+        -e "$tls_sed" \
         "$src"
+}
+
+# ── 인증서 점검 ──────────────────────────────────────────────────────────────
+# 443 을 켜기 전에 확인합니다. 여기서 안 잡으면 nginx 가 기동에 실패하거나,
+# 더 나쁘게는 **뜨긴 하는데 Snowflake 만 붙지 못하는** 상태가 됩니다.
+check_tls() {
+    [[ -f "$TLS_CERT" ]] || die "인증서가 없습니다: $TLS_CERT"
+    [[ -f "$TLS_KEY"  ]] || die "키가 없습니다: $TLS_KEY"
+
+    # ① 키에 암호가 걸려 있으면 nginx 가 부팅 때 물어볼 수 없어 기동에 실패합니다.
+    if grep -qi 'ENCRYPTED' "$TLS_KEY"; then
+        die "키에 암호가 걸려 있습니다 — nginx 는 부팅 시 암호를 물을 수 없습니다.
+      해제:  openssl rsa -in <원본> -out $TLS_KEY"
+    fi
+
+    # ② 인증서와 키가 짝인지. 엉뚱한 짝이면 nginx 가 뜨지 않습니다.
+    local c k
+    c="$(openssl x509 -noout -modulus -in "$TLS_CERT" 2>/dev/null | openssl md5)"
+    k="$(openssl rsa  -noout -modulus -in "$TLS_KEY"  2>/dev/null | openssl md5)"
+    [[ -n "$c" && "$c" == "$k" ]] || die "인증서와 키가 짝이 아닙니다 ($TLS_CERT / $TLS_KEY)"
+
+    # ③ 체인이 들어 있는가. 리프만 있으면 브라우저는 통과해도 Snowflake 는
+    #    체인을 못 세워 실패합니다 — "브라우저는 되는데 UDF 만 안 되는" 형태입니다.
+    local n
+    n="$(grep -c 'BEGIN CERTIFICATE' "$TLS_CERT" || true)"
+    if (( n < 2 )); then
+        warn "인증서 파일에 인증서가 $n 개뿐입니다 — 중간 CA 가 빠졌을 수 있습니다."
+        warn "리프만 주면 Snowflake 쪽에서만 실패합니다. 이어붙이세요:"
+        warn "    cat 리프.crt 체인.crt > $TLS_CERT"
+    fi
+
+    # ④ 도메인이 인증서에 포함되는가 (와일드카드 포함).
+    local names
+    names="$(openssl x509 -noout -ext subjectAltName -in "$TLS_CERT" 2>/dev/null | tr -d ' ')"
+    if [[ -n "$names" && -n "$DOMAIN" ]]; then
+        local wild="*.${DOMAIN#*.}"
+        if [[ "$names" != *"DNS:$DOMAIN"* && "$names" != *"DNS:$wild"* ]]; then
+            warn "인증서의 SAN 에 $DOMAIN 도 $wild 도 없습니다:"
+            printf '      %s\n' "$names"
+        fi
+    fi
+
+    # ⑤ 만료일. 자동 갱신이 없으므로 사람이 챙겨야 합니다.
+    local until
+    until="$(openssl x509 -noout -enddate -in "$TLS_CERT" 2>/dev/null | cut -d= -f2)"
+    info "인증서 만료: ${until:-확인 실패}"
+    if ! openssl x509 -checkend $((30*24*3600)) -noout -in "$TLS_CERT" >/dev/null 2>&1; then
+        warn "30일 안에 만료됩니다 — 갱신 일정을 잡으세요 (자동 갱신 없음)."
+    fi
 }
 
 install_file() {
@@ -189,6 +259,7 @@ install_target() {
         [[ -n "$DOMAIN" ]] || die "nginx 는 --domain <도메인> 이 필요합니다"
         [[ -d /etc/nginx/conf.d ]] \
             || die "/etc/nginx/conf.d 가 없습니다 — nginx 를 먼저 설치하세요"
+        (( TLS_ENABLE )) && check_tls
         install_file "$NGINX_SRC" "$ROOT/deploy/$NGINX_SRC" "$NGINX_DST"
         return
     fi
@@ -202,20 +273,25 @@ targets=()
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=1 ;;
+        --with-tls) TLS_ENABLE=1 ;;
         --domain=*) DOMAIN="${arg#--domain=}" ;;
-        --domain) want_domain=1 ;;
+        --tls-cert=*) TLS_CERT="${arg#--tls-cert=}" ;;
+        --tls-key=*) TLS_KEY="${arg#--tls-key=}" ;;
+        --domain) pending=DOMAIN ;;
+        --tls-cert) pending=TLS_CERT ;;
+        --tls-key) pending=TLS_KEY ;;
         -h|--help) usage; exit 0 ;;
         ops|rest|mcp|logrotate|nginx) targets+=("$arg") ;;
         *)
-            if [[ "${want_domain:-0}" == 1 ]]; then
-                DOMAIN="$arg"; want_domain=0
+            if [[ -n "${pending:-}" ]]; then
+                printf -v "$pending" '%s' "$arg"; pending=""
             else
                 usage; die "알 수 없는 인자: $arg"
             fi
             ;;
     esac
 done
-[[ "${want_domain:-0}" == 1 ]] && die "--domain 뒤에 도메인이 없습니다"
+[[ -n "${pending:-}" ]] && die "--${pending,,} 뒤에 값이 없습니다"
 
 show_state
 

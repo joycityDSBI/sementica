@@ -175,38 +175,91 @@ Snowflake UDF 가 공개 인터넷에서 REST API 를 호출합니다. **ngrok �
 [인터넷] ──443──> [VM nginx] ──> 127.0.0.1:8766 (sementica-rest)
 ```
 
-### 순서를 지켜야 합니다
+도메인은 `ontology.joycityplay.com`, 인증서는 **GlobalSign 와일드카드
+(`*.joycityplay.com`)** 를 씁니다. 공인 CA 이므로 Snowflake 가 신뢰하고,
+ACME/certbot 이 필요 없습니다.
 
-**인증서 파일이 없으면 nginx 가 기동에 실패합니다.** 그래서 설정 파일은 443
-블록을 주석 상태로 배포하고, 인증서를 받은 뒤 푸는 2단계입니다.
+### 인증서 배치
+
+nginx 의 `ssl_certificate` 는 **리프 + 중간 CA 를 이어붙인 파일**이어야 합니다.
+발급처가 준 파일 중 `server.crt` 처럼 이미 이어붙인 것이 있으면 그대로 쓰고,
+리프만 있으면 체인을 붙이세요.
 
 ```bash
-# ① 도메인 발급 + DNS A 레코드 → 이 서버의 공인 IP
-# ② 방화벽 80 개방 (HTTP-01 검증용. DNS-01 이면 생략 가능)
+sudo mkdir -p /etc/ssl/sementica
 
-# ③ 설정 배포 — 이 시점엔 80 번만 뜹니다
-sudo apt install nginx
-sudo bash deploy/install.sh --domain semantica.example.com nginx
-sudo nginx -t && sudo systemctl reload nginx
+# 이미 이어붙은 파일이 있으면
+sudo cp server.crt /etc/ssl/sementica/fullchain.crt
+# 리프·체인이 따로면
+sudo sh -c 'cat File_Wildcard.joycityplay.com_crt.crt ChainFile_ChainBundle.crt \
+    > /etc/ssl/sementica/fullchain.crt'
 
-# ④ 인증서 발급
-sudo certbot certonly --webroot -w /var/www/html -d semantica.example.com
-sudo ls -l /etc/letsencrypt/live/semantica.example.com/fullchain.pem
-
-# ⑤ 443 블록 주석 해제 후 반영
-sudo nginx -t && sudo systemctl reload nginx
-
-# ⑥ 방화벽 443 개방 / 8766 인바운드 차단
+sudo cp server.key /etc/ssl/sementica/privkey.key
+sudo chown root:root /etc/ssl/sementica/*
+sudo chmod 600 /etc/ssl/sementica/privkey.key
+sudo chmod 644 /etc/ssl/sementica/fullchain.crt
 ```
 
-### 두 가지 전제
+> **리프만 넣으면 브라우저는 통과하는데 Snowflake 만 실패합니다.** 브라우저는
+> 중간 CA 를 캐시해두고 있어서요. 원인을 찾기 가장 어려운 형태이므로
+> `install.sh` 가 인증서 개수를 세어 경고합니다.
 
-**공인 CA 인증서여야 합니다.** Snowflake 는 표준 TLS 검증을 하므로 사내 CA 나
-자체 서명 인증서는 신뢰하지 않고, UDF 런타임에 CA 를 추가할 방법도 없습니다.
+> **키에 암호가 걸려 있으면 안 됩니다** — nginx 는 부팅 시 암호를 물을 수
+> 없습니다. `password.txt` 가 함께 왔다면 암호화된 키일 수 있습니다:
+> `openssl rsa -in <원본>.key -out /etc/ssl/sementica/privkey.key`
+> 그리고 **`password.txt` 는 서버에 올리지 마세요.**
 
-**공인 접근 경로가 필요합니다.** VM 은 사설 IP(`10.123.20.3`)입니다 — ngrok 이
-해주던 일이 바로 이것이었습니다. 공인 IP 부여, GCP HTTPS LB, 또는 사내 리버스
-프록시 중 하나를 먼저 정해야 인증서 검증부터 통과합니다.
+### 설치
+
+```bash
+sudo apt install nginx
+
+# ① 확인만 (쓰지 않음)
+sudo bash deploy/install.sh --dry-run \
+    --domain ontology.joycityplay.com --with-tls nginx
+
+# ② 설치 — 인증서·키를 먼저 점검합니다
+sudo bash deploy/install.sh --domain ontology.joycityplay.com --with-tls nginx
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+`--with-tls` 를 주면 443 블록이 열립니다. 주지 않으면 80 만 뜹니다 —
+**인증서가 준비되기 전에 443 을 켜면 nginx 가 기동하지 않기** 때문입니다.
+
+`install.sh` 가 켜기 전에 확인하는 것:
+
+| | 실패하면 |
+|---|---|
+| 키에 암호가 걸렸는가 | nginx 기동 실패 |
+| 인증서·키가 짝인가 | nginx 기동 실패 |
+| 체인이 들어 있는가 | **Snowflake 만** 실패 (경고) |
+| SAN 에 도메인이 있는가 | 클라이언트 검증 실패 (경고) |
+| 만료가 30일 이내인가 | 경고 |
+
+### 확인
+
+```bash
+curl -sI https://ontology.joycityplay.com/rest/health
+openssl s_client -connect ontology.joycityplay.com:443 \
+    -servername ontology.joycityplay.com </dev/null 2>/dev/null \
+    | grep -E 'Verify return code|subject='
+```
+
+`Verify return code: 0 (ok)` 가 나와야 Snowflake 도 붙습니다.
+
+### 남은 전제 — 공인 접근 경로
+
+VM 은 사설 IP(`10.123.20.3`)입니다. **ngrok 이 해주던 일이 이것이었습니다.**
+Snowflake 가 닿으려면 공인 IP 부여, GCP HTTPS LB, 또는 사내 리버스 프록시 중
+하나가 필요하고, DNS A 레코드가 그 주소를 가리켜야 합니다.
+
+### 갱신
+
+와일드카드 인증서는 **자동 갱신이 없습니다.** 만료일을 캘린더에 잡으세요.
+
+```bash
+openssl x509 -noout -enddate -in /etc/ssl/sementica/fullchain.crt
+```
 
 REST 유닛은 이제 `--host 127.0.0.1` 입니다. **8766 인바운드를 방화벽에서
 닫으세요** — nginx 를 세워도 8766 이 외부에 열려 있으면 평문 HTTP 우회로가
