@@ -64,6 +64,13 @@ CREATE TABLE IF NOT EXISTS notion_pages (
     has_html_attachment  BOOLEAN      DEFAULT FALSE,      -- HTML 첨부 파일 포함 여부
     status               VARCHAR(20)  DEFAULT 'ok',       -- ok / skipped / error
     error_msg        TEXT,                            -- 오류 메시지 (정상이면 NULL)
+    -- 아래 둘은 코드(db_logger.upsert_notion_page)가 오래전부터 쓰고 있었는데
+    -- 이 파일에는 없었습니다. 운영 DB 에만 ALTER TABLE 로 추가하고 스키마
+    -- 파일에는 반영하지 않은 것입니다. 그래서 **새 서버를 세우면 인제스트가
+    -- 전부 "column does not exist" 로 실패**했습니다 (2026-09-15 서버 이전 중 발견).
+    route            VARCHAR(20)  DEFAULT 'core',   -- core / defer / excluded
+    content_hash     VARCHAR(64),                   -- 본문 SHA-256 앞 16자.
+                                                    -- 같으면 재처리를 건너뜁니다.
     created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
 
@@ -71,8 +78,13 @@ CREATE TABLE IF NOT EXISTS notion_pages (
 );
 
 -- 페이지 조회 인덱스
--- 마이그레이션: 기존 DB에 컬럼 추가 (신규 설치 시 위 CREATE TABLE에 이미 포함됨)
--- psql $POSTGRES_URL -c "ALTER TABLE notion_pages ADD COLUMN IF NOT EXISTS has_html_attachment BOOLEAN DEFAULT FALSE;"
+-- 마이그레이션 — 이미 만들어진 DB 에 컬럼을 더합니다.
+-- CREATE TABLE IF NOT EXISTS 는 **테이블이 있으면 아무것도 하지 않으므로**,
+-- 위 정의에 컬럼을 추가해도 기존 DB 에는 반영되지 않습니다. 그래서 여기에
+-- ALTER 를 함께 둡니다. 이 파일은 몇 번을 실행해도 안전합니다.
+ALTER TABLE notion_pages ADD COLUMN IF NOT EXISTS has_html_attachment BOOLEAN DEFAULT FALSE;
+ALTER TABLE notion_pages ADD COLUMN IF NOT EXISTS route        VARCHAR(20) DEFAULT 'core';
+ALTER TABLE notion_pages ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64);
 
 CREATE INDEX IF NOT EXISTS idx_np_dept          ON notion_pages (dept, last_ingested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_np_last_edited   ON notion_pages (last_edited_time DESC);
