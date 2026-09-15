@@ -272,17 +272,22 @@ EOF
     fi
 done
 
-# Ops 대시보드는 인증이 없습니다. 유닛이 127.0.0.1 에만 바인딩하는 이유가
-# 그것이고, 방화벽으로 열면 그 대역 누구나 /api/batch/run 을 칠 수 있습니다.
+# Ops 대시보드는 인증이 없습니다. 바인딩은 .env 의 OPS_HOST 가 정하므로
+# 유닛만 보고 안내하면 틀립니다 — 실제 값을 읽어서 보여줍니다.
 for t in "${targets[@]}"; do
     if [[ "$t" == ops ]]; then
-        cat <<EOF
-  ℹ️  Ops 대시보드는 127.0.0.1 에만 바인딩합니다 — 인증이 없기 때문입니다.
-      /api/batch/run 의 confirm 필드는 오조작 방지지 인증이 아닙니다.
-      접속은 SSH 터널로 하세요:
-
-          ssh -N -L 8080:127.0.0.1:8080 -p 50022 $OWNER@<서버IP>
-
-EOF
+        ops_host="$(sed -n 's/^OPS_HOST=//p' "$ROOT/.env" 2>/dev/null | tail -1 | tr -d ' \r')"
+        ops_host="${ops_host:-127.0.0.1}"
+        echo "  ℹ️  Ops 대시보드는 인증이 없습니다 — /api/batch/run 의 confirm 필드는"
+        echo "      오조작 방지지 인증이 아닙니다."
+        if [[ "$ops_host" == "127.0.0.1" || "$ops_host" == "localhost" ]]; then
+            echo "      현재 바인딩: $ops_host (.env 의 OPS_HOST). SSH 터널로 접속하세요:"
+            echo ""
+            echo "          ssh -N -L 8080:127.0.0.1:8080 -p 50022 $OWNER@<서버IP>"
+        else
+            echo "      현재 바인딩: $ops_host (.env 의 OPS_HOST) — 외부에 열려 있습니다."
+            echo "      **방화벽 접근 대상이 의도한 범위인지 확인하세요.**"
+        fi
+        echo ""
     fi
 done
