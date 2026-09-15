@@ -259,6 +259,27 @@ install_file() {
     info "$name → $dst"
 }
 
+# ── nginx 설정 구조 점검 ─────────────────────────────────────────────────────
+# `--with-tls` 는 TLS-BLOCK 안의 `#` 을 한 겹 벗깁니다. 그 안에 한 겹짜리
+# 설명 주석이 있으면 벗겨진 뒤 **한글 문장이 지시자로 읽혀** nginx 가 기동에
+# 실패합니다. 2026-09-15 에 실제로 그랬습니다:
+#     [emerg] unknown directive "인증서" in ...:48
+#
+# 괄호 균형만 세는 것으로는 못 잡습니다 — 그 줄에는 괄호가 없으니까요.
+# 주석이 아닌 모든 줄이 `;` `{` `}` 로 끝나는지 봅니다. nginx -t 만큼
+# 엄밀하지는 않지만, **파일을 쓰기 전에** 이 종류를 잡습니다.
+lint_nginx() {
+    local rendered bad
+    rendered="$(render "$ROOT/deploy/$NGINX_SRC")"
+    bad="$(printf '%s\n' "$rendered" \
+        | grep -nvE '^\s*(#.*)?$|[;{}]\s*$' || true)"
+    if [[ -n "$bad" ]]; then
+        warn "nginx 설정에 지시자로 읽힐 수 없는 줄이 있습니다:"
+        printf '%s\n' "$bad" | sed 's/^/      /'
+        die "TLS-BLOCK 안의 설명 주석은 '##' 로 시작해야 합니다 (한 겹은 벗겨집니다)"
+    fi
+}
+
 install_target() {
     local key="$1"
     if [[ "$key" == logrotate ]]; then
@@ -272,6 +293,7 @@ install_target() {
         [[ -d /etc/nginx/conf.d ]] \
             || die "/etc/nginx/conf.d 가 없습니다 — nginx 를 먼저 설치하세요"
         (( TLS_ENABLE )) && check_tls
+        lint_nginx
         install_file "$NGINX_SRC" "$ROOT/deploy/$NGINX_SRC" "$NGINX_DST"
         return
     fi
