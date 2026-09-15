@@ -121,6 +121,18 @@ install_file() {
         diff -u "$dst" "$tmp" | sed 's/^/      /' || true
     fi
 
+    # 신규 설치일 때도 치환 결과를 보여줍니다. 확인하라고 해놓고 보여주지
+    # 않으면 dry-run 이 "경로만 찍는" 것이 됩니다 — 정작 확인해야 하는 것은
+    # User / WorkingDirectory / ExecStart 에 어떤 계정·경로가 들어갔는가입니다.
+    #
+    # diff 대신 렌더 결과에서 직접 뽑습니다. 줄바꿈(CRLF)이 섞인 체크아웃에서는
+    # diff 가 파일 전체를 변경으로 잡아 출력이 환경마다 달라집니다.
+    if (( DRY_RUN )) && [[ ! -f "$dst" ]]; then
+        info "$name — 계정·경로가 들어간 줄:"
+        grep -nE '^(User|WorkingDirectory|EnvironmentFile|ExecStart)=|create 0640|^/.*\*\.log' "$tmp" \
+            | sed 's/^/      /' || info "      (해당 줄 없음)"
+    fi
+
     if (( DRY_RUN )); then
         info "[dry-run] $dst 에 쓰지 않았습니다"
         rm -f "$tmp"
