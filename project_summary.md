@@ -824,8 +824,8 @@ Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 �
 | 스크립트 | 용도 |
 |---------|------|
 | `scripts/start_with_ngrok.sh` | REST API + ngrok 동시 시작 |
-| `scripts/backup.sh` | 로컬 백업 |
-| `scripts/backup_to_gcs.sh` | GCS 백업 |
+| `scripts/backup.sh` | 백업 — PostgreSQL · Notion 캐시 · systemd 유닛 · 골든셋 → 로컬 + GCS |
+| `scripts/run_job.sh` | SSH 강제 명령 — Airflow 가 호출할 수 있는 작업 허용목록 |
 | `scripts/create_indexes.py` | Qdrant 인덱스 생성 |
 | `scripts/test_mcp.py` | MCP 서버 테스트 |
 | `tools/backfill_html_flag.py` | `has_html_attachment` DB 백필 |
@@ -840,6 +840,16 @@ Snowflake External Function은 `API_PROVIDER`로 AWS/Azure/GCP API Gateway를 �
 | `tools/check_missing_vectors.py` | 벡터가 실제로 유실된 페이지 탐지 + `--fix` 로 재처리 예약 |
 | `tools/check_extraction_stability.py` | 트리플 추출 재현성 측정 (같은 문서 2회 추출 비교) |
 | `tools/ab_retrieval.py` | 검색 파라미터 A/B — LLM 생성·채점 없이 검색 단계만 결정적으로 측정 |
+| `tools/check_schema_drift.py` | 코드의 `INSERT` 와 `schema/*.sql` 대조 — **DB 없이** 돌아가므로 CI 가능 |
+| `tools/pin_requirements.py` | 설치된 버전을 상한으로 고정 + `requirements.lock.txt` 생성 |
+| `tools/diag_events.py` | 이벤트 장부(PostgreSQL) vs 그래프(FalkorDB) 대조 |
+| `tools/rank_probe.py` | 특정 문항의 근거가 **청크 순위 / 페이지 순위** 어디에 있는지 |
+| `tools/lexical_probe.py` | BM25 단독 순위 확인 — 벡터가 못 찾는 문항의 어휘 도달성 |
+| `tools/split_golden_set.py` | 골든셋을 **출처 문서 단위**로 dev/holdout 분할 |
+| `tools/check_golden_questions.py` | 골든셋 문항 결함(대상 미특정) 정규식 검출 |
+| `tools/find_duplicate_entities.py` | 그래프 엔티티 중복 후보 — 라벨 분리·표기 차이·포함·유사도 |
+| `tools/glossary_todo.py` | 미등록 용어 집계 → 용어집 갱신 대상 |
+| `src/ops/notify.py` | 작업 결과 메일 — 성공·실패 모두 발송 (`--test` 로 설정 점검) |
 | `src/eval/gen_golden_set.py` | 현재 데이터에서 골든셋 자동 생성 |
 | `src/eval/evaluate.py` | 골든셋 기반 검색 품질 평가 |
 
@@ -1279,6 +1289,184 @@ Q38·Q39 가 동시에 0.0 → 1.0 이 되었고 복합 카테고리가 0.58 →
 > 2026-09-10 에 `src/utils/retrieval.py` 로 검색 경로를 통합했습니다 —
 > **검색 파라미터 튜닝은 이 파일에서만** 하세요.
 
+#### 골든셋 v3 — 코퍼스가 줄어 재생성 (2026-09-15)
+
+라이브 서버 이전 후 첫 인제스트에서 페이지가 **275 → 229** 로 줄었습니다.
+코드 문제가 아니라 **Notion 원본에서 46개 페이지가 사라진 것**입니다.
+
+```
+사라진 46페이지의 평균  청크 5.0개 / 트리플 7.0개   ← 남은 코퍼스에서 역산
+```
+
+페이지당 수치는 그대로인데 총량만 줄었으므로 **추출 실패가 아니라 구성 변화**입니다.
+`golden_v2` 는 없어진 문서를 근거로 삼는 문항을 포함하므로 폐기하고
+`golden_v3` 를 새로 생성해 dev/holdout 으로 분할했습니다.
+
+| 세트 | 문항 | 평균 | 비고 |
+|---|---|---|---|
+| `golden_v3_dev` | 45 | **0.833** | 새 기준선 |
+| `golden_v3_holdout` | 45 | 미측정 | 큰 변경 뒤에만 |
+
+> v2 의 0.967 과 **비교할 수 없습니다.** 코퍼스·문항이 모두 다릅니다.
+> 구 서버의 `data/eval/golden_v2_*.json` 은 이력 참조용으로 보존하세요.
+
+#### A/B 도구가 잘못된 것을 재고 있었습니다 (2026-09-15)
+
+`ab_retrieval.py` 는 "근거 페이지가 컨텍스트에 들어왔는가"를 `source_url` 일치로
+판정했습니다. **얼마나 잘려서 들어왔는지는 보지 않았습니다.**
+
+그래서 문서당 길이 상한(`doc_cap`)을 조일수록 더 많은 문서가 예산 안에 들어와
+지표가 **무조건 좋아졌습니다** — 내용을 버리면서요.
+
+```
+문서 상한 4000 → 근거 포함률 100%   ← 근거가 4001자 지점에 있어도 "포함"
+```
+
+지표를 둘로 나눴습니다.
+
+| 지표 | 판정 |
+|---|---|
+| **문서포함률** | 근거 페이지가 컨텍스트에 들어왔는가 (기존) |
+| **근거생존률** | 정답의 **식별자**가 잘리지 않고 남았는가 (신규) |
+
+`_answer_key()` 가 정답에서 가장 긴 식별자형 토큰(`[A-Za-z0-9_.\-]{8,}`)을 뽑아
+전달된 본문에 있는지 봅니다. `"운영팀이 담당합니다"` 같은 문장형 정답은 원문과
+글자가 달라 판정할 수 없으므로 **분모에서 제외**하고, 분모를 함께 출력합니다.
+
+##### 측정 결과 (`golden_v3_dev`, 벡터 의존 34문항 / 생존률 분모 14)
+
+| 설정 | 문서포함률 | 근거생존률 | 평균투입 | 판단 |
+|---|---|---|---|---|
+| 기준 (현행) | 94.1% | 71.4% | 11.5 | — |
+| oversample 4 / 12 | 94.1% | 71.4% | 11.4~11.5 | 차이 없음 |
+| **boost 0.0** | **97.1%** | **78.6%** | 12.2 | 🔍 유일하게 둘 다 상승 |
+| boost 0.10 | 94.1% | 71.4% | 11.6 | 차이 없음 |
+| 문서 상한 12000 | 94.1% | **64.3%** ↓ | 12.8 | ❌ |
+| 문서 상한 8000 | 97.1% | 71.4% | 14.4 | ❌ |
+| 문서 상한 6000 | 97.1% | **64.3%** ↓ | 16.3 | ❌ |
+| 문서 상한 4000 | **100%** | **64.3%** ↓ | 19.7 | ❌ **착시** |
+
+**문서 상한은 폐기했습니다.** 포함률 100% 인 설정이 생존률은 기준보다 **낮습니다** —
+긴 문서를 잘라서 얻는 것보다 잃는 것이 큽니다. 지표를 나누지 않았다면
+"recall 100% 달성"으로 읽고 채택할 뻔했습니다.
+
+**`COVERAGE_BOOST=0` 은 아직 채택하지 않았습니다.** 두 지표가 같이 올랐지만
+생존률 분모가 14문항이라 **78.6% − 71.4% = 1문항**입니다. 1문항으로 운영
+파라미터를 바꾸는 것은 이 프로젝트가 반복해서 틀렸던 방식입니다.
+
+> 부스트를 끄는 것이 나은 이유는 설명이 됩니다 — 여러 서브쿼리에 걸리는 문서는
+> 대개 *여러 주제를 다루는 긴 문서*고, 그것이 위로 올라오면 예산을 먹으면서
+> 정작 특정 답을 가진 짧은 문서를 밀어냅니다. 다만 **설명이 된다는 것은 근거가
+> 아닙니다.** 판정 규칙을 넓혀 분모를 키운 뒤 재측정해야 합니다.
+
+> ⚠️ 2026-09-10 기록의 *"boost 0.0 / 0.10 / 0.20 모두 동일"* 은 **생존률을 재지
+> 않았을 때의 결론**입니다. 포함률만으로는 차이가 안 보였습니다.
+
+**남은 문항.** 기준 설정에서 벡터 근거가 빠진 것은 Q69(순위 14) · Q88(순위 7)
+2건이며, Q69 는 예산이 아니라 **랭킹** 문제입니다 — 상한을 3000 이하로 조이거나
+예산을 120,000자로 올려야 들어오는 위치라, 둘 다 대가가 더 큽니다.
+
+---
+
+### 7-6. 서버 이전 — 개발 → 라이브 (2026-09-15)
+
+개발 VM 에서 라이브 VM 으로 옮겼습니다. 데이터는 **옮기지 않고 재인제스트**했습니다
+(개발 단계라 원본 Notion 이 유일한 진실이고, 덤프를 옮기면 이전 시점의 결함까지
+같이 따라옵니다).
+
+```bash
+# ① 코드
+git clone https://github.com/<org>/sementica.git ~/sementica
+
+# ② 자격증명 — git 에 없으므로 별도로 옮깁니다
+#    .env · service-account-key.json  (둘 다 gitignore 대상)
+
+# ③ 파이썬
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# ④ 스키마 — CREATE 뿐 아니라 ALTER 까지 적용되었는지 확인
+docker exec -i <pg> psql -U sementica -d sementica_ops < schema/ops_log.sql
+docker exec -i <pg> psql -U sementica -d sementica_ops -c '\d notion_pages'
+
+# ⑤ 인제스트
+.venv/bin/python src/pipeline/notion_fetch.py --dept strategic
+.venv/bin/python src/pipeline/ingest.py --dept strategic --reset
+```
+
+**이전 과정에서 드러난 것들** — 모두 구 서버에서는 증상이 없던 문제입니다.
+
+| 증상 | 실제 원인 |
+|---|---|
+| `column "route" does not exist` | 코드는 오래전부터 쓰는데 `schema/ops_log.sql` 에 없었음. 구 서버는 `ALTER TABLE` 을 직접 쳐서 넣고 파일에 반영하지 않았음 |
+| 스키마를 적용했는데도 같은 오류 | Docker 가 스키마 파일을 **단일 파일 바인드 마운트**로 물고 있어 `git pull` 후에도 옛 inode 를 보고 있었음 (`--force-recreate` 필요) |
+| `Failed building wheel for gensim` | `semantica` 패키지가 **쓰지도 않는** NER/RE 때문에 끌어옴. 구 서버엔 휠이 캐시돼 있어 몰랐음 |
+| `service-account-key.json not found` | gitignore 대상이라 clone 에 없음. 게다가 `scp` 로 받은 파일이 **1바이트 · root 소유**로 남아 있었음 |
+| `python: not found` | 시스템에 `python3` 만 있음. 모든 명령을 `.venv/bin/python` 으로 |
+
+> **교훈: 스키마 드리프트는 평소에 드러나지 않습니다.** 드러나는 시점이 하필
+> 서버를 옮기거나 장애에서 복구할 때라, 제일 급할 때 발목을 잡습니다.
+> `tools/check_schema_drift.py` 가 DB 없이 코드의 `INSERT` 와 스키마 파일을
+> 대조합니다 — CI 에 넣을 수 있습니다.
+>
+> `CREATE TABLE IF NOT EXISTS` 는 테이블이 있으면 **아무것도 하지 않습니다.**
+> 컬럼을 추가할 때는 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 도 함께 넣으세요.
+
+**이전 후 첫 인제스트 결과**
+
+```
+페이지 226 / 청크 501 / 트리플 379 / 이벤트 180   — partial (오류 7건)
+```
+
+오류 7건 중 **6건이 `JSONDecodeError: Extra data`** 였습니다. LLM 이 JSON 배열
+뒤에 설명을 덧붙이면 파싱이 깨졌고, 그 페이지는 `content_hash` 가 기록되지 않아
+**다음 동기화마다 영원히 재시도**됩니다. `parse_json_array()` 로 해소했습니다.
+
+> `[]`(근거 없음, 확정) 과 파싱 실패(모름) 를 구분해야 합니다. 예외를 삼키고
+> `[]` 를 돌려주면 "트리플이 없는 문서" 로 굳어집니다.
+
+**경로 주의.** `deploy/*.service` 와 `deploy/logrotate-sementica` 는
+`/home/seongin` 이 하드코딩돼 있는데 라이브 서버 계정은 `devadmin` 입니다.
+설치 전에 경로를 고쳐야 합니다.
+
+---
+
+### 7-7. Airflow 연동 (2026-09-15)
+
+Airflow 서버는 **별도 호스트**입니다. DAG 은 로직을 담지 않고 기존 CLI 를 호출만
+합니다 (사내 관례).
+
+| 파일 | 내용 |
+|---|---|
+| `dags/semantica_common.py` | `job()` · `run()` — Variable 로 local/ssh 실행 모드 선택 |
+| `dags/semantica_daily.py` | sync → backup. `max_active_runs=1`, `catchup=False` |
+| `dags/semantica_weekly.py` | 용어집 스냅샷 → dev 평가. `retries=0`, `trigger_rule="all_done"` |
+| `scripts/run_job.sh` | SSH 강제 명령 — `sync\|backup\|glossary\|eval-dev` 만 허용 |
+
+**보안은 두 겹입니다.** 방화벽 화이트리스트(Airflow 워커 IP → VM **50022**)만으로는
+부족합니다 — 그 키를 가진 사람은 VM 에서 임의 명령을 칠 수 있습니다.
+`authorized_keys` 의 `command=` 로 `run_job.sh` 를 강제하고, 스크립트가 인자를
+**정확일치 허용목록**으로 검사합니다.
+
+```
+sync; cat .env     → 거부 (exit 2)
+sync && whoami     → 거부
+sync$(id)          → 거부
+../../../etc/passwd → 거부
+```
+
+**일부러 뺀 것 두 가지**
+
+- `--reset` — 원격에서 전체 그래프를 지울 수 있게 두지 않습니다
+- `eval-holdout` — 자동화하면 홀드아웃 점수를 매주 보게 되고, 그 순간
+  홀드아웃이 dev 가 됩니다
+
+> ⚠️ **Airflow 가 도는 것을 확인하기 전에 crontab 을 지우지 마세요.** 둘 다
+> 살아 있으면 sync 가 두 번 돕니다. 확인 후 cron 쪽을 제거하세요.
+
+**남은 확인 사항**: Airflow 워커의 egress IP 가 고정인지, 워커에서
+`catalog.joycityplay.com`(용어집 API)에 닿는지. `dags/README.md` 의 SSH
+Connection 예시는 포트가 22 로 적혀 있으나 실제는 **50022** 입니다.
+
 ---
 
 ## 8. 구현 완료 / 예정
@@ -1366,6 +1554,16 @@ Q38·Q39 가 동시에 0.0 → 1.0 이 되었고 복합 카테고리가 0.58 →
 | 74 | 이벤트 ID 충돌 | ✅ | 한 페이지의 이벤트가 서로를 덮어써 17개 손실. 출처+내용 기반 ID + 저장 전 정리, 2026-09-14 |
 | 75 | 골든셋 문항 결함 필터 | ✅ | "이 제보 문서에서…" "제시된 테이블에서…" 처럼 대상을 특정하지 않는 문항 3건. LLM 판정자는 **원문을 보므로** 못 거릅니다 — 정규식으로 결정적으로 처리, 2026-09-14 |
 | 76 | dev Q41 — **결함 아님** | ✅ | "김도형님은 어느 팀 소속인가요?" 에 시스템이 소속을 단정하지 않고 가진 관계(협업·요청)만 제시했고 0.5 를 받았습니다. 그래프에 `소속` 엣지가 없는데 단정하면 환각이므로 **정상 동작**입니다. 채점 쪽 한계이지 고칠 대상이 아닙니다 (2026-09-14 확인) |
+| 82 | 서버 이전 (개발 → 라이브) | ✅ | 재인제스트 방식. 구 서버에서는 증상이 없던 결함 5종이 한꺼번에 드러남 — 스키마 드리프트·Docker 단일파일 마운트·gensim 휠·키 파일 손상·`python` 미존재, 2026-09-15 |
+| 83 | 스키마 드리프트 검출 | ✅ | `tools/check_schema_drift.py` — 코드의 `INSERT` 와 `schema/*.sql` 대조. **DB 없이** 동작하므로 CI 가능. `route`·`content_hash` 누락이 이전 중에 발견됨, 2026-09-15 |
+| 84 | `semantica` 패키지 제거 | ✅ | 쓰지 않는 NER/RE 때문에 `gensim` 을 끌어와 새 서버에서 설치 실패. `init_qdrant` 를 `qdrant_client` 직접 호출로 재작성, 죽은 NER 코드 163줄 삭제, 2026-09-15 |
+| 85 | JSON 파싱 실패 6건 | ✅ | LLM 이 배열 뒤에 설명을 덧붙이면 `JSONDecodeError`. 해당 페이지는 `content_hash` 미기록으로 **영원히 재시도**됨. `parse_json_array()` — `[]`(확정) 과 파싱 실패(모름) 를 구분, 2026-09-15 |
+| 86 | 추출 실패 사유 미기록 | ✅ | 장부에 `트리플 추출 실패` 만 남고 이유가 없었음. `extract_with_fallback` 이 `(triplets, source, detail)` 반환, 2026-09-15 |
+| 87 | 골든셋 v3 재생성 | ✅ | Notion 에서 46페이지가 사라져 v2 의 근거 문서가 없어짐. dev 기준선 **0.833**. v2 와 비교 불가, 2026-09-15 |
+| 88 | A/B 지표 정정 — 근거생존률 | ✅ | 기존 지표는 `source_url` 일치만 봐서 **잘림을 측정하지 않았음**. 문서 상한을 조일수록 무조건 좋아지는 착시. 지표를 문서포함률·근거생존률로 분리, 2026-09-15 |
+| 89 | 문서당 길이 상한 (`doc_cap`) | ⛔ | 포함률 100% 인 설정이 생존률은 기준보다 낮음(64.3% vs 71.4%) — **적용하지 않음**, 2026-09-15 |
+| 90 | `COVERAGE_BOOST=0` 검토 | 🔜 | 두 지표가 함께 상승한 유일한 설정(94.1→97.1 / 71.4→78.6)이나 **생존률 분모 14문항에서 1문항 차이**. 판정 규칙을 넓혀 분모를 키운 뒤 재측정 |
+| 91 | Q69 랭킹 개선 | 🔜 | 근거가 페이지 순위 14위. 예산·상한으로는 대가가 더 큼 — 랭킹 자체를 다뤄야 함 |
 
 > **Cortex Analyst YAML 모델**은 대상에서 제외되었습니다 — Cortex에 Analytics Agent를 직접 생성하고
 > UDF로 온톨로지 API를 호출하는 구조로 동작 확인이 완료되어, `05_cortex_agent.sql`의
@@ -1425,6 +1623,9 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 | 일반화 — **같은 코퍼스 안에서만 확인됨** | 홀드아웃 측정(2026-09-14)에서 dev 0.956 / holdout 0.944, 차이가 노이즈 수준. 다만 두 세트가 같은 코퍼스·같은 생성기에서 나왔으므로, 다른 본부나 사람이 실제로 던지는 질문에 대해서는 여전히 미검증입니다 |
 | **평가 해상도 ±0.02** | 같은 코드·같은 골든셋으로 두 번 돌린 결과가 0.956 / 0.944 로 갈렸습니다(답변 생성 비결정성). 그보다 작은 차이는 개선인지 잡음인지 구분할 수 없으므로, 총점이 아니라 **예측→측정→확인된 인과**로 판단하세요 |
 | 골든셋 재생성 시 총점 비교 불가 | 문항이 바뀌면 난이도 구성이 바뀝니다. `eval_run_log.golden_hash` 가 같은 회차끼리만 비교하세요 |
+| **A/B 근거생존률 분모 14문항** | 정답에서 식별자를 뽑을 수 있는 문항만 셉니다. `"운영팀이 담당합니다"` 같은 문장형 정답은 원문과 글자가 달라 판정 불가라 제외했습니다. **1문항이 7.1%p** 이므로 한 칸 차이로 파라미터를 바꾸지 마세요 |
+| 코퍼스가 Notion 을 따라 변합니다 | 2026-09-15 에 46페이지가 원본에서 사라졌습니다. 골든셋의 근거 문서가 없어지면 점수가 떨어지는데, 이는 시스템 회귀가 아닙니다. 점수를 읽기 전에 `tools/stats.py` 로 페이지 수를 먼저 보세요 |
+| 배포 파일의 경로 하드코딩 | `deploy/*.service` · `deploy/logrotate-sementica` 가 `/home/seongin` 을 가정합니다. 라이브 서버 계정은 `devadmin` 이라 설치 전 수정이 필요합니다 |
 
 ---
 
@@ -1436,7 +1637,8 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 
 | 포트 | 프로토콜 | 용도 | 접근 대상 |
 |------|---------|------|---------|
-| 22 | TCP | SSH 접속 | 개발자 IP |
+| 50022 | TCP | SSH 접속 | 개발자 IP |
+| 50022 | TCP | **Airflow 작업 실행** (`run_job.sh` 강제 명령) | Airflow 워커 IP **만** |
 | 8080 | TCP | 웹 운영 대시보드 (`web_app.py`) | 개발자 IP |
 | 8765 | TCP | MCP 서버 (`server.py`) | Claude Desktop / Cursor (개발자 IP) |
 | 8766 | TCP | REST API 서버 (`rest_api.py`) | ngrok(내부), 개발자 IP |
@@ -1446,6 +1648,10 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 
 > `6333` (Qdrant 대시보드: `http://<vm-ip>:6333/dashboard`) 및  
 > `6379` (FalkorDB, redis-cli 접속)는 개발자 IP에서 직접 접근 필요.
+
+> ⚠️ **Airflow 용 화이트리스트만으로는 부족합니다.** 그 키를 가진 사람은 VM 에서
+> 임의 명령을 칠 수 있습니다. `authorized_keys` 의 `command=` 로 `run_job.sh` 를
+> 강제해 허용목록 밖의 인자를 거부하도록 하세요 (7-7 참고).
 
 ### 아웃바운드 (VM → 외부)
 
@@ -1463,6 +1669,12 @@ GLOSSARY_SNAPSHOT=                   # 기본: config/glossary_snapshot.json
 
 | 날짜 | 내용 |
 |------|------|
+| 2026-09-15 | **A/B 도구가 잘못된 것을 재고 있었습니다** — 근거 판정이 `source_url` 일치뿐이라 **얼마나 잘려서 들어왔는지를 보지 않았습니다.** 문서당 상한을 조일수록 더 많은 문서가 예산에 들어와 지표가 무조건 좋아졌고, 상한 4000 이 "recall 100%" 로 보였습니다. **문서포함률 / 근거생존률**로 분리하니 그 설정의 생존률은 기준보다 **낮았습니다**(64.3% vs 71.4%) — 상한은 폐기. 유일하게 둘 다 올린 것은 `COVERAGE_BOOST=0` 이나, 분모 14문항에서 **1문항 차이**라 아직 채택하지 않았습니다 |
+| 2026-09-15 | **골든셋 v3 재생성** — Notion 에서 **46페이지가 사라져** v2 의 근거 문서가 없어짐. 페이지당 청크·트리플은 그대로(5.0 / 7.0)라 추출 실패가 아니라 **구성 변화**. dev 기준선 **0.833**, v2 의 0.967 과 비교 불가 |
+| 2026-09-15 | **서버 이전 (개발 → 라이브)** — 재인제스트 방식. **구 서버에서는 증상이 없던** 결함 5종이 한꺼번에 드러났습니다: 스키마 파일에 `route`·`content_hash` 누락(운영 DB 에만 `ALTER` 를 치고 파일에 반영 안 함), Docker 단일파일 바인드 마운트가 `git pull` 후에도 옛 inode 를 봄, `semantica` 가 쓰지도 않는 NER 때문에 `gensim` 을 끌어와 설치 실패, 키 파일이 1바이트로 깨져 있음 |
+| 2026-09-15 | **스키마 드리프트 검출기** (`tools/check_schema_drift.py`) — 코드의 `INSERT` 와 스키마 파일을 대조. **DB 없이** 돌아 CI 에 넣을 수 있습니다. 이런 드리프트는 평소에 안 보이고 하필 **서버를 옮기거나 복구할 때** 드러납니다 |
+| 2026-09-15 | **JSON 파싱 실패 6건** — LLM 이 배열 뒤에 설명을 덧붙이면 `JSONDecodeError`. 그 페이지는 `content_hash` 가 안 남아 **동기화마다 영원히 재시도**되고 있었습니다. `parse_json_array()` 로 해소하되 `[]`(근거 없음, 확정) 과 파싱 실패(모름) 는 **구분해서** 처리 — 삼키면 "트리플 없는 문서" 로 굳습니다 |
+| 2026-09-15 | **추출 실패 사유 기록** — 장부에 `트리플 추출 실패` 만 남고 이유가 없어, 어느 단계에서 깨졌는지 매번 재현해야 했습니다 |
 | 2026-09-15 | **주기 실행을 Airflow 로 전환** (사내 표준). 옮긴 실질적 이유는 순서입니다 — cron 의 "2시 sync / 3시 backup" 은 sync 가 1시간 안에 끝난다는 가정이고, 길어지면 백업이 동기화 중인 상태를 뜹니다(둘 다 '성공' 으로 끝나 알림에도 안 잡힘). 사내 관례대로 **DAG 에 로직을 두지 않고** 기존 CLI 를 호출합니다 |
 | 2026-09-15 | **백업 스크립트 통합** — `backup.sh` 와 `backup_to_gcs.sh` 가 서로 다른 것을 백업하는데 cron 은 전자만 돌렸습니다. PostgreSQL 은 백업됐지만 **Notion 캐시와 systemd 유닛은 안 됐습니다**. 하나로 합치고 복구 절차도 보강 |
 | 2026-09-15 | **로그 로테이션** — cron 로그가 무한히 커지던 것. journald 가 관리하는 systemd 서비스는 대상에서 제외 |
