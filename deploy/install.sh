@@ -187,7 +187,10 @@ check_tls() {
 
     # ④ 도메인이 인증서에 포함되는가 (와일드카드 포함).
     local names
-    names="$(openssl x509 -noout -ext subjectAltName -in "$TLS_CERT" 2>/dev/null | tr -d ' ')"
+    # `-ext subjectAltName` 은 "X509v3 Subject Alternative Name:" 헤더까지
+    # 같이 뱉습니다. DNS 항목만 남깁니다.
+    names="$(openssl x509 -noout -ext subjectAltName -in "$TLS_CERT" 2>/dev/null \
+        | tr -d ' ' | tr ',' '\n' | grep '^DNS:' | paste -sd, -)"
     if [[ -n "$names" && -n "$DOMAIN" ]]; then
         local wild="*.${DOMAIN#*.}"
         if [[ "$names" != *"DNS:$DOMAIN"* && "$names" != *"DNS:$wild"* ]]; then
