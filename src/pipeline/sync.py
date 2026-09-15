@@ -71,6 +71,7 @@ from semantica_helper import (  # noqa: E402
     format_scope_report,
     is_decision_triplet,
     merge_node,
+    parse_json_array,
     rebuild_followed_by,
     record_decision_node,
     reset_scope_report,
@@ -491,16 +492,8 @@ def _events_in_window(llm_client, window: str) -> list[dict]:
             messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=window)}],
         )
         _warn_if_output_truncated(resp, "이벤트")
-        raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1] if len(parts) > 1 else raw
-            raw = raw.removeprefix("json")
-        raw = raw.strip()
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            return [e for e in parsed if isinstance(e, dict) and e.get("game") and e.get("date")]
-        return []
+        parsed = parse_json_array(resp.content[0].text)
+        return [e for e in parsed if isinstance(e, dict) and e.get("game") and e.get("date")]
     except Exception as e:
         # 삼키지 않고 올립니다 — 호출부가 "이벤트 없음"과 구분해야
         # 실패한 페이지의 content_hash 기록을 막을 수 있습니다.
@@ -534,14 +527,7 @@ def _triplets_in_window(llm_client, window: str) -> list:
             messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=window)}],
         )
         _warn_if_output_truncated(resp, "트리플")
-        raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            # ingest.py 와 동일한 처리 — 이전 코드는 parts[1][4:] 로 4자를 무조건
-            # 잘라내서, 언어 태그 없는 ``` 펜스가 오면 JSON 앞부분을 먹었습니다.
-            parts = raw.split("```")
-            raw = parts[1] if len(parts) > 1 else raw
-            raw = raw.removeprefix("json")
-        parsed = json.loads(raw.strip())
+        parsed = parse_json_array(resp.content[0].text)
         result = []
         for t in parsed:
             if not isinstance(t, dict):

@@ -70,6 +70,7 @@ from semantica_helper import (
     format_scope_report,
     is_decision_triplet,
     merge_node,
+    parse_json_array,
     rebuild_followed_by,
     record_decision_node,
     reset_scope_report,
@@ -445,16 +446,8 @@ def _events_in_window(window: str) -> list[dict]:
             messages=[{"role": "user", "content": EVENT_EXTRACT_PROMPT.format(text=window)}],
         )
         _warn_if_output_truncated(resp, "이벤트")
-        raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1] if len(parts) > 1 else raw
-            raw = raw.removeprefix("json")
-        raw = raw.strip()
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            return [e for e in parsed if isinstance(e, dict) and e.get("game") and e.get("date")]
-        return []
+        parsed = parse_json_array(resp.content[0].text)
+        return [e for e in parsed if isinstance(e, dict) and e.get("game") and e.get("date")]
     except Exception as e:
         # 호출부가 "이벤트 없음"과 구분할 수 있도록 예외를 올립니다.
         print(f"    ⚠️  이벤트 추출 실패: {type(e).__name__}: {e}")
@@ -479,7 +472,6 @@ def extract_events_from_text(text: str) -> list[dict]:
 
 def _triplets_in_window(window: str) -> list:
     """창 하나에서 트리플을 추출합니다."""
-    raw = ""
     try:
         resp = create_message(
             _llm_client,
@@ -489,15 +481,7 @@ def _triplets_in_window(window: str) -> list:
             messages=[{"role": "user", "content": EXTRACT_PROMPT.format(text=window)}],
         )
         _warn_if_output_truncated(resp, "트리플")
-        raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            parts = raw.split("```")
-            raw = parts[1] if len(parts) > 1 else raw
-            raw = raw.removeprefix("json")
-        raw = raw.strip()
-        parsed = json.loads(raw)
-        if not isinstance(parsed, list):
-            return []
+        parsed = parse_json_array(resp.content[0].text)
         result = []
         for t in parsed:
             if not isinstance(t, dict):

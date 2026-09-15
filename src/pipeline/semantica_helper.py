@@ -32,6 +32,7 @@ Semantica 프레임워크 통합 헬퍼
 import contextlib
 import hashlib
 import itertools
+import json
 import os
 import re
 import threading
@@ -108,6 +109,62 @@ def batch_texts(texts: list, max_chars: int = EMBED_BATCH_MAX_CHARS, max_items: 
 # 결과를 합칩니다. 겹침은 창 경계에 걸친 관계를 놓치지 않기 위한 것입니다.
 EXTRACT_WINDOW_CHARS: int = int(os.environ.get("EXTRACT_WINDOW_CHARS", "6000"))
 EXTRACT_WINDOW_OVERLAP: int = int(os.environ.get("EXTRACT_WINDOW_OVERLAP", "600"))
+
+
+def parse_json_array(raw: str) -> list:
+    """LLM 응답에서 JSON 배열을 꺼냅니다.
+
+    `json.loads()` 를 그대로 부르면 모델이 배열 **뒤에 설명을 덧붙일 때** 터집니다.
+    실측(2026-09-15 서버 이전 재인제스트) — 6개 페이지가 이렇게 실패했습니다:
+
+        JSONDecodeError: Extra data: line 3 column 1 (char 4)
+
+    응답이 `[]` 다음에 산문이 붙은 형태였습니다. 뜻은 "이벤트 없음" 인데
+    **오류로 처리되어 해시가 기록되지 않았고**, 그 페이지들은 동기화할 때마다
+    영원히 재처리될 참이었습니다.
+
+    코드 펜스를 벗기고, 바깥쪽 배열만 골라 파싱합니다. greedy 매칭이라 배열
+    안에 `]` 가 있어도 잘리지 않습니다.
+
+    >>> parse_json_array('[{"a": 1}]')
+    [{'a': 1}]
+    >>> parse_json_array('```json\\n[{"a": 1}]\\n```')
+    [{'a': 1}]
+
+    배열 뒤에 설명이 붙어도 읽습니다 — 이것이 고치려던 경우입니다:
+
+    >>> parse_json_array('[]\\n\\n이 문서에는 날짜가 명시된 이벤트가 없습니다.')
+    []
+    >>> parse_json_array('다음과 같습니다:\\n[{"a": 1}, {"b": 2}]\\n이상입니다.')
+    [{'a': 1}, {'b': 2}]
+
+    중첩된 대괄호도 안전합니다:
+
+    >>> parse_json_array('[{"x": [1, 2]}]')
+    [{'x': [1, 2]}]
+
+    Raises:
+        ValueError: 배열을 아예 찾지 못했을 때. **빈 배열과 구별해야 합니다** —
+            `[]` 는 "없다는 확정" 이고, 못 찾은 것은 "아무것도 알지 못함" 입니다.
+            호출부가 이를 구분해야 일시적 오류를 "내용 없음" 으로 기록하지
+            않습니다.
+
+    >>> parse_json_array("죄송합니다, 처리할 수 없습니다.")
+    Traceback (most recent call last):
+        ...
+    ValueError: 응답에서 JSON 배열을 찾지 못했습니다
+    """
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else text
+        text = text.removeprefix("json").strip()
+
+    m = re.search(r"\[.*\]", text, re.DOTALL)
+    if not m:
+        raise ValueError("응답에서 JSON 배열을 찾지 못했습니다")
+    parsed = json.loads(m.group())
+    return parsed if isinstance(parsed, list) else []
 
 
 def text_windows(
