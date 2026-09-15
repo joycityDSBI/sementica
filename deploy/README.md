@@ -175,14 +175,38 @@ Snowflake UDF 가 공개 인터넷에서 REST API 를 호출합니다. **ngrok �
 [인터넷] ──443──> [VM nginx] ──> 127.0.0.1:8766 (sementica-rest)
 ```
 
+### 순서를 지켜야 합니다
+
+**인증서 파일이 없으면 nginx 가 기동에 실패합니다.** 그래서 설정 파일은 443
+블록을 주석 상태로 배포하고, 인증서를 받은 뒤 푸는 2단계입니다.
+
 ```bash
+# ① 도메인 발급 + DNS A 레코드 → 이 서버의 공인 IP
+# ② 방화벽 80 개방 (HTTP-01 검증용. DNS-01 이면 생략 가능)
+
+# ③ 설정 배포 — 이 시점엔 80 번만 뜹니다
 sudo apt install nginx
 sudo bash deploy/install.sh --domain semantica.example.com nginx
 sudo nginx -t && sudo systemctl reload nginx
 
-# 인증서 — 사내 CA 로 받았다면 conf 의 ssl_certificate 두 줄을 그 경로로
-sudo certbot --nginx -d semantica.example.com
+# ④ 인증서 발급
+sudo certbot certonly --webroot -w /var/www/html -d semantica.example.com
+sudo ls -l /etc/letsencrypt/live/semantica.example.com/fullchain.pem
+
+# ⑤ 443 블록 주석 해제 후 반영
+sudo nginx -t && sudo systemctl reload nginx
+
+# ⑥ 방화벽 443 개방 / 8766 인바운드 차단
 ```
+
+### 두 가지 전제
+
+**공인 CA 인증서여야 합니다.** Snowflake 는 표준 TLS 검증을 하므로 사내 CA 나
+자체 서명 인증서는 신뢰하지 않고, UDF 런타임에 CA 를 추가할 방법도 없습니다.
+
+**공인 접근 경로가 필요합니다.** VM 은 사설 IP(`10.123.20.3`)입니다 — ngrok 이
+해주던 일이 바로 이것이었습니다. 공인 IP 부여, GCP HTTPS LB, 또는 사내 리버스
+프록시 중 하나를 먼저 정해야 인증서 검증부터 통과합니다.
 
 REST 유닛은 이제 `--host 127.0.0.1` 입니다. **8766 인바운드를 방화벽에서
 닫으세요** — nginx 를 세워도 8766 이 외부에 열려 있으면 평문 HTTP 우회로가

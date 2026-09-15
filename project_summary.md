@@ -986,11 +986,25 @@ Snowflake UDF 가 공개 인터넷에서 REST API 를 호출합니다. ngrok 으
 ```
 
 ```bash
+# ① 도메인 발급 + DNS A 레코드 → 공인 IP
+# ② 방화벽 80 개방 (HTTP-01 검증용)
 sudo apt install nginx
-sudo bash deploy/install.sh --domain <도메인> nginx
+sudo bash deploy/install.sh --domain <도메인> nginx   # ③ 443 은 주석 상태
 sudo nginx -t && sudo systemctl reload nginx
-sudo certbot --nginx -d <도메인>        # 사내 CA 면 conf 의 경로만 교체
+sudo certbot certonly --webroot -w /var/www/html -d <도메인>   # ④
+# ⑤ 443 블록 주석 해제 후 reload   ⑥ 방화벽 443 개방 / 8766 차단
 ```
+
+**인증서가 없으면 nginx 가 기동에 실패합니다.** 그래서 설정 파일은 443 블록을
+주석 상태로 배포하고 발급 뒤에 푸는 2단계입니다.
+
+두 가지 전제가 있습니다:
+
+- **공인 CA 인증서여야 합니다.** Snowflake 는 표준 TLS 검증을 하므로 사내 CA·
+  자체 서명은 신뢰하지 않고, UDF 런타임에 CA 를 추가할 방법도 없습니다.
+- **공인 접근 경로가 필요합니다.** VM 은 사설 IP(`10.123.20.3`)입니다 —
+  ngrok 이 해주던 일이 이것이었습니다. 공인 IP·GCP HTTPS LB·사내 리버스 프록시
+  중 하나를 먼저 정해야 인증서 검증부터 통과합니다.
 
 **REST 는 이제 `127.0.0.1` 에만 바인딩합니다.** nginx 를 세워도 8766 이 외부에
 열려 있으면 **평문 HTTP 우회로**가 남아 Bearer 토큰이 그대로 지나갑니다.

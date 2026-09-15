@@ -261,12 +261,29 @@ echo
 # nginx 를 세워두고도 평문 HTTP 우회로가 그대로 남습니다.
 for t in "${targets[@]}"; do
     if [[ "$t" == nginx ]]; then
+        # 인증서가 없는 상태로 443 블록을 켜면 nginx 가 기동하지 않습니다.
+        # 설정 파일은 443 을 주석 상태로 배포하므로, 어느 단계인지 알려줍니다.
+        if grep -q '^#server {' "$NGINX_DST" 2>/dev/null; then
+            cat <<EOF
+  ℹ️  443 블록은 아직 **주석 상태**입니다 (인증서가 없으면 nginx 가 기동에
+      실패하기 때문). 지금은 80 번만 뜹니다 — ACME 검증용입니다.
+
+          sudo certbot certonly --webroot -w /var/www/html -d $DOMAIN
+          sudo ls -l /etc/letsencrypt/live/$DOMAIN/fullchain.pem
+          # 발급 확인 후 $NGINX_DST 의 443 블록 주석 해제
+          sudo nginx -t && sudo systemctl reload nginx
+
+EOF
+        fi
         cat <<EOF
-  ⚠️  8766 인바운드를 방화벽에서 **닫으세요.** nginx 를 세워도 8766 이
-      외부에 열려 있으면 평문 HTTP 우회로가 남고, Bearer 토큰이 그대로
-      지나갈 수 있습니다. 확인:
+  ⚠️  443 을 연 뒤에는 8766 인바운드를 방화벽에서 **닫으세요.** nginx 를
+      세워도 8766 이 외부에 열려 있으면 평문 HTTP 우회로가 남고, Bearer
+      토큰이 그대로 지나갈 수 있습니다. 확인:
 
           ss -tlnp | grep :8766      # 127.0.0.1:8766 이어야 합니다
+
+  ⚠️  Snowflake 는 표준 TLS 검증을 합니다. **사내 CA 인증서는 신뢰하지
+      않으므로** 공인 CA 인증서여야 UDF 가 붙습니다.
 
 EOF
     fi
