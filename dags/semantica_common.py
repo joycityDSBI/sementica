@@ -17,7 +17,7 @@ Airflow 가 **어디서 도는가** 에 따라 실행 방식이 갈립니다:
 Airflow Variable 로 고릅니다:
     semantica_exec_mode   = local | ssh          (기본 local)
     semantica_ssh_conn_id = semantica_vm         (ssh 모드에서 쓸 Connection)
-    semantica_root        = /home/seongin/sementica
+    semantica_root        = /home/devadmin/sementica
     semantica_dept        = strategic
 """
 
@@ -28,7 +28,7 @@ from datetime import timedelta
 from airflow.models import Variable
 
 # ── 경로·대상 ────────────────────────────────────────────────────────────────
-ROOT = Variable.get("semantica_root", default_var="/home/seongin/sementica")
+ROOT = Variable.get("semantica_root", default_var="/home/devadmin/sementica")
 DEPT = Variable.get("semantica_dept", default_var="strategic")
 VENV = f"{ROOT}/.venv/bin/python"
 
@@ -64,7 +64,7 @@ def job(name: str) -> str:
        임의 명령이 돌아가는 상황을 막습니다.
 
     >>> job("sync")
-    '/home/seongin/sementica/scripts/run_job.sh sync'
+    '/home/devadmin/sementica/scripts/run_job.sh sync'
     """
     return f"{ROOT}/scripts/run_job.sh {name}"
 

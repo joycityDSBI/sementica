@@ -19,7 +19,7 @@
 #   bash scripts/run_job.sh --list
 #
 # SSH 강제 명령으로 쓰려면 ~/.ssh/authorized_keys 에:
-#   command="/home/seongin/sementica/scripts/run_job.sh",no-port-forwarding,\
+#   command="/home/devadmin/sementica/scripts/run_job.sh",no-port-forwarding,\
 #   no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... airflow@corp
 #
 #   → 이 키로 접속하면 무엇을 보내든 이 스크립트가 실행되고, 원래 명령은
@@ -67,7 +67,7 @@ case "$JOB" in
         ;;
     eval-dev)
         exec "$VENV_PY" "$ROOT_DIR/src/eval/evaluate.py" \
-            --dept "$DEPT" --golden "$ROOT_DIR/data/eval/golden_v2_dev.json"
+            --dept "$DEPT" --golden "$ROOT_DIR/data/eval/golden_v3_dev.json"
         ;;
     --list|list|help|--help|-h)
         usage

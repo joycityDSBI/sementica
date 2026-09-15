@@ -37,13 +37,13 @@ Airflow Variable 네 개로 동작이 정해집니다:
 
 | Variable | 기본값 | 설명 |
 |---|---|---|
-| `semantica_root` | `/home/seongin/sementica` | 프로젝트 경로 |
+| `semantica_root` | `/home/devadmin/sementica` | 프로젝트 경로 |
 | `semantica_dept` | `strategic` | 대상 본부 |
 | `semantica_exec_mode` | `local` | `local`(BashOperator) 또는 `ssh`(SSHOperator) |
 | `semantica_ssh_conn_id` | `semantica_vm` | ssh 모드에서 쓸 Connection |
 
 ```bash
-airflow variables set semantica_root /home/seongin/sementica
+airflow variables set semantica_root /home/devadmin/sementica
 airflow variables set semantica_dept strategic
 airflow variables set semantica_exec_mode ssh
 ```
@@ -58,22 +58,26 @@ airflow variables set semantica_exec_mode ssh
 
 ```bash
 airflow connections add semantica_vm \
-    --conn-type ssh --conn-host <VM_IP> --conn-login seongin \
-    --conn-extra '{"key_file": "/path/to/key", "conn_timeout": 60}'
+    --conn-type ssh --conn-host 10.123.20.3 --conn-login devadmin \
+    --conn-port 50022 \
+    --conn-extra '{"key_file": "/path/to/airflow_semantica_key", "conn_timeout": 60}'
 ```
 
 ssh 모드는 `apache-airflow-providers-ssh` 가 필요합니다.
 
 ## 방화벽과 접근 범위
 
-Airflow 서버가 별도에 있으면 **이 VM 의 22 번을 그 서버에서만** 열어야 합니다.
+Airflow 서버가 별도에 있으면 **이 VM 의 SSH 포트를 그 서버에서만** 열어야 합니다.
+
+> ⚠️ 이 VM 의 SSH 는 **22 가 아니라 50022** 입니다. Connection 의 `--conn-port`
+> 와 방화벽 규칙 양쪽에 반영해야 합니다.
 
 ```bash
 # GCP 예시 — 소스 범위를 Airflow egress IP 로 좁힙니다
 gcloud compute firewall-rules create allow-ssh-from-airflow \
     --direction=INGRESS \
     --action=ALLOW \
-    --rules=tcp:22 \
+    --rules=tcp:50022 \
     --source-ranges=<AIRFLOW_EGRESS_IP>/32 \
     --target-tags=semantica
 ```
@@ -91,14 +95,14 @@ IP 가 바뀔 수 있습니다. Cloud NAT 로 고정돼 있는지 Airflow 운영
 아니라 작업 이름을 보냅니다:
 
 ```
-/home/seongin/sementica/scripts/run_job.sh sync
+/home/devadmin/sementica/scripts/run_job.sh sync
 ```
 
 SSH 키를 이 스크립트에 묶어두세요:
 
 ```
 # ~/.ssh/authorized_keys (VM)
-command="/home/seongin/sementica/scripts/run_job.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... airflow@corp
+command="/home/devadmin/sementica/scripts/run_job.sh",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... airflow@corp
 ```
 
 이 키로 접속하면 무엇을 보내든 `run_job.sh` 가 실행되고, 원래 명령은
@@ -118,7 +122,7 @@ bash scripts/run_job.sh "cat .env"      # ❌ exit 2
 ### 권장 사항
 
 - **전용 키**를 쓰세요. 사람이 쓰는 키와 같은 것을 주면 범위 제한이 무의미합니다.
-- **전용 계정**도 고려할 만합니다. `seongin` 으로 붙으면 그 계정이 가진 모든
+- **전용 계정**도 고려할 만합니다. `devadmin` 으로 붙으면 그 계정이 가진 모든
   권한(sudo 포함)이 열려 있는 셈입니다 — 강제 명령이 그걸 막지만, 계정이
   분리돼 있으면 한 겹 더 안전합니다.
 - `run_job.sh` 에 작업을 추가할 때는 **자동 실행에 올려도 되는 것인지** 먼저
