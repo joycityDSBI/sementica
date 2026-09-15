@@ -70,7 +70,12 @@ Airflow 서버가 별도에 있으면 **이 VM 의 22 번을 그 서버에서만
 
 ```bash
 # GCP 예시 — 소스 범위를 Airflow egress IP 로 좁힙니다
-gcloud compute firewall-rules create allow-ssh-from-airflow     --direction=INGRESS --action=ALLOW --rules=tcp:22     --source-ranges=<AIRFLOW_EGRESS_IP>/32     --target-tags=semantica
+gcloud compute firewall-rules create allow-ssh-from-airflow \
+    --direction=INGRESS \
+    --action=ALLOW \
+    --rules=tcp:22 \
+    --source-ranges=<AIRFLOW_EGRESS_IP>/32 \
+    --target-tags=semantica
 ```
 
 먼저 확인할 것: **그 egress IP 가 고정인가.** Cloud Composer 나 K8s 워커는
