@@ -793,7 +793,7 @@ def sync_page(
         fe = (
             _pool.submit(extract_events_from_text, llm_client, body) if ev_from_db is None else None
         )
-        triplets, triplet_src = ft.result()
+        triplets, triplet_src, triplet_why = ft.result()
         llm_events = []
         if fe is not None:
             try:
@@ -802,7 +802,9 @@ def sync_page(
                 write_failed.append(f"이벤트 추출 실패: {type(e).__name__}: {e}")
 
     if triplet_src == "error":
-        write_failed.append("트리플 추출 실패")
+        # 사유를 함께 남깁니다 — 장부만 보고 일시적 API 오류인지 파싱 결함인지
+        # 구분할 수 있어야 합니다.
+        write_failed.append(f"트리플 추출 실패: {triplet_why}")
 
     # 5. 기존 엣지 삭제 — **추출이 성공했을 때만** 지웁니다.
     #    실패했는데 지우면 이 페이지의 관계가 통째로 사라지고,

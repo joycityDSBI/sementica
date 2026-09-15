@@ -901,10 +901,12 @@ def ingest_page(path: Path, dry_run: bool = False, dept: str = "", reset: bool =
                 )
             return result
 
-        # 2. 트리플 추출 (LLM 우선 → 실패 시 Semantica fallback) — core만
-        triplets, src = extract_with_fallback(extract_triplets, body)
+        # 2. 트리플 추출 — core 만
+        triplets, src, why = extract_with_fallback(extract_triplets, body)
         if src == "error":
-            write_failed.append("트리플 추출 실패")
+            # 사유를 함께 남깁니다. "트리플 추출 실패" 만 적으면 장부만 보고는
+            # 일시적 API 오류인지 파싱 결함인지 알 수 없습니다.
+            write_failed.append(f"트리플 추출 실패: {why}")
         result["triplet_count"] = len(triplets)
         print(f"     트리플: {len(triplets)}개 추출 [{src}]")
 

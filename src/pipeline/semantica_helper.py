@@ -335,39 +335,60 @@ def merge_node(graph, entity_name: str, entity_type: str, source_url: str) -> in
 # 아니라 이렇게 발목을 잡습니다.
 
 
-def extract_with_fallback(llm_extractor_fn, text: str) -> tuple[list, str]:
+def extract_with_fallback(llm_extractor_fn, text: str) -> tuple[list, str, str]:
     """
-    LLM 기반 트리플 추출. 실패하거나 빈 결과면 빈 리스트 반환.
+    LLM 기반 트리플 추출.
 
-    Semantica NER/RE fallback 을 사용하지 않는 이유:
-      - RelationExtractor 가 의미 기반이 아닌 거리/의존성 기반으로 동작
-      - 한국어 업무 문서에서 모든 엔티티 쌍에 관계를 생성 → 노이즈 과다
-      - LLM 이 0개를 반환하는 것은 "추출할 관계가 없다"는 정확한 판단
-      - 노이즈 엣지가 graph_search 결과 품질을 저하
+    (이름의 "fallback" 은 예전에 Semantica NER/RE 대체 경로가 있던 흔적입니다.
+     거리 기반 관계 추출이라 한국어 업무 문서에서 모든 엔티티 쌍에 관계를 만들어
+     노이즈가 과했고, 2026-09-15 에 패키지째 제거했습니다. 지금은 LLM 뿐입니다.)
 
     Args:
         llm_extractor_fn: LLM 기반 추출 함수 (text → list)
         text:             추출 대상 텍스트
 
     Returns:
-        (triplets: list, source: str)
+        (triplets, source, detail)
+
         source = "llm" | "empty" | "error"
 
         "empty" 와 "error" 는 반드시 구분해야 합니다. 둘 다 빈 리스트지만
         "empty" 는 "추출할 관계가 없다"는 확정 판단이고 "error" 는 아무것도
         알지 못한다는 뜻입니다. 호출부가 이를 구분하지 못하면 일시적 API 오류를
         "관계 없는 페이지"로 기록하고 재시도하지 않게 됩니다.
+
+        detail 은 error 일 때의 예외 내용입니다. **장부에 남기라고 있는 값**
+        입니다 — 예전에는 notion_pages.error_msg 에 "트리플 추출 실패" 만
+        적혀서, 일시적 API 오류인지 파싱 결함인지 구분할 수 없었습니다
+        (실측: 2026-09-15 「LTV성장진단 260825」). 예외는 표준출력에만 찍히고
+        사라졌고, 그 로그는 다음 실행에서 덮였습니다.
+
+    >>> extract_with_fallback(lambda t: [{"a": 1}], "x")
+    ([{'a': 1}], 'llm', '')
+    >>> extract_with_fallback(lambda t: [], "x")
+    ([], 'empty', '')
+
+    실패하면 예외 종류와 메시지가 함께 돌아옵니다:
+
+    >>> def boom(t):
+    ...     raise TimeoutError("deadline exceeded")
+    >>> extract_with_fallback(boom, "x")
+        ⚠️  LLM 추출 실패: TimeoutError: deadline exceeded
+    ([], 'error', 'TimeoutError: deadline exceeded')
+
+    (표준출력에도 찍습니다 — 실행 중에 바로 보이라고. 다만 그것만으로는
+     다음 실행에서 덮이므로 detail 을 함께 돌려줍니다.)
     """
-    # LLM 추출
     try:
         result = llm_extractor_fn(text)
         if result:
-            return result, "llm"
+            return result, "llm", ""
     except Exception as e:
-        print(f"    ⚠️  LLM 추출 실패: {e}")
-        return [], "error"
+        detail = f"{type(e).__name__}: {e}"
+        print(f"    ⚠️  LLM 추출 실패: {detail}")
+        return [], "error", detail
 
-    return [], "empty"
+    return [], "empty", ""
 
 
 # ─── 3. 최단 경로 탐색 ────────────────────────────────────────────────────────
