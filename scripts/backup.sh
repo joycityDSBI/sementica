@@ -3,6 +3,7 @@
 # Semantica 백업 스크립트
 # 대상: Qdrant(벡터) + FalkorDB(그래프) + PostgreSQL(운영 로그)
 #       + Notion 페이지 캐시(.md) + 설정 파일(유닛·cron·departments.yaml)
+#       + 골든셋(holdout 은 다시 만들 수 없습니다)
 #
 # 2026-09-15: backup_to_gcs.sh 를 이 파일로 합쳤습니다. 두 스크립트가
 # 서로 다른 것을 백업하는데 cron 은 이 파일만 돌려서, **Notion 캐시와
@@ -306,6 +307,41 @@ backup_config() {
     ok "설정 파일 백업 완료 (${copied}개 + crontab)"
 }
 
+# ── 골든셋 ───────────────────────────────────────────────────────────────────
+# **holdout 은 다시 만들 수 없습니다.**
+#
+# 문항 자체는 재생성할 수 있지만, holdout 의 값어치는 "한 번도 보지 않은
+# 문항" 이라는 성질에서 나옵니다. 잃어버리고 새로 만들면 그 성질이 사라지고,
+# 그때까지 쌓은 기준선(dev 0.967 / holdout 0.967)과도 비교할 수 없게 됩니다.
+# 서버를 옮기거나 디스크가 날아갈 때 이것이 빠지면 **일반화를 잴 수단 자체를
+# 잃습니다.**
+#
+# 평가 결과(eval_result_*.json)도 함께 남깁니다 — 과거 회차와 비교하려면
+# 그 시점의 문항별 점수가 있어야 합니다.
+backup_golden_sets() {
+    log "골든셋·평가 결과 백업..."
+    local src="$ROOT_DIR/data/eval"
+    local dest="$BACKUP_DIR/eval"
+
+    if [[ ! -d "$src" ]]; then
+        warn "data/eval 없음 — 건너뜀"
+        return 0
+    fi
+    mkdir -p "$dest"
+    if ! cp -r "$src/." "$dest/"; then
+        err "골든셋 복사 실패"
+        return 1
+    fi
+    local n_golden n_result
+    n_golden=$(find "$dest" -name 'golden*.json' | wc -l)
+    n_result=$(find "$dest" -name 'eval_result_*.json' | wc -l)
+    log "  골든셋 ${n_golden}개 / 평가 결과 ${n_result}개"
+    if [[ "$n_golden" -eq 0 ]]; then
+        warn "골든셋 파일이 하나도 없습니다 — 경로를 확인하세요"
+    fi
+    ok "골든셋 백업 완료"
+}
+
 # ── GCS 업로드 ────────────────────────────────────────────────────────────────
 upload_gcs() {
     if [[ -z "$GCS_BUCKET" ]]; then
@@ -477,6 +513,7 @@ if $DO_FALKORDB; then run_step "FalkorDB"    backup_falkordb;     fi
 if $DO_POSTGRES; then run_step "PostgreSQL"  backup_postgres;     fi
 if $DO_FILES;    then run_step "Notion 캐시" backup_notion_cache; fi
 if $DO_FILES;    then run_step "설정 파일"   backup_config;       fi
+if $DO_FILES;    then run_step "골든셋"     backup_golden_sets;  fi
 
 run_step "GCS 업로드" upload_gcs
 cleanup_old_backups

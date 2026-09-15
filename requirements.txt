@@ -1,7 +1,7 @@
 # Semantica 인제스천 파이프라인 의존성
 # 설치:
-#   pip install semantica==0.6.6 --no-deps
-#   pip install -r requirements.txt
+#   pip install -r requirements.lock.txt      ← 운영·이전 시 (고정 버전)
+#   pip install -r requirements.txt           ← 새로 올릴 때만
 
 # ── Vertex AI / Claude ────────────────────────────────────────────────────────
 anthropic[vertex]>=0.40.0
@@ -22,18 +22,25 @@ redis>=5.0.0
 #  범위를 열어둘 이유가 없습니다.)
 fastmcp>=4.0.0,<5.0.0
 
-# ── Semantica 프레임워크 (엔티티 중복 제거 / NER·RE fallback) ─────────────────
-# graph-falkordb 번들: FalkorDB 백엔드 + NER/RE 포함
-semantica[graph-falkordb]
+# ── Semantica 프레임워크 — **제거됨** (2026-09-15) ────────────────────────────
+# NER/RE fallback 은 쓰지 않습니다. 거리 기반 관계 추출이라 한국어 업무 문서에서
+# 모든 엔티티 쌍에 관계를 만들어 노이즈가 과했습니다
+# (semantica_helper.extract_with_fallback 주석 참고).
+#
+# 남아 있던 유일한 쓰임은 ingest.py 의 QdrantStore 래퍼였는데, sync.py 는 이미
+# qdrant_client 를 직접 쓰고 있었습니다. 래퍼가 하던 일은 connect /
+# create_collection / upsert 셋뿐이라 직접 호출로 바꿨습니다.
+#
+# 제거한 실질적 이유: semantica 가 NER 용으로 gensim 을 끌어오는데, Python 3.14
+# 에서 gensim 휠 빌드가 실패해 **서버 이전 시 설치가 막혔습니다.** 쓰지도 않는
+# 기능의 의존성 때문에 설치가 안 되는 상태였습니다.
 
 # ── 운영 로그 (PostgreSQL) ────────────────────────────────────────────────────
 psycopg2-binary>=2.9.0
 
-# ── NLP / 엔티티 추출 ────────────────────────────────────────────────────────
-spacy>=3.7.0                      # Semantica NER/RE ML fallback 필수
-# spaCy 언어 모델은 pip install 후 아래 명령으로 별도 설치:
-#   python -m spacy download en_core_web_sm      # 영문
-#   python -m spacy download ko_core_news_sm     # 한국어
+# ── NLP — **제거됨** (2026-09-15) ────────────────────────────────────────────
+# spacy 는 Semantica NER/RE 전용이었습니다. 그 경로를 쓰지 않으므로 함께
+# 뺍니다. 트리플 추출은 전부 LLM 이 합니다.
 
 # ── 유틸 ──────────────────────────────────────────────────────────────────────
 httpx>=0.24.0

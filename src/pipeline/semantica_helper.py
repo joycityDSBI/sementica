@@ -53,36 +53,6 @@ except ImportError:
         return ""
 
 
-# ─── Semantica 가용 여부 자동 감지 ──────────────────────────────────────────────
-_SEM_AVAILABLE = False  # Semantica 패키지 설치 여부
-_KOREAN_OK = False  # 한국어 엔티티 인식 가능 여부
-_sem_checked = False  # 한 번만 체크
-
-
-def _check_semantica_once():
-    """최초 1회만 Semantica 설치/한국어 지원 여부를 확인."""
-    global _SEM_AVAILABLE, _KOREAN_OK, _sem_checked
-    if _sem_checked:
-        return
-    _sem_checked = True
-    try:
-        from semantica.semantic_extract import NamedEntityRecognizer
-
-        _SEM_AVAILABLE = True
-        # 한국어 테스트 문장
-        ner = NamedEntityRecognizer(confidence_threshold=0.4)
-        result = ner.extract_entities("김도형 팀장이 운영팀의 점검 프로세스를 담당한다.")
-        _KOREAN_OK = len(result) > 0
-        status = "한국어 지원 ✅" if _KOREAN_OK else "한국어 미지원 ⚠️ (영문만 가능)"
-        print(f"  [Semantica] NER/RE 감지됨 — {status}")
-    except ImportError:
-        print(
-            "  [Semantica] 패키지 없음 — fallback 비활성화 (pip install semantica[graph-falkordb])"
-        )
-    except Exception as e:
-        print(f"  [Semantica] 초기화 실패: {e}")
-
-
 # ─── 0-b. 임베딩 배치 분할 ───────────────────────────────────────────────────
 # Vertex 임베딩은 **요청당 총 토큰**이 제한됩니다(현재 20,000). 개수만 보고
 # 묶으면 한도를 넘습니다 — 실측: 800자 청크 50개가 24,608토큰으로 400 을 받아,
@@ -296,140 +266,16 @@ def merge_node(graph, entity_name: str, entity_type: str, source_url: str) -> in
         return -1
 
 
-# ─── 2. LLM 추출 실패 시 Semantica NER/RE fallback ───────────────────────────
-
-# 의미있는 엔티티 타입만 허용 (날짜·숫자·컬럼명 제외)
-_VALID_NER_TYPES: frozenset = frozenset(
-    {
-        "PERSON",
-        "ORG",
-        "PRODUCT",
-        "FAC",
-        "WORK_OF_ART",
-        "EVENT",
-        "NORP",
-        "Entity",  # Semantica 기본 타입
-        "Team",
-        "System",
-        "Process",
-        "Policy",
-        "Document",
-        "Role",  # 커스텀 온톨로지 타입
-    }
-)
-_SKIP_NER_TYPES: frozenset = frozenset(
-    {
-        "DATE",
-        "TIME",
-        "CARDINAL",
-        "ORDINAL",
-        "PERCENT",
-        "MONEY",
-        "QUANTITY",
-        "LOC",
-        "GPE",  # 지명·국가는 업무 온톨로지에서 불필요
-    }
-)
-# 날짜/숫자 패턴 엔티티 이름 제외
-_DATE_NUM_RE = re.compile(
-    r"^\d+$"  # 순수 숫자
-    r"|^\d{4}[-/.년]\d{1,2}"  # YYYY-MM, YYYY년MM
-    r"|\d{1,2}시\s*\d{0,2}분?"  # 시각 (오전 5시 15분)
-    r"|^20\d{2}"  # 연도 단독 (2026 등)
-)
-
-
-def _is_valid_entity(name: str, etype: str) -> bool:
-    """노이즈 엔티티 필터: 날짜·숫자·빈 문자열·너무 짧은 이름 제외."""
-    name = name.strip()
-    if not name or len(name) < 2:
-        return False
-    if etype in _SKIP_NER_TYPES:
-        return False
-    return not _DATE_NUM_RE.search(name)
-
-
-def _semantica_extract(text: str) -> list:
-    """
-    Semantica NER + RelationExtractor 로 트리플 추출.
-    날짜·숫자·컬럼명 타입 엔티티는 필터링하여 노이즈 최소화.
-    한국어 미지원 시 빈 리스트 반환.
-    """
-    if not _SEM_AVAILABLE:
-        return []
-
-    def _attr(obj, *keys):
-        """dict 또는 Relation 객체에서 값 추출 (여러 키 시도)."""
-        for key in keys:
-            val = obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
-            if val is not None:
-                return val
-        return {}
-
-    def _text(obj) -> str:
-        """Entity/Span/dict/str 어느 형태든 텍스트 추출."""
-        if not obj:
-            return ""
-        if isinstance(obj, str):
-            return obj
-        if isinstance(obj, dict):
-            return obj.get("text") or obj.get("name") or ""
-        return getattr(obj, "text", None) or getattr(obj, "name", None) or str(obj)
-
-    def _etype(obj) -> str:
-        """엔티티 타입 추출 (dict / 객체 모두 처리)."""
-        if isinstance(obj, dict):
-            return obj.get("type", "Entity") or "Entity"
-        return getattr(obj, "type", None) or getattr(obj, "label_", None) or "Entity"
-
-    try:
-        from semantica.semantic_extract import NamedEntityRecognizer, RelationExtractor
-
-        # 한국어 처리 시 영문 모델 오분류 빈도 높음 → 신뢰도 임계값 상향
-        ner = NamedEntityRecognizer(confidence_threshold=0.6)
-        rel = RelationExtractor(confidence_threshold=0.6)
-
-        entities = ner.extract_entities(text[:3000])
-        if not entities:
-            return []
-
-        relations = rel.extract_relations(text[:3000], entities=entities)
-        triplets = []
-        for r in relations:
-            subj_raw = _attr(r, "subject", "head")
-            obj_raw = _attr(r, "object", "tail")
-            pred_raw = _attr(r, "predicate", "relation")
-
-            subj_name = _text(subj_raw)
-            obj_name = _text(obj_raw)
-            pred_name = _text(pred_raw)
-            subj_type = _etype(subj_raw)
-            obj_type = _etype(obj_raw)
-
-            if not subj_name or not obj_name or not pred_name:
-                continue
-
-            # 노이즈 엔티티 제거: 날짜·숫자·너무 짧은 이름
-            if not _is_valid_entity(subj_name, subj_type):
-                continue
-            if not _is_valid_entity(obj_name, obj_type):
-                continue
-
-            triplets.append(
-                {
-                    "subject": {"name": subj_name, "type": subj_type},
-                    "predicate": {"name": pred_name},
-                    "object": {"name": obj_name, "type": obj_type},
-                }
-            )
-
-        before = len(relations) if hasattr(relations, "__len__") else "?"
-        print(f"    [Semantica] 관계 {before}개 → 필터 후 {len(triplets)}개 트리플")
-        return triplets
-
-    except Exception as e:
-        print(f"    ⚠️  Semantica 추출 실패: {e}")
-        return []
+# ─── Semantica NER/RE — **제거됨** (2026-09-15) ──────────────────────────────
+# LLM 추출이 실패하면 Semantica 의 NER/RelationExtractor 로 대체하는 경로가
+# 있었습니다. 쓰지 않기로 한 지 오래고(extract_with_fallback 주석 참고: 거리
+# 기반 추출이라 한국어 업무 문서에서 모든 엔티티 쌍에 관계를 만들었습니다),
+# 호출하는 곳도 없었습니다.
+#
+# 코드를 지운 계기는 설치 실패입니다 — semantica 가 NER 용으로 gensim 을
+# 끌어오는데 Python 3.14 에서 휠 빌드가 안 됩니다. **쓰지도 않는 기능의
+# 의존성 때문에 서버 이전이 막혔습니다.** 죽은 코드는 자리만 차지하는 것이
+# 아니라 이렇게 발목을 잡습니다.
 
 
 def extract_with_fallback(llm_extractor_fn, text: str) -> tuple[list, str]:

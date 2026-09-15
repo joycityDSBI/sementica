@@ -302,41 +302,46 @@ def init_embed():
 
 
 def init_qdrant(reset: bool = False):
+    """Qdrant 연결 + 컬렉션 준비.
+
+    qdrant_client 를 직접 씁니다. 예전에는 semantica 의 QdrantStore 래퍼를
+    썼는데, 그 패키지가 NER/RE 용으로 gensim 을 끌어옵니다 —
+    **정작 NER/RE 는 쓰지 않습니다**(extract_with_fallback 주석 참고: 거리 기반
+    관계 추출이라 한국어 업무 문서에서 노이즈가 과했습니다). 쓰지도 않는 기능의
+    의존성 때문에 Python 3.14 에서 gensim 휠 빌드가 실패해 설치가 막혔습니다.
+
+    래퍼가 하던 일은 connect / create_collection / insert_vectors 넷뿐이고,
+    sync.py 는 이미 qdrant_client 로 같은 일을 하고 있었습니다. 두 파이프라인이
+    같은 방식으로 쓰게 되어 동작도 맞춰집니다.
+    """
     global _qdrant_store
     try:
-        from semantica.vector_store.qdrant_store import QdrantStore
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import Distance, VectorParams
 
-        store = QdrantStore(url=QDRANT_URL)
-        store.connect()
+        qc = QdrantClient(url=QDRANT_URL)
+        existing = {c.name for c in qc.get_collections().collections}
 
-        if reset:
-            try:
-                # 기존 컬렉션 삭제 (reset 모드)
-                from qdrant_client import QdrantClient
+        if reset and COLLECTION_NAME in existing:
+            qc.delete_collection(COLLECTION_NAME)
+            existing.discard(COLLECTION_NAME)
+            print(f"  🗑️  Qdrant 컬렉션 삭제: {COLLECTION_NAME}")
 
-                qc = QdrantClient(url=QDRANT_URL)
-                if COLLECTION_NAME in [c.name for c in qc.get_collections().collections]:
-                    qc.delete_collection(COLLECTION_NAME)
-                    print(f"  🗑️  Qdrant 컬렉션 삭제: {COLLECTION_NAME}")
-            except Exception:
-                pass
-
-        try:
-            store.create_collection(COLLECTION_NAME, vector_size=EMBED_DIM, distance="Cosine")
+        if COLLECTION_NAME in existing:
+            print(f"  ✅ Qdrant 컬렉션 기존 사용: {COLLECTION_NAME}")
+        else:
+            qc.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
+            )
             print(f"  ✅ Qdrant 컬렉션 생성: {COLLECTION_NAME}")
-        except Exception as ce:
-            if "already exists" in str(ce).lower() or "409" in str(ce):
-                # 기존 컬렉션 재사용 — 내부 상태 초기화를 위해 get_collection 호출
-                store.get_collection(COLLECTION_NAME)
-                print(f"  ✅ Qdrant 컬렉션 기존 사용: {COLLECTION_NAME}")
-            else:
-                raise
-        _qdrant_store = store
+
+        _qdrant_store = qc
         print(f"  ✅ Qdrant 연결 완료 — 컬렉션: {COLLECTION_NAME}")
         return True
     except Exception as e:
         print(f"  ❌ Qdrant 연결 실패: {e}")
-        print("     → Docker Desktop 실행 후 'docker-compose up -d' 확인")
+        print("     → 'docker compose up -d' 로 Qdrant 가 떠 있는지 확인하세요")
         return False
 
 
@@ -616,13 +621,15 @@ def store_vector(page: dict) -> int:
         print(f"     ⚠️  임베딩 배치 실패: {e}")
         raise
 
-    # 2. 전체 ID·페이로드 구성
-    all_ids = []
-    all_payloads = []
-    for i, chunk in enumerate(chunks):
-        all_ids.append(str(uuid.uuid5(uuid.NAMESPACE_URL, f"{base_url}#chunk{i}")))
-        all_payloads.append(
-            {
+    # 2. 포인트 구성 — sync.py 와 같은 형태입니다 (같은 컬렉션에 쓰므로
+    #    payload 키가 어긋나면 검색이 한쪽 데이터만 찾게 됩니다)
+    from qdrant_client.models import PointStruct
+
+    points = [
+        PointStruct(
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{base_url}#chunk{i}")),
+            vector=vec,
+            payload={
                 "title": meta.get("title", ""),
                 "source_url": meta.get("notion_url", ""),
                 "page_id": meta.get("page_id", ""),
@@ -630,17 +637,15 @@ def store_vector(page: dict) -> int:
                 "chunk_index": i,
                 "chunk_total": len(chunks),
                 "file": page["file"],
-            }
+            },
         )
+        for i, (chunk, vec) in enumerate(zip(chunks, vecs, strict=True))
+    ]
 
     # 3. 한 번에 Qdrant 저장 (락으로 동시 쓰기 보호)
     try:
         with _qdrant_lock:
-            _qdrant_store.insert_vectors(
-                vectors=vecs,
-                ids=all_ids,
-                payloads=all_payloads,
-            )
+            _qdrant_store.upsert(collection_name=COLLECTION_NAME, points=points)
         return len(chunks)
     except Exception as e:
         print(f"     ⚠️  Qdrant 배치 저장 실패: {e}")
